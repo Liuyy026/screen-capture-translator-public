@@ -1,0 +1,7 @@
+mokuro==0.2.0
+transformers==4.44.2
+torch==2.5.1
+setuptools<81
+numpy==1.26.4
+opencv-python==4.11.0.86
+scipy==1.15.3
