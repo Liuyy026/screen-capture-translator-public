@@ -1,0 +1,21 @@
+# Install torch and torchvision from the cu128 index first; this file contains the shared OCR stack.
+mokuro==0.2.0
+manga-ocr==0.1.16
+transformers==4.45.2
+opencv-python==4.11.0.86
+scipy==1.15.3
+numpy==1.26.4
+certifi==2026.7.22
+charset-normalizer==3.5.1
+colorama==0.4.6
+fire==0.7.1
+fugashi==1.5.2
+jaconv==0.5.0
+loguru==0.7.3
+natsort==8.4.0
+pyclipper==1.4.0
+pyperclip==1.11.0
+shapely==2.1.2
+tokenizers==0.20.3
+unidic-lite==1.0.8
+yattag==1.16.1
