@@ -27,7 +27,19 @@ if not exist "%OLLAMA%" (
 )
 set "OLLAMA_HOST=127.0.0.1:11439"
 set "OLLAMA_NO_CLOUD=1"
-if exist "%PROJECT%\.models\ollama" set "OLLAMA_MODELS=%PROJECT%\.models\ollama"
+set "OLLAMA_MAX_LOADED_MODELS=1"
+set "OLLAMA_NUM_PARALLEL=1"
+rem KOMA_OLLAMA_MODELS can point to a shared Ollama store. The project path
+rem remains the default so an existing junction works without extra settings.
+set "MODEL_ROOT=%KOMA_OLLAMA_MODELS%"
+if not defined MODEL_ROOT set "MODEL_ROOT=%OLLAMA_MODELS%"
+if not defined MODEL_ROOT set "MODEL_ROOT=%PROJECT%\.models\ollama"
+if exist "%MODEL_ROOT%\manifests\" (
+  set "OLLAMA_MODELS=%MODEL_ROOT%"
+  >>"%LOG%" echo Ollama model store: "%OLLAMA_MODELS%"
+) else (
+  >>"%LOG%" echo Ollama model store is missing manifests: "%MODEL_ROOT%"
+)
 set "LISTENING="
 for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -Command "$x=Get-NetTCPConnection -LocalPort 11439 -State Listen -ErrorAction SilentlyContinue; if($x){'yes'}"`) do set "LISTENING=%%I"
 if not defined LISTENING if defined OLLAMA (
