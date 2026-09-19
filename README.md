@@ -1,5 +1,7 @@
 # Koma · 本地漫画翻译
 
+简体中文 | [English](README.en.md)
+
 项目进度、修改指导和开发计划已统一整理至 [进度汇总](进度汇总/README.md)，当前七项目标状态见 [当前进度](进度汇总/当前进度_2026-09-14.md)。进度文档已纳入本仓库；模型和原始评测产物保留在本地。
 
 Koma 是一个本地运行的漫画翻译工具：打开包含图片的文件夹，自动检测漫画文字，用 Manga OCR 识别日文，再通过本机 Ollama 和 Qwen3 翻译成简体中文。项目包含 macOS 原生 SwiftUI 阅读器和 Windows PySide6 验证版，共用同一套 Python 后端。
@@ -11,6 +13,8 @@ Koma 是一个本地运行的漫画翻译工具：打开包含图片的文件夹
 - 可在右侧修改日文或中文；手动保存的中文不会被批量翻译覆盖。
 - 支持单句重新翻译、整文件夹批处理、取消任务和缓存复用。
 - 原图保持只读，识别结果、译文、错误状态和覆盖区域写入本地缓存。
+
+以上编辑保存、单句重译和整文件夹批处理已有 macOS 界面入口。Windows 验证版目前支持单页处理、停止、缓存读取和结构诊断，右侧结果区仍为只读；编辑、重译和文件夹队列入口尚待接入。英文 README 仅提供英文说明，应用界面和翻译目标仍为中文。
 
 ## macOS 启动
 
@@ -48,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\migrate_ollama_models.ps1 -Ap
 .\启动Windows.bat --check
 ```
 
-启动成功后会看到 **Koma 漫画翻译 - Windows 验证版**。最小验证流程：打开项目内 `samples` 文件夹，选中 `01.webp`，点击「识别并翻译」，等待状态变为「完成」，右侧应显示 5 条日文及其中文译文。
+启动成功后会看到 **Koma · 本地漫画翻译** 窗口。最小验证流程：打开项目内 `samples` 文件夹，选中 `01.webp`，点击「识别并翻译」，等待状态变为「完成」，右侧应显示 5 条日文及其中文译文。
 
 如果双击后没有窗口，先查看 `.runtime\windows-launch.log`。启动器会区分 Python 运行时失败、PySide6 加载失败和应用自身错误。
 
@@ -123,7 +127,7 @@ python backend\worker.py --image page.webp --operation translate --translation-u
 
 固定 62 页的 v5 结果与局限见 [结构与翻译评估记录](docs/structure-evaluation-2026-09-14.md)。v5 A/B 中对白模式自动完整率为 589/604（97.5%），逐块模式为 543/604（89.9%）；默认仍为逐块模式，因为自动完整率不等于语义准确率。
 
-分镜 v5 的快速回归可用 `scripts\\run_translation_ab.py ... --limit 3`，再运行 `scripts\\render_translation_ab.py`。当前 3 页回归中对白单元自动完成率为 16/17，逐块为 15/17；两组均无轮廓外绘制像素。该数字只用于协议和排版回归。
+分镜 v5 的快速回归可用 `python scripts/run_translation_ab.py <原始缓存目录> <图片目录> <新的输出目录> --limit 3`，再运行 `python scripts/render_translation_ab.py <输出目录>`。历史 3 页回归中对白单元自动完成率为 16/17，逐块为 15/17；两组均无轮廓外绘制像素。该数字只用于协议和排版回归。
 
 人工结构标注可先运行 `python scripts/annotate_structure.py <缓存页.json> <标注.json> --init`，在模板中填写 `expected_dialogues`、`expected_panel_order` 或按块填写 `expected_block_attributes`（`vertical`/`text_kind`），再用 `--score` 计算严格精确匹配率、顺序无关的最佳 Jaccard 覆盖率和属性字段准确率。已有标注文件默认不会被 `--init` 覆盖，确需重建时显式加 `--force`。未填写的模板不会生成虚假的准确率；两类指标分别保留，不能互相替代。
 
@@ -197,11 +201,11 @@ Windows：
 ## 当前验证结果与限制
 
 - macOS 原生应用已编译并本地签名；Windows 阅读器可通过启动器运行。
-- Windows 基础环境已通过 `pip check`，当前项目 51 项 Python 单元测试通过。
+- Windows 基础环境此前通过 `pip check`；2026-09-19 上传前在 `.venv-cuda` 环境完成 93 项 Python 回归测试，全部通过。
 - 两张自制 WebP 测试页已完成 OCR → Qwen3 4B 翻译，横排和竖排流程均通过。
 - Windows RTX 5070 环境中 Manga OCR 日志显示 `Using CUDA`，Ollama 模型进程显示 GPU 使用；`samples/01.webp` 已识别出 5 个文字框，4B 和 8B 均返回 5 条有效译文。
 - 输出按本次真实编号校验；占位文字、空译文、重复编号和漏译会明确标错，旧缓存和手动编辑会被保留。
-- 尚未用真实漫画系统评估。竖排、手写、拟声词、低清图片及跨分镜阅读顺序可能出错。
+- 已完成固定 62 页真实漫画的自动 A/B 与布局评估，但尚未完成足量独立标注和人工语义验收。竖排、手写、拟声词、低清图片及跨分镜阅读顺序仍可能出错，已知第 16、24 页存在结构问题。
 - 中文模式是白底覆盖，不是无痕擦字或专业汉化排版；暂不支持补框/拆框、跨页人物记忆、术语表、导出汉化图片、ZIP/PDF 和子文件夹递归。
 - 本地模型可能拒译、误译或返回格式错误；程序保留原文和错误信息，不保证即时或必然得到有效译文。
 
