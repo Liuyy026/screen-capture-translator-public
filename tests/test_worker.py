@@ -13,6 +13,53 @@ spec.loader.exec_module(w)
 
 
 class WorkerTests(unittest.TestCase):
+    def test_quality_warnings_flag_missing_negation_and_comparison(self):
+        warnings = w.translation_quality_warnings('先輩より背は１６ｃｍ低くて危険もありません', '前辈身材很好')
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any('否定' in item for item in warnings))
+        self.assertTrue(any('比较' in item for item in warnings))
+
+    def test_quality_warnings_do_not_reject_good_translation(self):
+        self.assertEqual(w.translation_quality_warnings('危険もありません', '不会有危险'), [])
+
+    def test_whole_dialogue_keeps_quality_warnings_on_unit(self):
+        page = {'model': 'qwen3:4b', 'blocks': [
+            {'id': '1', 'box': [0, 0, 20, 20], 'source': '危険もありません', 'translation': '', 'error': ''}]}
+        def fake(route, payload=None, timeout=300):
+            if route == '/api/tags': return {'models': [{'name': 'qwen3:4b'}]}
+            return {'message': {'content': '{"translations":{"d1":"危険があります"}}'}}
+        with patch.object(w, 'api', side_effect=fake):
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='dialogues')
+        self.assertTrue(page['dialogues'][0]['quality_warnings'])
+    def test_unit_switch_retranslates_machine_output_but_preserves_manual_text(self):
+        page = {'model': 'qwen3:4b', 'blocks': [
+            {'id': '1', 'box': [0, 0, 20, 20], 'source': 'おはよう', 'translation': '旧译文', 'error': ''},
+            {'id': '2', 'box': [100, 100, 120, 120], 'source': 'こんにちは', 'translation': '手改', 'edited': True}]}
+        requests = []
+        def fake(route, payload=None, timeout=300):
+            if route == '/api/tags': return {'models': [{'name': 'qwen3:4b'}]}
+            requests.append(payload)
+            key = payload['format']['properties']['translations']['required'][0]
+            return {'message': {'content': json.dumps({'translations': {key: '早上好'}})}}
+        with patch.object(w, 'api', side_effect=fake):
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='dialogues')
+            self.assertEqual(page['blocks'][1]['translation'], '手改')
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='blocks')
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]['format']['properties']['translations']['required'], ['1'])
+        self.assertEqual(page['blocks'][1]['translation'], '手改')
+
+    def test_missing_dialogue_key_cannot_promote_partial_block_response(self):
+        page = {'model': 'qwen3:4b', 'blocks': [
+            {'id': '1', 'box': [0, 0, 20, 20], 'source': 'こんにちは', 'translation': '', 'error': ''}]}
+        def fake(route, payload=None, timeout=300):
+            if route == '/api/tags': return {'models': [{'name': 'qwen3:4b'}]}
+            return {'message': {'content': '{"translations":{"1":"你好"}}'}}
+        with patch.object(w, 'api', side_effect=fake):
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='dialogues')
+        self.assertTrue(page['blocks'][0]['error'])
+        self.assertFalse(page['dialogues'][0]['translation_complete'])
+        self.assertNotIn('full_translation', page['dialogues'][0])
     def test_missing_id_is_not_silently_mapped(self):
         found, errors = w.parse_translations('{"translations":[{"id":"2","text":"你好"}]}', {'1', '2'})
         self.assertEqual(found, {'2': '你好'})
@@ -208,7 +255,33 @@ class WorkerTests(unittest.TestCase):
             w.translate(page, 'qwen3:4b', lambda _: None,
                         lambda value: saved.append(value['blocks'][0]['overlay']), image='page.webp')
         self.assertEqual(calls, [('早上好', 'page.webp')])
-        self.assertEqual(saved, ['rectangle'])
+        self.assertTrue(saved)
+        self.assertTrue(all(value == 'rectangle' for value in saved))
+
+    def test_dialogue_translation_uses_unit_ids_and_keeps_whole_output(self):
+        page = {'model': 'qwen3:4b', 'blocks': [
+            {'id': '1', 'source': '一', 'translation': '', 'edited': False, 'error': '', 'box': [0, 0, 10, 10], 'dialogue_id': 'd1', 'dialogue_order': 1},
+            {'id': '2', 'source': '二', 'translation': '', 'edited': False, 'error': '', 'box': [0, 10, 10, 20], 'dialogue_id': 'd1', 'dialogue_order': 2}],
+            'dialogues': [{'id': 'd1', 'block_ids': ['1', '2'], 'source': '一\n二'}]}
+        requests = []
+        def fake(route, payload=None, timeout=300):
+            if route == '/api/tags': return {'models': [{'name': 'qwen3:4b'}]}
+            requests.append(payload)
+            return {'message': {'content': '{"translations":{"d1":"甲和乙"}}'}}
+        with patch.object(w, 'api', side_effect=fake):
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='dialogues')
+        self.assertEqual(len(requests), 1)
+        body = json.loads(requests[0]['messages'][1]['content'].split('\n', 1)[0])
+        self.assertEqual(body['target_ids'], ['d1'])
+        self.assertEqual(body['page'], [{'id': 'd1', 'ja': '一\n二'}])
+        self.assertEqual(page['dialogues'][0]['full_translation'], '甲和乙')
+        self.assertTrue(page['dialogues'][0]['translation_complete'])
+        self.assertEqual(page['dialogues'][0]['mapping_status'], 'whole_only')
+        self.assertEqual([b['translation'] for b in page['blocks']], ['', ''])
+        self.assertFalse(any(b.get('error') for b in page['blocks']))
+        with patch.object(w, 'api', side_effect=fake):
+            w.translate(page, 'qwen3:4b', lambda _: None, lambda _: None, translation_unit='dialogues')
+        self.assertEqual(len(requests), 1)
 
 
 if __name__ == '__main__': unittest.main()

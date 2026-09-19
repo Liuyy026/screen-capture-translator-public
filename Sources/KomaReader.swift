@@ -33,8 +33,8 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     @Published var selectedBlock: String?
     @Published var displayMode = 1
     @Published var zoom = 1.0
-    @Published var model = "qwen3:4b"
-    @Published var availableModels: [String] = ["qwen3:4b"]
+    @Published var model = "qwen3:4b-q6k"
+    @Published var availableModels: [String] = ["qwen3:4b-q6k"]
     @Published var engineReady = false
     @Published var queueTotal = 0
     @Published var queueDone = 0
