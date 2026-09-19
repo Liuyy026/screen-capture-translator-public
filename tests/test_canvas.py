@@ -72,6 +72,39 @@ class CanvasTests(unittest.TestCase):
         page["overlay_regions"][0]["block_ids"].append("2")
         self.install(page)
         np.testing.assert_array_equal(self.pixels(0), self.pixels(2))
+        self.assertEqual(self.canvas._layout_failures, {})
+        self.assertIn('1', self.canvas._layout_pending)
+
+    def test_complete_dialogue_requires_exact_region_members(self):
+        from backend.structure import build_dialogues, sync_dialogue_translations
+        page = self.page(text="")
+        page['blocks'].append({'id': '2', 'box': [120, 60, 140, 110],
+                               'source': 'other', 'translation': '', 'overlay': 'balloon'})
+        page['overlay_regions'][0]['block_ids'].append('2')
+        d = build_dialogues(page)[0]
+        d.update(full_translation='我们一起回家吧。', mapping={'1': '', '2': ''}, mapping_status='whole_only')
+        sync_dialogue_translations(page)
+        self.assertEqual(self.canvas._group_translation(page['blocks']), ['我们一起回家吧。'])
+        self.assertIsNone(self.canvas._group_translation(page['blocks'][:1]))
+        self.install(page)
+        self.assertTrue(np.any(self.pixels(0) != self.pixels(2)))
+        page['blocks'][1]['edited'] = True
+        sync_dialogue_translations(page)
+        self.install(page)
+        np.testing.assert_array_equal(self.pixels(0), self.pixels(2))
+
+    def test_full_dialogue_does_not_hide_untranslated_extra_member(self):
+        members = [{'id': '1', 'dialogue_id': 'd1', 'dialogue_translation': '你好',
+                    'dialogue_translation_complete': True, 'dialogue_member_ids': ['1'],
+                    'translation': ''}, {'id': '2', 'translation': ''}]
+        self.assertIsNone(self.canvas._group_translation(members))
+
+    def test_flagged_ocr_box_outside_trusted_region_never_paints(self):
+        page = self.page()
+        page['overlay_regions'] = []
+        page['blocks'][0].update(layout_fallback='block', overlay='uncertain')
+        self.install(page)
+        np.testing.assert_array_equal(self.pixels(0), self.pixels(2))
 
     def test_erase_polygons_preserve_nontext_art_inside_bubble(self):
         page = self.page()

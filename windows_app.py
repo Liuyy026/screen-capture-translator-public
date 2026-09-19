@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from backend.overlay import ensure_page_overlays
+from backend.structure import ensure_dialogues
 
 IMAGE_EXTS = {".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -62,10 +63,14 @@ class ImageCanvas(QWidget):
         self._overlay_content_signature: str | None = None
         self._overlay_metadata: list[dict] = []
         self._overlay_layouts: dict[str, dict] = {}
+        self._layout_failures: dict[str, str] = {}
+        self._layout_pending: dict[str, str] = {}
+        self._panels: list[dict] = []
         self.setCursor(Qt.OpenHandCursor)
         self.setStyleSheet("background:#a7a9aa; border-radius:8px;")
 
     def set_image(self, pixmap: QPixmap):
+        self._panels = []
         self.pixmap = pixmap
         self._gray = None
         self.blocks = []
@@ -104,7 +109,8 @@ class ImageCanvas(QWidget):
         }, ensure_ascii=False, sort_keys=True)
         content_signature = json.dumps([
             [block.get("id"), block.get("translation", ""), block.get("error", ""),
-             block.get("edited", False)] for block in blocks
+             block.get("edited", False), block.get("dialogue_translation"),
+             block.get("dialogue_translation_complete"), block.get("dialogue_member_ids")] for block in blocks
         ], ensure_ascii=False, sort_keys=True)
         if signature != self._overlay_signature:
             page = page if page is not None else {"blocks": blocks}
@@ -129,13 +135,25 @@ class ImageCanvas(QWidget):
         """Install a cache page and compute/migrate overlay metadata once."""
         page = page or {"blocks": []}
         ensure_page_overlays(page, gray=self._gray)
+        ensure_dialogues(page, gray=self._gray)
+        self._panels = page.get('panels', [])
         self.set_blocks(page.get("blocks", []), page=page, _overlays_ready=True)
 
     @staticmethod
     def _group_translation(members: list[dict]) -> list[str] | None:
         """Return all usable group translations, or None for a partial group."""
+        complete = {str(block.get("dialogue_translation")) for block in members
+                    if block.get("dialogue_translation_complete") and block.get("dialogue_translation")}
+        member_ids = {str(b.get("id")) for b in members}
+        if (len(complete) == 1 and len({b.get("dialogue_id") for b in members}) == 1
+                and all(b.get("dialogue_translation_complete") and not b.get("edited")
+                        and not b.get("error") and b.get("overlay") != "skip"
+                        and set(b.get("dialogue_member_ids", [])) == member_ids for b in members)):
+            return [next(iter(complete))]
         values = []
         for block in members:
+            if block.get("overlay") == "skip":
+                return None
             text = (block.get("translation") or "").strip()
             edited = bool(block.get("edited"))
             if not text or (block.get("error") and not edited):
@@ -281,6 +299,8 @@ class ImageCanvas(QWidget):
         return None
 
     def _build_layouts(self) -> dict[str, dict]:
+        self._layout_failures = {}
+        self._layout_pending = {}
         if self.pixmap.isNull():
             return {}
         blocks_by_id = {str(block.get("id")): block for block in self.blocks}
@@ -291,16 +311,20 @@ class ImageCanvas(QWidget):
                 continue
             members = [blocks_by_id.get(str(block_id)) for block_id in region.get("block_ids", [])]
             if not members or any(block is None for block in members):
+                self._layout_pending[str(region.get('id'))] = '区域成员不存在；保留原图，需检查分组'
                 continue
             values = self._group_translation(members)
             if not values:
+                self._layout_pending[str(region.get('id'))] = '成员译文不完整，或完整对白与区域成员不匹配；尚未尝试排版，保留原图'
                 continue
             box = region.get("text_box") or []
             if len(box) != 4:
+                self._layout_failures[str(region.get('id'))] = '排版区域坐标无效；保留原图'
                 continue
             lx, ty, rx, by = [float(value) for value in box]
             width, height = rx - lx, by - ty
             if width <= 0 or height <= 0:
+                self._layout_failures[str(region.get('id'))] = '排版区域尺寸无效；保留原图'
                 continue
             rect = QRectF(lx, ty, width, height).adjusted(1, 1, -1, -1)
             text, cjk_vertical = self._vertical_text(values)
@@ -328,6 +352,8 @@ class ImageCanvas(QWidget):
                 layouts[str(region.get("id"))] = {
                     **layout, "text": text, "text_box": (lx, ty, rx, by),
                     "draw_box": (rect.x(), rect.y(), rect.width(), rect.height())}
+            else:
+                self._layout_failures[str(region.get('id'))] = '缩小字号及调整换行后仍无法容纳译文；保留原图'
         return layouts
 
     def set_mode(self, mode: int):
@@ -419,7 +445,8 @@ class ImageCanvas(QWidget):
             target = QRectF(rect.left() + x1 * sx, rect.top() + y1 * sy,
                             max(2, (x2 - x1) * sx), max(2, (y2 - y1) * sy))
             if self.mode == 1:
-                painter.setPen(QPen(QColor("#00a7b8"), max(2, int(2.2 * self.zoom))))
+                outline = "#e38b24" if block.get("layout_fallback") == "block" else "#00a7b8"
+                painter.setPen(QPen(QColor(outline), max(2, int(2.2 * self.zoom))))
                 painter.setBrush(QColor(255, 210, 74, 72))
                 painter.drawRoundedRect(target, 5, 5)
                 badge_w = min(34, max(24, target.width() * 0.24))
@@ -431,6 +458,34 @@ class ImageCanvas(QWidget):
                 badge_font.setPixelSize(max(11, int(badge_h * 0.58))); painter.setFont(badge_font)
                 painter.setPen(QColor("#ffffff"))
                 painter.drawText(QRectF(target.left(), target.top(), badge_w, badge_h), Qt.AlignCenter, str(block.get("id", "?")))
+        if self.mode == 1:
+            # Show detected bubble membership and direction on the inspection view.
+            painter.setBrush(Qt.NoBrush)
+            for region in self._overlay_regions:
+                points = region.get("points") or []
+                if len(points) < 3:
+                    continue
+                path = QPainterPath()
+                path.moveTo(rect.left() + points[0][0] * sx, rect.top() + points[0][1] * sy)
+                for px, py in points[1:]:
+                    path.lineTo(rect.left() + px * sx, rect.top() + py * sy)
+                path.closeSubpath()
+                painter.setPen(QPen(QColor("#7b3fb5"), max(1, int(1.5 * self.zoom)), Qt.DashLine))
+                painter.drawPath(path)
+                ids = ",".join(str(x) for x in region.get("block_ids", []))
+                label = f"气泡 {region.get('id', '?')} [{ids}] {'竖' if region.get('vertical') else '横'}"
+                bounds = path.boundingRect()
+                painter.setPen(QColor("#4a226d"))
+                painter.drawText(QRectF(bounds.left(), max(rect.top(), bounds.top() - 18), max(70, bounds.width()), 18), label)
+        if self.mode == 1:
+            painter.setBrush(Qt.NoBrush)
+            for panel in self._panels:
+                x1, y1, x2, y2 = panel['box']
+                bounds = QRectF(rect.left()+x1*sx, rect.top()+y1*sy, (x2-x1)*sx, (y2-y1)*sy)
+                painter.setPen(QPen(QColor('#148046'), 2, Qt.DashLine))
+                painter.drawRect(bounds.adjusted(1, 1, -1, -1))
+                painter.drawText(bounds.adjusted(4, 2, -4, -2), Qt.AlignTop | Qt.AlignLeft,
+                                 f"分镜候选 {panel['id']} · 顺序 {panel['reading_order']}")
         if self.mode == 2:
             # Fonts and wrapped lines are expressed in source-image units.
             # Scaling the painter preserves that layout at every zoom level.
@@ -476,6 +531,10 @@ class ImageCanvas(QWidget):
                 else:
                     painter.drawText(text_rect, layout["flags"], layout["text"])
                 painter.restore()
+            # A partial dialogue is intentionally left untouched here. The
+            # normal per-block fallback is selected by the caller only when a
+            # trusted region exists; painting an OCR rectangle would risk
+            # covering artwork and overflowing its bounds.
             painter.restore()
 
 
@@ -506,7 +565,9 @@ class Reader(QMainWindow):
         self.results.setMinimumWidth(390)
         self.results.setObjectName("results")
         self.model = QComboBox()
-        self.model.addItems(["qwen3:4b", "qwen3:8b"])
+        # Keep the locally validated Q6_K model as the primary choice while
+        # retaining the original models as explicit alternatives.
+        self.model.addItems(["qwen3:4b-q6k", "qwen3:4b", "qwen3:8b"])
         open_btn = QPushButton("📁  打开文件夹")
         open_btn.setObjectName("primary")
         open_btn.clicked.connect(self.open_folder)
@@ -681,14 +742,44 @@ class Reader(QMainWindow):
         except (OSError, json.JSONDecodeError) as exc:
             self.results.setPlainText(f"读取缓存失败：{exc}")
             return
+        ensure_dialogues(page)
         self.preview.set_page(page)
         # GUI migration stays in memory. The worker owns cache writes, so a
         # page opened while it is writing cannot be truncated by the reader.
         blocks = page.get("blocks", [])
         translated_count = sum(1 for block in blocks if block.get("translation") and not block.get("error"))
-        lines = ["对白对照", f"{len(blocks)} 处文字  ·  {translated_count} 处已翻译", "",
+        dialogues = page.get("dialogues", [])
+        diagnostics = page.get("diagnostics", {})
+        grouping_diag = diagnostics.get("grouping", {})
+        layout_diag = diagnostics.get("layout", {})
+        failure_diag = diagnostics.get("failures", {})
+        panel_order = page.get("structure", {}).get("panel_order", [])
+        lines = ["对白对照", f"{len(blocks)} 处文字 · {len(dialogues)} 个对白单元 · {translated_count} 处已翻译", "",
                  f"图片：{self.current.name if self.current else ''}",
-                 f"模型：{page.get('model') or '仅 OCR'}", ""]
+                 f"模型：{page.get('model') or '仅 OCR'}",
+                 f"结构诊断：{grouping_diag.get('dialogues', len(dialogues))} 单元 / 未分组 {grouping_diag.get('unassigned', 0)}",
+                 f"排版诊断：可信候选区域 {layout_diag.get('safe_regions', 0)} / 已排版 {len(self.preview._overlay_layouts)} / 前置条件未满足 {len(self.preview._layout_pending)}",
+                 f"失败归因：OCR 数据异常 {failure_diag.get('ocr', 0)} 块 · 分组 {failure_diag.get('grouping', 0)} · 翻译 {failure_diag.get('translation', 0)} 单元 · 排版 {len(self.preview._layout_failures)} 区域",
+                 f"尚待翻译或校验：{diagnostics.get('translation', {}).get('pending_dialogues', 0)} 单元",
+                 f"人工复核候选：分组 {failure_diag.get('grouping_review', grouping_diag.get('review_candidates', 0))}",
+                 f"分镜顺序：{', '.join(map(str, panel_order)) if panel_order else '未确认'}", ""]
+        if dialogues:
+            lines.append("对白单元（按阅读顺序）")
+            for dialogue in dialogues:
+                direction = "竖排" if dialogue.get("vertical") else "横排"
+                source = str(dialogue.get("source", "")).replace("\n", " / ")
+                translation = str(dialogue.get("translation", "")).replace("\n", " / ") or "暂无完整译文"
+                lines.append(f"{dialogue.get('id', '?')} · 分镜 {dialogue.get('panel_id') or '未确认'} · {direction} · 块 {','.join(map(str, dialogue.get('block_ids', [])))}")
+                lines.append(f"    {source} → {translation}")
+                if dialogue.get('quality_warnings'):
+                    lines.append(f"    语义提示：{'；'.join(dialogue['quality_warnings'])}")
+                if dialogue.get('mapping_status') == 'whole_only':
+                    lines.append('    回填：仅整句可用，尚无逐块拆分；成员完全匹配的安全区域可整体排版')
+            lines.append("")
+        for region_id, reason in self.preview._layout_failures.items():
+            lines.append(f'区域 {region_id} 排版：{reason}')
+        for region_id, reason in self.preview._layout_pending.items():
+            lines.append(f'区域 {region_id} 待处理：{reason}')
         for block in blocks:
             source = block.get("source", "").strip()
             raw_translation = block.get("translation", "").strip()
@@ -701,8 +792,14 @@ class Reader(QMainWindow):
             else:
                 translation = raw_translation if usable_translation(source, raw_translation) else "（暂无有效中文译文）"
             error = f"  [{block['error']}]" if block.get("error") else ""
-            lines.append(f"#{block.get('id', '?')}  {source}")
-            lines.append(f"    → {translation}{error}")
+            warnings = f"  [语义提示：{'；'.join(block.get('quality_warnings', []))}]" if block.get('quality_warnings') else ""
+            dialogue = block.get("dialogue_id", "?")
+            order = block.get("dialogue_order", "?")
+            kind = {"dialogue": "对白候选", "caption": "旁白候选", "noise": "空文本/人工排除",
+                    "page_text_candidate": "页面文字候选", "sfx_candidate": "拟声/短语候选",
+                    "utterance_candidate": "标点语气候选"}.get(block.get("text_kind"), "")
+            lines.append(f"#{block.get('id', '?')}  [{dialogue}:{order}]  {source} 〈{kind}〉")
+            lines.append(f"    → {translation}{error}{warnings}")
         if not blocks:
             lines.append("没有识别到文字")
         self.results.setPlainText("\n".join(lines))
