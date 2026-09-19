@@ -65,7 +65,7 @@ py -3.12 -m venv .venv
 - Manga OCR、Mokuro、Transformers、Torch、Torchvision、OpenCV、NumPy 和 SciPy 导入成功；Torch 张量计算和 OpenCV 基础操作通过。
 - 已额外创建 `.venv-cuda`，安装 `torch 2.7.1+cu128`、`torchvision 0.22.1+cu128` 及 OCR 依赖；RTX 5070 上 Manga OCR 日志显示 `Using CUDA`。Windows 阅读器会优先使用该环境。
 - OCR 模型已安装：Manga OCR 主权重约 424 MiB，Comic Text Detector 权重约 76 MiB；`samples/01.webp` 已成功识别出 5 个文字框。
-- Windows Ollama 0.34.0 已安装，项目服务运行在 `127.0.0.1:11439`，已下载并验证 `qwen3:4b`（约 2.5 GB）和 `qwen3:8b`（约 5.2 GB）。官方没有 `qwen3:9b` 标签，8B 是可用的近邻规格。
+- Windows Ollama 0.34.0 已安装，项目服务运行在 `127.0.0.1:11439`，当前默认模型为已验证的 `qwen3:4b-q6k`（Q6_K，约 3.3 GB）；`qwen3:4b` 和 `qwen3:8b` 仍可切换。官方没有 `qwen3:9b` 标签，8B 是可用的近邻规格。
 - 两个模型的 Ollama 进程均显示 `100% GPU`；RTX 5070 可用于翻译推理和 OCR。
 - `samples/01.webp` 已完成 OCR → 翻译：4B 和 8B 均返回了 5 条有效译文，并分别保存到 `.runtime/benchmarks/` 供比较。
 - 现有 SwiftUI/AppKit 界面与 `.command` 脚本仅适用于 macOS。Mac 与 Windows 可共用后端源码，但需要各自创建虚拟环境，并继续适配 Windows 界面、启动与打包流程。
@@ -82,6 +82,8 @@ py -3.12 -m venv .venv
 $env:OLLAMA_HOST = '127.0.0.1:11439'
 $env:OLLAMA_MODELS = (Resolve-Path '.models\ollama').Path
 $env:OLLAMA_NO_CLOUD = '1'
+$env:OLLAMA_MAX_LOADED_MODELS = '1'
+$env:OLLAMA_NUM_PARALLEL = '1'
 ollama serve
 ```
 
@@ -101,5 +103,3 @@ $env:OLLAMA_HOST = '127.0.0.1:11439'
 ollama list
 ollama ps
 ```
-
-
