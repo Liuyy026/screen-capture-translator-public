@@ -1,0 +1,105 @@
+{
+  "annotation": "New independent visual audit: upper right, upper left, bottom. Connected balloon lobes 1/2 form one unit; unframed text groups remain separate. Text-kind semantics not labeled.",
+  "reviewer_type": "assistant_visual_audit",
+  "image_sha256": "7aca30d8a93f7f5feaf90f700111377428b0dadd44e3334c3ce72ec1856c611b",
+  "panel_order": [
+    [
+      "1",
+      "2"
+    ],
+    [
+      "3"
+    ],
+    [
+      "4",
+      "5",
+      "6"
+    ]
+  ],
+  "dialogue_order": [
+    [
+      "1",
+      "2"
+    ],
+    [
+      "3"
+    ],
+    [
+      "4"
+    ],
+    [
+      "5"
+    ],
+    [
+      "6"
+    ]
+  ],
+  "blocks": [
+    {
+      "id": "1",
+      "box": [
+        961.0,
+        51.0,
+        1051.0,
+        208.0
+      ],
+      "vertical": true,
+      "source": "テスト1"
+    },
+    {
+      "id": "2",
+      "box": [
+        923.0,
+        274.0,
+        1039.0,
+        431.0
+      ],
+      "vertical": true,
+      "source": "テスト2"
+    },
+    {
+      "id": "3",
+      "box": [
+        253.0,
+        89.0,
+        428.0,
+        324.0
+      ],
+      "vertical": true,
+      "source": "テスト3"
+    },
+    {
+      "id": "4",
+      "box": [
+        960.0,
+        749.0,
+        1002.0,
+        1086.0
+      ],
+      "vertical": true,
+      "source": "テスト4"
+    },
+    {
+      "id": "5",
+      "box": [
+        81.0,
+        924.0,
+        128.0,
+        1138.0
+      ],
+      "vertical": true,
+      "source": "テスト5"
+    },
+    {
+      "id": "6",
+      "box": [
+        56.0,
+        1398.0,
+        143.0,
+        1651.0
+      ],
+      "vertical": true,
+      "source": "テスト6"
+    }
+  ]
+}
