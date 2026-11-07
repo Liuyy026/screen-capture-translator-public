@@ -4,6 +4,62 @@ from __future__ import annotations
 import base64
 
 
+def complete_vertical_strokes(gray, boxes, blocks, source_mask):
+    """Recover a detached text dash clipped by OCR, without extending scene lines.
+
+    Work on complete image components, never components cut at an OCR edge.
+    A partly detected dash needs positive detector evidence. A wholly missed
+    trailing dash must start at the OCR bottom and touch detected lettering.
+    Returned bounds and mask are disposable display inputs, not OCR edits.
+    """
+    import cv2
+    import numpy as np
+
+    if source_mask is None:
+        return boxes, source_mask
+    expanded = [list(box) if box is not None else None for box in boxes]
+    supplemented = source_mask.copy()
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((gray < 150).astype(np.uint8), 8)
+    distance = cv2.distanceTransform((source_mask == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    for label in range(1, count):
+        x, y, w, h, area = map(int, stats[label])
+        if not (2 <= w <= 10 and 35 <= h <= 180 and h >= 8*w and area >= h*.5):
+            continue
+        component = labels[y:y+h, x:x+w] == label
+        evidence = float(np.mean(source_mask[y:y+h, x:x+w][component] > 0))
+        nearby = float(distance[y:y+h, x:x+w][component].min())
+        around = gray[max(0, y-4):y+h+4, max(0, x-4):x+w+4]
+        border = np.ones(around.shape, bool)
+        by, bx = y-max(0, y-4), x-max(0, x-4)
+        border[by:by+h, bx:bx+w] = False
+        if not border.any() or np.mean(around[border]) < 225 or np.mean(around[border] >= 235) < .75:
+            continue
+        for index, (box, block) in enumerate(zip(boxes, blocks)):
+            translation = block.get("translation")
+            if (box is None or not block.get("vertical") or not isinstance(translation, str)
+                    or not translation.strip() or block.get("error")):
+                continue
+            a, b, c, d = box
+            extension = max(0, b-y) + max(0, y+h-d)
+            if not (a+(c-a)*.15 < x+w/2 < c-(c-a)*.15 and 8 < extension <= 160):
+                continue
+            overlap = min(y+h, d)-max(y, b)
+            detected_dash = overlap >= 2 and evidence >= .12
+            trailing_dash = -2 <= d-y <= min(6, h*.1) and nearby <= 3 and evidence == 0
+            if not (detected_dash or trailing_dash):
+                continue
+            # A rule/panel border must not acquire an adjacent dialogue's mask.
+            if any(other is not None and j != index and
+                   max(x, other[0]) < min(x+w, other[2]) and
+                   max(y, other[1]) < min(y+h, other[3]) for j, other in enumerate(boxes)):
+                continue
+            expanded[index][1] = min(expanded[index][1], max(0, y-2))
+            expanded[index][3] = max(expanded[index][3], min(gray.shape[0], y+h+2))
+            supplemented[y:y+h, x:x+w][component] = 255
+            break
+    return expanded, supplemented
+
+
 def _texture_fill(patch, ink):
     """Restore the smooth tone, then borrow aligned nearby screentone detail."""
     import cv2
@@ -163,6 +219,16 @@ def background_patch(gray, boxes, *, clip=None, textured=False, color=None, sour
         ink = ((source_mask[top:bottom, left:right] > 0) & (seeds > 0)).astype(np.uint8)
         # The detector can omit a long standalone Japanese dash. Recover
         # only narrow, fully contained strokes in a confirmed plain balloon.
+        # A transparent balloon may contain an unrelated clothing line in
+        # the same column. Do not use alignment alone to erase that line.
+        for index in np.flatnonzero(dashes):
+            if overlaps[index] >= stats[index, cv2.CC_STAT_AREA]*.98:
+                continue
+            x, y, w, h, _ = map(int, stats[index])
+            component = labels[y:y+h, x:x+w] == index
+            evidence = source_mask[top+y:top+y+h, left+x:left+x+w][component]
+            if np.mean(evidence > 0) < .12:
+                dashes[index] = 0
         ink |= dashes[labels]
         if ink.any():
             distance = cv2.distanceTransform(1-ink, cv2.DIST_L2, 5)

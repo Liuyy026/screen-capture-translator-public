@@ -5,7 +5,7 @@ import unittest
 import cv2
 import numpy as np
 
-from macos.backend.reading_background import background_patch
+from macos.backend.reading_background import background_patch, complete_vertical_strokes
 from macos.backend.reading_overlay import reading_regions
 
 
@@ -40,6 +40,51 @@ def narration_fixture():
 
 
 class ReadingBackgroundTests(unittest.TestCase):
+    def test_partly_detected_leading_dash_extends_display_only(self):
+        gray = np.full((300, 200), 255, np.uint8)
+        gray[25:115, 98:101] = 0
+        mask = np.zeros_like(gray)
+        mask[100:115, 98:101] = 255
+        boxes = [[75, 105, 125, 240]]
+        blocks = [{"vertical": True, "translation": "给你……"}]
+        original = mask.copy()
+        expanded, supplemented = complete_vertical_strokes(gray, boxes, blocks, mask)
+        self.assertEqual(expanded, [[75, 23, 125, 240]])
+        self.assertTrue(np.all(supplemented[25:115, 98:101] == 255))
+        self.assertEqual(boxes, [[75, 105, 125, 240]])
+        np.testing.assert_array_equal(mask, original)
+
+    def test_missing_trailing_dash_requires_adjacent_detected_text(self):
+        gray = np.full((300, 200), 255, np.uint8)
+        gray[90:118, 90:110] = 0
+        gray[119:200, 98:101] = 0
+        mask = np.zeros_like(gray)
+        mask[90:118, 90:110] = 255
+        boxes = [[75, 60, 125, 120]]
+        blocks = [{"vertical": True, "translation": "一直……"}]
+        expanded, supplemented = complete_vertical_strokes(gray, boxes, blocks, mask)
+        self.assertEqual(expanded, [[75, 60, 125, 202]])
+        self.assertEqual(supplemented[180, 99], 255)
+        # OCR may include the first few pixels of the trailing stroke.
+        partly_clipped, _ = complete_vertical_strokes(gray, [[75, 60, 125, 125]], blocks, mask)
+        self.assertEqual(partly_clipped, [[75, 60, 125, 202]])
+        distant_mask = mask.copy()
+        distant_mask[100:] = 0
+        unchanged, _ = complete_vertical_strokes(gray, boxes, blocks, distant_mask)
+        self.assertEqual(unchanged, boxes)
+
+    def test_undetected_crossing_scene_line_does_not_extend_source_bounds(self):
+        gray = np.full((300, 200), 255, np.uint8)
+        gray[90:118, 90:110] = 0
+        gray[119:200, 98:101] = 0
+        mask = np.zeros_like(gray)
+        mask[90:118, 90:110] = 255
+        boxes = [[75, 60, 125, 145]]
+        blocks = [{"vertical": True, "translation": "我是"}]
+        expanded, supplemented = complete_vertical_strokes(gray, boxes, blocks, mask)
+        self.assertEqual(expanded, boxes)
+        np.testing.assert_array_equal(supplemented, mask)
+
     def test_narration_groups_in_reading_order_without_changing_page_or_image(self):
         page, gray = narration_fixture()
         before, original = copy.deepcopy(page), gray.copy()
@@ -152,6 +197,18 @@ class ReadingBackgroundTests(unittest.TestCase):
         x, y, _, _ = region["background_box"]
         self.assertGreater(patch[100-y, 100-x, 0], 240)
         self.assertEqual(patch[100-y, 100-x, 3], 255)
+
+    def test_aligned_clothing_line_beyond_ocr_is_not_erased_in_balloon(self):
+        gray = np.full((300, 200), 255, np.uint8)
+        gray[90:108, 90:110] = 0
+        gray[119:200, 98:101] = 0
+        source_mask = np.zeros_like(gray)
+        source_mask[90:108, 90:110] = 255
+        region = background_patch(gray, [[75, 60, 125, 125]],
+                                  clip=(np.ones_like(gray), (0, 0)), source_mask=source_mask)
+        patch = decode(region)
+        x, y, _, _ = region["background_box"]
+        self.assertEqual(patch[180-y, 99-x, 3], 0)
 
     def test_missing_detached_stroke_next_to_detected_text_is_recovered(self):
         gray = np.full((200, 200), 255, np.uint8)

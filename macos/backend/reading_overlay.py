@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from backend.overlay import _box, _coverage, _erase_polygons, _inner_rectangle, _mask_overlap
-from macos.backend.reading_background import background_patch
+from macos.backend.reading_background import background_patch, complete_vertical_strokes
 
 VERSION = 3
 
@@ -383,6 +383,7 @@ def reading_regions(page, gray, color=None, source_mask=None, restorer=None):
         raise ValueError("Missing or duplicate OCR block identifiers")
     preserved = preserved_markers(page)
     boxes = [None if str(block["id"]) in preserved else _box(block, width, height) for block in blocks]
+    boxes, source_mask = complete_vertical_strokes(gray, boxes, blocks, source_mask)
     _, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.inRange(gray, 210, 255), 8)
     chosen = set()
     for box in boxes:
