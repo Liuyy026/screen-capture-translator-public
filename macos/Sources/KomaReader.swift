@@ -47,17 +47,23 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     private var folderRequest = UUID()
     private var connectionRequest = UUID()
     private var sessionKeys: [String: String] = [:]
-    private let connectionConfigStore = TranslationLocalConfigStore()
-    private var localConfiguration = TranslationLocalConfiguration.migrating(defaults: .standard)
+    private let connectionConfigStore: TranslationLocalConfigStore
+    private let defaults: UserDefaults
+    private var localConfiguration: TranslationLocalConfiguration
     private(set) var configurationLoadError: String?
     private var localOllamaProbes: Set<UUID> = []
     let root: URL
     var platformRoot: URL { root.appendingPathComponent("macos") }
-    let cacheDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
+    let cacheDir: URL
 
-    init() {
+    init(root: URL? = nil, cacheDir: URL? = nil, defaults: UserDefaults = .standard,
+         configurationStore: TranslationLocalConfigStore = TranslationLocalConfigStore()) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
-        root = URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
+        self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
+        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
+        self.defaults = defaults
+        self.connectionConfigStore = configurationStore
+        self.localConfiguration = TranslationLocalConfiguration.migrating(defaults: defaults)
         do {
             if let saved = try connectionConfigStore.load() {
                 localConfiguration = saved
@@ -73,7 +79,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         let preferred = savedModel(provider: connection.provider, baseURL: connection.baseURL)
         model = preferred.isEmpty && connection.provider == "ollama" ? "qwen3:4b" : preferred
         availableModels = model.isEmpty ? [] : [model]
-        if connection.provider == "omlx", UserDefaults.standard.string(forKey: "processingMode") == "vision" {
+        if connection.provider == "omlx", defaults.string(forKey: "processingMode") == "vision" {
             processingMode = "vision"
         }
     }
@@ -109,14 +115,14 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         do {
             try persistModel(value)
             model = value
-            UserDefaults.standard.set(value, forKey: "translationModel." + connection.identity)
+            defaults.set(value, forKey: "translationModel." + connection.identity)
         } catch { connectionError = error.localizedDescription }
     }
 
     func chooseProcessingMode(_ value: String) {
         guard !busy, ["text", "vision"].contains(value), value != "vision" || connection.provider == "omlx" else { return }
         processingMode = value
-        UserDefaults.standard.set(value, forKey: "processingMode")
+        defaults.set(value, forKey: "processingMode")
         if value == "vision", availableModels.contains("Qwen3.8-27B-Uncensored-MLX-4bit") {
             chooseModel("Qwen3.8-27B-Uncensored-MLX-4bit")
         }
@@ -138,9 +144,9 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         self.model = model
         connectionError = nil
         engineReady = true
-        UserDefaults.standard.set(config.provider, forKey: "translationProvider")
-        UserDefaults.standard.set(config.baseURL, forKey: "translationURL." + config.provider)
-        UserDefaults.standard.set(model, forKey: "translationModel." + config.identity)
+        defaults.set(config.provider, forKey: "translationProvider")
+        defaults.set(config.baseURL, forKey: "translationURL." + config.provider)
+        defaults.set(model, forKey: "translationModel." + config.identity)
         if config.provider != "omlx", processingMode == "vision" { chooseProcessingMode("text") }
         message = "已连接 " + config.name + " · " + model
         if config.provider != "ollama" || config.baseURL != TranslationConnection.defaultURL("ollama") {
@@ -156,7 +162,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         modelTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in _ = await self?.refreshModels() }
         }
-        if let folder = UserDefaults.standard.string(forKey: "folder") {
+        if let folder = defaults.string(forKey: "folder") {
             loadFolder(URL(fileURLWithPath: folder), restore: true)
         }
     }
@@ -244,7 +250,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
             if !selectedModel.isEmpty { try persistModel(selectedModel) }
             availableModels = models
             model = selectedModel
-            if !model.isEmpty { UserDefaults.standard.set(model, forKey: "translationModel." + connection.identity) }
+            if !model.isEmpty { defaults.set(model, forKey: "translationModel." + connection.identity) }
             engineReady = !models.isEmpty
             connectionError = models.isEmpty ? "连接成功，但服务没有返回可用模型。" : nil
             return true
@@ -281,8 +287,8 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
             guard request == folderRequest else { return }
             guard !images.isEmpty else { self.error = "这个文件夹里没有 WebP、PNG 或 JPG 图片。请选择直接包含漫画图片的文件夹。"; return }
             files = images; folderName = url.lastPathComponent
-            UserDefaults.standard.set(url.path, forKey: "folder")
-            let last = UserDefaults.standard.string(forKey: "lastPage")
+            defaults.set(url.path, forKey: "folder")
+            let last = defaults.string(forKey: "lastPage")
             let initial = restore ? (images.first { $0.path == last } ?? images[0]) : images[0]
             select(initial)
         } catch { self.error = "无法打开文件夹：\(error.localizedDescription)" }
@@ -302,7 +308,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
         cacheURL = try? cacheFor(url)
         reloadPage()
-        UserDefaults.standard.set(url.path, forKey: "lastPage")
+        defaults.set(url.path, forKey: "lastPage")
         if !busy { message = page == nil ? "这页尚未处理 · 点击「识别并翻译」" : "已读取本地缓存 · \(page?.blocks.count ?? 0) 处文字" }
     }
 
@@ -407,7 +413,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         let jobConnection = connection
         let jobModel = model
         let jobMode = processingMode
-        UserDefaults.standard.set(jobModel, forKey: "translationModel." + jobConnection.identity)
+        defaults.set(jobModel, forKey: "translationModel." + jobConnection.identity)
         task = Task {
             var failures = 0
             for url in urls {
@@ -486,6 +492,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
 
 struct ContentView: View {
     @ObservedObject var reader: Reader
+    var startsServices = true
     @StateObject private var imagePan = ImagePanController()
     var body: some View {
         HSplitView {
@@ -578,7 +585,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 1040, minHeight: 680)
         .sheet(isPresented: $reader.showConnectionSettings) { TranslationSettingsView(reader: reader) }
-        .task { reader.startup() }
+        .task { if startsServices { reader.startup() } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
     }
 
@@ -764,6 +771,7 @@ struct BlockEditor: View {
     }
 }
 
+#if !KOMA_REVIEW_HARNESS
 @main struct KomaReaderApp: App {
     @StateObject private var reader = Reader()
     var body: some Scene {
@@ -780,3 +788,4 @@ struct BlockEditor: View {
             }
     }
 }
+#endif

@@ -165,6 +165,24 @@ class ReadingBackgroundTests(unittest.TestCase):
         self.assertEqual(patch[97-y, 100-x, 3], 255)
         self.assertGreater(patch[97-y, 100-x, 0], 240)
 
+    def test_missing_stroke_with_nearby_screentone_keeps_crossing_art(self):
+        gray = np.full((200, 200), 255, np.uint8)
+        cv2.rectangle(gray, (90, 70), (110, 82), 0, -1)
+        cv2.rectangle(gray, (92, 95), (110, 100), 0, -1)
+        # A light screentone strip lowers the border mean below 235, although
+        # most of the missing stroke's immediate ground is still white.
+        gray[91:94, 88:115] = 150
+        cv2.line(gray, (65, 20), (65, 180), 0, 3)
+        source_mask = np.zeros_like(gray)
+        source_mask[70:83, 90:111] = 255
+        region = background_patch(gray, [[60, 60, 115, 120]], source_mask=source_mask,
+                                  restorer=lambda crop, mask: np.full_like(crop, 255))
+        patch = decode(region)
+        x, y, _, _ = region["background_box"]
+        self.assertEqual(patch[97-y, 100-x, 3], 255)
+        self.assertEqual(patch[97-y, 100-x, 0], 255)
+        self.assertEqual(patch[97-y, 65-x, 3], 0)
+
     def test_textured_detector_refinement_keeps_dark_and_light_labels_separate(self):
         gray = tone(300, 300)
         glyphs(gray, [100, 50, 160, 230])

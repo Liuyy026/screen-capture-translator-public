@@ -181,7 +181,12 @@ def background_patch(gray, boxes, *, clip=None, textured=False, color=None, sour
                 border = np.ones(around.shape, bool)
                 by, bx = y-max(0, y-4), x-max(0, x-4)
                 border[by:by+h, bx:bx+w] = False
-                if border.any() and np.mean(around[border]) > 235:
+                # Nearby screentone or another stroke can lower the mean
+                # even when the component is clearly isolated on white.
+                # Require predominantly white surroundings as well as a
+                # bright mean, instead of rejecting the whole glyph at 235.
+                if (border.any() and np.mean(around[border]) > 220
+                        and np.mean(around[border] >= 245) >= .65):
                     ink[y:y+h, x:x+w][component] = 1
         surroundings = (cv2.dilate(ink, np.ones((17, 17), np.uint8)) > 0) & (ink == 0) & (allowed > 0)
         textured = textured or bool(surroundings.any() and (
