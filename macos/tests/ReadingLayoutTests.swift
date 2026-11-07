@@ -57,6 +57,15 @@ import CoreGraphics
         }
         let narrow = ReadingLayout.horizontal("我是", polygon: [[0,0],[46,0],[46,100],[0,100]], preferred: 29.44)
         precondition(narrow?.glyphs.count == 2, "Tiny short bubble must remain readable")
+        let mixed = "ABC 123……中文！"
+        let proportional = ReadingLayout.horizontal(mixed, polygon: [[0,0],[230,0],[230,150],[0,150]], preferred: 28)!
+        precondition(proportional.glyphs.map(\.text).joined() == mixed)
+        let asciiAdvance = proportional.glyphs[1].center.x - proportional.glyphs[0].center.x
+        precondition(asciiAdvance < proportional.fontSize, "Latin text uses measured widths, not full-width CJK cells")
+        var unchanged = page.blocks[0]
+        unchanged.source = "１２"
+        unchanged.translation = "12"
+        precondition(!unchanged.needsReadingOverlay, "Unchanged page numbers are not reported as missing translations")
         precondition(ReadingLayout.horizontal(String(repeating: "长句", count: 300), polygon: oval, preferred: 29.44) == nil)
         let withParagraphs = ReadingLayout.horizontal("那一天，我们输了\n胜者即为正义", polygon: oval, preferred: 29.44)!
         precondition(withParagraphs.glyphs.map(\.text).joined() == "那一天，我们输了胜者即为正义")

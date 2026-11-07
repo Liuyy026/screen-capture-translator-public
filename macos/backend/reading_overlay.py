@@ -1,7 +1,7 @@
 """Read-only, image-backed display geometry for the native macOS reader.
 
-The OCR cache is an input, never an output.  No OCR engines, model services or
-translation workers are imported.  Unlike the shared conservative eraser, a
+The OCR cache is an input, never an output. No translation services are called.
+Optional local segmentation/restoration assets are cached separately. A
 narrow vertical OCR column may use its entire *confirmed* balloon for layout;
 only the original OCR ink bounds are erased.
 """
@@ -12,6 +12,8 @@ import copy
 import json
 from pathlib import Path
 import sys
+import base64
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -19,12 +21,28 @@ if str(ROOT) not in sys.path:
 from backend.overlay import _box, _coverage, _erase_polygons, _inner_rectangle, _mask_overlap
 from macos.backend.reading_background import background_patch
 
-VERSION = 2
+VERSION = 3
 
 
 def _ready(block):
     translation = block.get("translation")
     return isinstance(translation, str) and bool(translation.strip()) and not block.get("error")
+
+
+def preserved_markers(page):
+    """Flag tiny isolated footer marks; manual corrections take precedence."""
+    width, height = page.get("width", 0), page.get("height", 0)
+    result = {}
+    for block in page.get("blocks", []):
+        box = _box(block, width, height)
+        if box is None or block.get("edited") or not _ready(block):
+            continue
+        x, y, r, d = box
+        if (len(block.get("source", "").strip()) <= 3 and y > height*.92
+                and r-x < width*.045 and d-y < height*.025
+                and (r < width*.18 or x > width*.82)):
+            result[str(block["id"])] = "疑似页码，已保留原图；核对并手动保存后可覆盖。"
+    return result
 
 
 def _members(candidate, boxes):
@@ -62,7 +80,7 @@ def _bounded_bubble(gray, labels, stats, label, boxes):
     # Reject page backgrounds, large panels, tiny glyph interiors and anything
     # connected to the page edge.  These bounds do not depend on OCR width.
     if (min(w, h) < 24 or pixels < 200 or x < 4 or y < 4
-            or x+w > width-4 or y+h > height-4
+            or x+w > width-4
             or w > width*.48 or h > height*.43
             or pixels > width*height*.085 or w*h > width*height*.14):
         return None
@@ -101,7 +119,10 @@ def _bounded_bubble(gray, labels, stats, label, boxes):
         return None
     padded = np.pad(filled, 3)
     ring = cv2.dilate(padded, np.ones((7, 7), np.uint8))-padded
-    ring_pixels = gray[y-3:y+h+3, x-3:x+w+3][ring > 0]
+    # A scanned page can cut through the bottom of a balloon. Use actual
+    # exterior pixels only; replicated page-edge pixels cannot prove a border.
+    exterior = cv2.copyMakeBorder(gray, 3, 3, 3, 3, cv2.BORDER_REPLICATE)
+    ring_pixels = exterior[y:y+h+6, x:x+w+6][ring > 0]
     if (ring_pixels.size < 40 or np.mean(ring_pixels < interior-55) < .45
             or interior-float(np.percentile(ring_pixels, 35)) < 60):
         return None
@@ -184,15 +205,20 @@ def _outlined_bubbles(gray, boxes, existing):
     if not pending:
         return []
     candidates = []
-    for threshold in (95, 125, 155):
-        contours, _ = cv2.findContours((gray < threshold).astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    for threshold in (95, 125, 155, 210, 240):
+        # Both sides of a thin outline matter: its bright interior may close
+        # even when the dark connected component continues into nearby art.
+        contours = []
+        for binary in (gray < threshold, gray >= threshold):
+            found, _ = cv2.findContours(binary.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            contours.extend(found)
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
             area = cv2.contourArea(contour)
             if (min(w, h) < 30 or area < 500 or area > width*height*.085
                     or x < 4 or y < 4 or x+w > width-4 or y+h > height-4
                     or w > width*.48 or h > height*.43
-                    or not .45 <= area/max(1, w*h) <= .93):
+                    or not .45 <= area/max(1, w*h) <= .995):
                 continue
             if not any(x <= boxes[i][0] and y <= boxes[i][1]
                        and x+w >= boxes[i][2] and y+h >= boxes[i][3] for i in pending):
@@ -205,6 +231,10 @@ def _outlined_bubbles(gray, boxes, existing):
             candidate = _shape(mask, (x, y))
             members = _members(candidate, boxes)
             if not members or assigned.intersection(members):
+                continue
+            if area/(w*h) > .93 and not all(
+                    np.mean(gray[boxes[i][1]:boxes[i][3], boxes[i][0]:boxes[i][2]] < 155) > .008
+                    for i in members):
                 continue
             background = cv2.erode(mask, np.ones((9, 9), np.uint8))
             for i in members:
@@ -247,7 +277,7 @@ def _narration_groups(gray, blocks, boxes, bubbles):
     height, width = gray.shape
     assigned = {index for candidate in bubbles for index in candidate["members"]}
     pending = [i for i, box in enumerate(boxes) if box and i not in assigned
-               and blocks[i].get("vertical") and box[3]-box[1] >= height*.12]
+               and blocks[i].get("vertical") and box[3]-box[1] >= height*.08]
     groups = []
     while pending:
         group = [pending.pop(0)]
@@ -260,20 +290,32 @@ def _narration_groups(gray, blocks, boxes, bubbles):
                     b = boxes[j]
                     overlap = min(a[3], b[3])-max(a[1], b[1])
                     gap = max(a[0], b[0])-min(a[2], b[2])
-                    if (abs(a[1]-b[1]) <= min(a[3]-a[1], b[3]-b[1])*.18
+                    if (abs(a[1]-b[1]) <= max(a[3]-a[1], b[3]-b[1])*.35
                             and overlap >= .65*min(a[3]-a[1], b[3]-b[1])
-                            and -5 <= gap <= width*.07):
+                            and -5 <= gap <= width*.12):
+                        # Split at the divider before constructing a group;
+                        # rejecting the final union would lose both valid
+                        # paragraphs on opposite sides of that divider.
+                        first, second = sorted((a, b), key=lambda item: item[0])
+                        yy, dd = max(a[1], b[1]), min(a[3], b[3])
+                        band = gray[yy:dd, first[0]:second[2]]
+                        strip = gray[yy:dd, first[2]:second[0]]
+                        if strip.size and np.median(band) > 100:
+                            sm = cv2.GaussianBlur(strip, (5, 5), 1)
+                            _, _, stats, _ = cv2.connectedComponentsWithStats((sm < 65).astype(np.uint8), 8)
+                            if any(s[cv2.CC_STAT_HEIGHT] > (dd-yy)*.8 for s in stats[1:]):
+                                continue
                         group.append(i)
                         pending.remove(i)
                         changed = True
                         break
-        if len(group) < 3:
+        if len(group) < 2:
             continue
         left = max(0, min(boxes[i][0] for i in group)-10)
         top = max(0, min(boxes[i][1] for i in group)-10)
         right = min(width, max(boxes[i][2] for i in group)+10)
         bottom = min(height, max(boxes[i][3] for i in group)+10)
-        if right-left < width*.35:
+        if right-left < width*.12:
             continue
         candidate = {"origin": (left, top), "mask": np.ones((bottom-top, right-left), np.uint8),
                      "area": (right-left)*(bottom-top), "members": group,
@@ -303,11 +345,18 @@ def _narration_groups(gray, blocks, boxes, bubbles):
         if background.sum() < 100:
             continue
         low_frequency = cv2.GaussianBlur(patch, (9, 9), 2)
-        if np.mean(low_frequency[background > 0] < 65) > .06:
+        source_band = (candidate["mask"] > 0) & (background == 0)
+        # A dark ground is valid. Reject *new* substantial dark artwork in
+        # the gaps, relative to the ground already occupied by the source.
+        source_dark = np.mean(low_frequency[source_band] < 65) if source_band.any() else 0
+        dark_ground = (source_band.any() and np.percentile(low_frequency[source_band], 25) < 65
+                       and np.median(low_frequency[background > 0]) < 65)
+        if not dark_ground and np.mean(low_frequency[background > 0] < 65) > max(.06, source_dark+.18):
             continue
         # A panel divider spans the narration band, whereas screentone dots
         # and individual glyph strokes do not form a continuous dark column.
-        if np.any(np.mean(patch < 90, axis=0) > .82):
+        barrier_tone = min(90, float(np.median(low_frequency[background > 0]))-55)
+        if barrier_tone > 0 and np.any(np.mean(patch < barrier_tone, axis=0) > .82):
             continue
         # Reject a proposed combined canvas if any other OCR unit lies in it.
         if any(_coverage(candidate, box) > .02 for i, box in enumerate(boxes) if i not in group and box):
@@ -316,7 +365,7 @@ def _narration_groups(gray, blocks, boxes, bubbles):
     return groups
 
 
-def reading_regions(page, gray):
+def reading_regions(page, gray, color=None, source_mask=None, restorer=None):
     """Return final display regions, without changing page or image data."""
     import cv2
     import numpy as np
@@ -332,7 +381,8 @@ def reading_regions(page, gray):
     ids = [str(block.get("id")) for block in blocks]
     if len(set(ids)) != len(ids) or any(block.get("id") is None for block in blocks):
         raise ValueError("Missing or duplicate OCR block identifiers")
-    boxes = [_box(block, width, height) for block in blocks]
+    preserved = preserved_markers(page)
+    boxes = [None if str(block["id"]) in preserved else _box(block, width, height) for block in blocks]
     _, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.inRange(gray, 210, 255), 8)
     chosen = set()
     for box in boxes:
@@ -375,7 +425,7 @@ def reading_regions(page, gray):
                         "vertical": all(bool(blocks[index].get("vertical")) for index in indexes)})
         regions[-1].update(background_patch(gray, [boxes[index] for index in indexes],
                             clip=(candidate["mask"], candidate["origin"]),
-                            textured=candidate.get("textured", False)))
+                            textured=candidate.get("textured", False), color=color, source_mask=source_mask, restorer=restorer))
         accepted.append(candidate)
 
     for candidate in narrations:
@@ -389,7 +439,7 @@ def reading_regions(page, gray):
                   "points": candidate["points"], "text_box": candidate["text_box"],
                   "erase_points": [], "fill_color": [255, 255, 255], "vertical": False}
         region.update(background_patch(gray, [boxes[i] for i in indexes],
-                      clip=(candidate["mask"], candidate["origin"]), textured=True))
+                      clip=(candidate["mask"], candidate["origin"]), textured=True, color=color, source_mask=source_mask, restorer=restorer))
         regions.append(region)
         accepted.append(candidate)
 
@@ -415,9 +465,63 @@ def reading_regions(page, gray):
         textured = bool(np.mean(patch < 210) > .18)
         region.update(background_patch(gray, member_boxes,
                       clip=(shape["mask"], shape["origin"]) if old["overlay"] == "balloon" else None,
-                      textured=textured))
+                      textured=textured, color=color, source_mask=source_mask, restorer=restorer))
         regions.append(region)
         claimed.update(members)
+        accepted.append(shape)
+    # Unboxed lettering and cut-off transparent bubbles have no closed
+    # boundary to recover. Keep their original text footprint, repair only
+    # identified strokes, and never invent a larger white rectangle.
+    units, grouped = [], set()
+    for dialogue in page.get("dialogues", []):
+        keys = dialogue.get("block_ids", [])
+        if (not 1 < len(keys) <= 4 or any(key not in ids or key in claimed or key in grouped for key in keys)):
+            continue
+        indexes = [ids.index(key) for key in keys]
+        if not all(boxes[i] and _ready(blocks[i]) for i in indexes):
+            continue
+        bb = [boxes[i] for i in indexes]
+        union_area = (max(b[2] for b in bb)-min(b[0] for b in bb))*(max(b[3] for b in bb)-min(b[1] for b in bb))
+        if union_area > sum((b[2]-b[0])*(b[3]-b[1]) for b in bb)*1.7:
+            continue
+        units.append(indexes)
+        grouped.update(keys)
+    units.extend([i] for i in range(len(blocks)) if ids[i] not in grouped)
+    for indexes in units:
+        index = indexes[0]
+        block = blocks[index]
+        if any(boxes[i] is None or ids[i] in claimed or not _ready(blocks[i]) for i in indexes):
+            continue
+        source = unicodedata.normalize("NFKC", "".join(blocks[i].get("source", "") for i in indexes)).strip()
+        translated = unicodedata.normalize("NFKC", "".join(blocks[i]["translation"] for i in indexes)).strip()
+        if source == translated:
+            continue
+        member_boxes = [boxes[i] for i in indexes]
+        a, b = min(box[0] for box in member_boxes), min(box[1] for box in member_boxes)
+        c, d = max(box[2] for box in member_boxes), max(box[3] for box in member_boxes)
+        x, y, r, end = max(0, a-8), max(0, b-8), min(width, c+8), min(height, d+8)
+        mask = np.ones((end-y, r-x), np.uint8)
+        for other in accepted:
+            ox, oy = other["origin"]
+            om = other["mask"]
+            aa, bb, cc, dd = max(x, ox), max(y, oy), min(r, ox+om.shape[1]), min(end, oy+om.shape[0])
+            if cc > aa and dd > bb:
+                mask[bb-y:dd-y, aa-x:cc-x] &= 1-om[bb-oy:dd-oy, aa-ox:cc-ox]
+        shape = _shape(mask, (x, y))
+        if shape is None or any(_coverage(shape, box) < .97 for box in member_boxes):
+            continue
+        patch = background_patch(gray, member_boxes, clip=(shape["mask"], shape["origin"]),
+                                 textured=True, color=color, source_mask=source_mask, restorer=restorer)
+        decoded = cv2.imdecode(np.frombuffer(base64.b64decode(patch["background_png"]), np.uint8), cv2.IMREAD_UNCHANGED)
+        if np.count_nonzero(decoded[:, :, 3]) < 8:
+            continue
+        regions.append({"id": f"text-{ids[index]}", "block_ids": [ids[i] for i in indexes],
+                        "overlay": "text", "overlay_score": .6,
+                        "overlay_reason": "原文字范围内排版，仅修复字迹，保留画面",
+                        "points": shape["points"], "text_box": [x, y, r, end],
+                        "erase_points": [], "fill_color": [255, 255, 255],
+                        "vertical": bool(block.get("vertical")), **patch})
+        claimed.update(ids[i] for i in indexes)
         accepted.append(shape)
     return regions
 
@@ -429,11 +533,45 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--cache", required=True)
+    parser.add_argument("--text-mask")
+    parser.add_argument("--assets-dir", help="Separate disposable display cache; enables installed text segmentation")
+    parser.add_argument("--restoration-model", help="Optional, preinstalled Anime LaMa TorchScript weights")
     args = parser.parse_args(argv)
-    page = json.loads(Path(args.cache).read_text(encoding="utf-8"))
-    gray = cv2.imdecode(np.frombuffer(Path(args.image).read_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE)
-    regions = reading_regions(page, gray)
-    print(json.dumps({"version": VERSION, "regions": regions}, ensure_ascii=False, separators=(",", ":")))
+    from macos.backend.reading_assets import LocalRestorer, asset_key, atomic_write, text_mask
+    image_bytes, cache_bytes = Path(args.image).read_bytes(), Path(args.cache).read_bytes()
+    detector = ROOT / ".models/comictextdetector.pt"
+    model = Path(args.restoration_model) if args.restoration_model else ROOT / ".models/anime-manga-big-lama.pt"
+    target = None
+    if args.assets_dir and not args.text_mask:
+        target = Path(args.assets_dir) / "pages" / (asset_key(image_bytes, cache_bytes, [detector, model]) + ".json")
+        if target.exists():
+            try:
+                saved = json.loads(target.read_bytes())
+                if saved["version"] == VERSION and isinstance(saved["regions"], list):
+                    print(json.dumps(saved, ensure_ascii=False, separators=(",", ":")))
+                    return
+            except (ValueError, KeyError, TypeError):
+                pass
+    page = json.loads(cache_bytes)
+    color = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if color is None:
+        raise ValueError("Cannot decode source image")
+    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    # Preserve color on covers; grayscale pages need no chroma restoration.
+    has_color = bool(np.max(np.ptp(color.astype(np.int16), axis=2)) > 8)
+    source_mask = cv2.imread(args.text_mask, cv2.IMREAD_GRAYSCALE) if args.text_mask else None
+    if args.text_mask and source_mask is None:
+        raise ValueError("Cannot decode text mask")
+    if args.assets_dir and source_mask is None and any(_ready(b) for b in page.get("blocks", [])):
+        source_mask = text_mask(color, image_bytes, detector, args.assets_dir)
+    if source_mask is not None and source_mask.shape != gray.shape:
+        raise ValueError("Text mask size mismatch")
+    restorer = LocalRestorer(model) if model.is_file() and (args.assets_dir or args.restoration_model) else None
+    regions = reading_regions(page, gray, color=color if has_color else None, source_mask=source_mask, restorer=restorer)
+    reply = json.dumps({"version": VERSION, "regions": regions, "preserved": preserved_markers(page)}, ensure_ascii=False, separators=(",", ":"))
+    if target is not None:
+        atomic_write(target, reply.encode("utf-8"))
+    print(reply)
 
 
 if __name__ == "__main__":

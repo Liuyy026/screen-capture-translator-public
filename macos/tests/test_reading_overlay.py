@@ -48,6 +48,16 @@ def polygon_mask(points, shape):
 
 
 class ReadingOverlayTests(unittest.TestCase):
+    def test_probable_footer_number_is_preserved_until_manual_correction(self):
+        entry = block("footer", (70, 950, 90, 970), "啊")
+        entry["source"] = "ッ"
+        page = {"width": 700, "height": 1000, "blocks": [entry]}
+        self.assertIn("footer", reading.preserved_markers(page))
+        entry["edited"] = True
+        self.assertEqual(reading.preserved_markers(page), {})
+        entry.update(edited=False, box=[70, 600, 90, 620])
+        self.assertEqual(reading.preserved_markers(page), {})
+
     def test_narrow_column_uses_confirmed_bubble_without_mutating_inputs(self):
         page, gray = fixture()
         before, original = copy.deepcopy(page), gray.copy()
@@ -119,7 +129,17 @@ class ReadingOverlayTests(unittest.TestCase):
     def test_unrecognized_art_inside_bubble_is_not_painted_over(self):
         page, gray = fixture()
         cv2.circle(gray, (385, 275), 25, 10, -1)
-        self.assertEqual(reading.reading_regions(page, gray), [])
+        regions = reading.reading_regions(page, gray)
+        # A tight source-footprint fallback may render; it must not claim the
+        # entire illustrated balloon or alter the neighboring solid circle.
+        for region in regions:
+            self.assertEqual(region["overlay"], "text")
+            self.assertLess(max(p[0] for p in region["points"]), 375)
+            import base64
+            patch = cv2.imdecode(np.frombuffer(base64.b64decode(region["background_png"]), np.uint8), cv2.IMREAD_UNCHANGED)
+            x, y, r, d = region["background_box"]
+            artwork = (gray[y:d, x:r] == 10)
+            self.assertFalse(patch[:, :, 3][artwork].any())
 
     def test_large_enclosed_panel_is_rejected(self):
         page, gray = fixture()

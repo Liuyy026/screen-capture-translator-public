@@ -97,14 +97,20 @@ Panning stops at the image boundary. When the entire image fits in the viewport,
 
 ## Chinese balloon layout
 
-Chinese mode analyzes safe interiors of closed balloons when opening an existing page, without model calls or changes to the source image/page cache. Fragments in one balloon are typeset together; narrow-neck connected balloons may be separated. Chinese now defaults to horizontal left-to-right lines, flowing top-to-bottom within the actual balloon contour rather than one inscribed rectangle. Separate translation blocks retain paragraph breaks. Page-relative font sizes and a legibility floor replace OCR-box-dependent shrinking. Only the original OCR ink neighborhood and nearby text remnants are erased. Gray/screentone regions use local background restoration with a thin text outline, rather than opaque white rectangles. Restored texture is an estimate and may retain minor artifacts; source images and translation caches remain unchanged.
+Chinese mode analyzes balloon contours and original text footprints without translation-service calls or changes to source images/page caches. It uses the installed Comic Text Detector's pixel masks to isolate lettering. Fragments in one balloon are typeset together; narrow-neck balloons may be separated. Rectangular captions and bottom-clipped balloons are supported. Chinese flows left-to-right using measured glyph widths and contour-aware line wrapping. Narration grouping respects panel dividers. Dark backgrounds use white text with a dark outline; light backgrounds use the inverse.
+
+Install the optional local Anime LaMa restoration weights with `python3 macos/scripts/setup_reading_model.py` (about 197 MiB, checksum verified; [upstream source](https://github.com/Sanster/IOPaint/blob/main/iopaint/model/lama.py)). Reading never downloads models automatically. Without these weights, traditional local restoration remains available. Only selected ink pixels are composited back; reconstructed backgrounds are estimates and may retain artifacts.
+
+Disposable masks and render assets are stored separately under `~/Library/Application Support/KomaReader/reading-v3/`. Image, translation, algorithm and model changes invalidate the derived assets without retranslating pages. Unchanged numbers are not counted as missing overlays. Suspected misrecognized footer numbers are preserved with a review notice; manual edits override this protection.
 
 Cached white rectangles are not blindly used as fallback; image geometry and background are checked again. Incomplete translations or regions too small for legible text remain unchanged, with full translations and a notice in the inspector. Clicking a translated balloon selects its first dialogue fragment. This improves display only; it does not correct OCR or translation meaning, detect missing text, or guarantee coverage of complex backgrounds and unusual balloon shapes.
 
 The read-only geometry helper is `macos/backend/reading_overlay.py`; tests require no running model:
 
 ```sh
-macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_reading_overlay.py' -v
+macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_reading*.py' -v
 xcrun swiftc macos/Sources/ReadingLayout.swift macos/tests/ReadingLayoutTests.swift -o macos/.build/reading-layout-tests
 macos/.build/reading-layout-tests
 ```
+
+`macos/.venv/bin/python macos/tools/review_chapter.py --folder /path/to/chapter --output macos/.runtime/chapter-review` renders existing translations with the native SwiftUI reader and checks glyph bounds, text completeness and unchanged inputs. Use `--pages 13,14,15` to sample pages. Visual review is still required; geometric checks cannot prove restoration quality or OCR completeness.

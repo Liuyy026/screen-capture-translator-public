@@ -13,11 +13,12 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     @Published var selected: URL?
     @Published var page: PageResult? { didSet { presentationCache = nil } }
     @Published var readingRegions: [ReadingRegion]? { didSet { presentationCache = nil } }
+    @Published var readingPreserved: [String: String] = [:]
     private var presentationCache: [ReadingPresentation]?
     @Published var readingLayoutError: String?
     private var readingTask: Task<Void, Never>?
     private var readingRequest = UUID()
-    private var readingCache: [String: [ReadingRegion]] = [:]
+    private var readingCache: [String: ReadingOverlayService.Reply] = [:]
     @Published var image: NSImage?
     @Published var folderName = "本地漫画"
     @Published var busy = false
@@ -309,6 +310,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         readingTask?.cancel()
         readingRequest = UUID()
         readingRegions = nil
+        readingPreserved = [:]
         readingLayoutError = nil
         guard let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) else { page = nil; return }
         do {
@@ -342,13 +344,13 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     var unreadableOverlayCount: Int {
         guard let page else { return 0 }
         let shown = Set(readingPresentations.flatMap { $0.region.block_ids })
-        return page.blocks.filter { !$0.translation.isEmpty && $0.error.isEmpty && !shown.contains($0.id) }.count
+        return page.blocks.filter { $0.needsReadingOverlay && !shown.contains($0.id) && readingPreserved[$0.id] == nil }.count
     }
 
     private func prepareReadingRegions(cache: URL) {
         guard let selected, let data = try? Data(contentsOf: cache) else { return }
         let key = selected.path + ":" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        if let saved = readingCache[key] { readingRegions = saved; return }
+        if let saved = readingCache[key] { readingRegions = saved.regions; readingPreserved = saved.preserved ?? [:]; return }
         let request = readingRequest
         readingTask = Task { [weak self] in
             guard let self else { return }
@@ -357,7 +359,8 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
                 guard !Task.isCancelled, request == readingRequest else { return }
                 if readingCache.count >= 16 { readingCache.removeAll() }
                 readingCache[key] = regions
-                readingRegions = regions
+                readingRegions = regions.regions
+                readingPreserved = regions.preserved ?? [:]
             } catch {
                 guard !Task.isCancelled, request == readingRequest else { return }
                 readingLayoutError = "排版分析暂不可用，原图已保留；请在右侧阅读译文。"
@@ -642,6 +645,10 @@ struct ContentView: View {
             if let layoutError = reader.readingLayoutError {
                 Text(layoutError).font(.caption).foregroundStyle(.orange)
             }
+            if reader.displayMode == 2, !reader.readingPreserved.isEmpty {
+                Text("有 \(reader.readingPreserved.count) 处疑似页码，已保留原图，请核对右侧原文。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Picker("翻译方式", selection: Binding(get: { reader.processingMode }, set: { reader.chooseProcessingMode($0) })) {
                 Text("普通翻译").tag("text")
                 Text("视觉辅助").tag("vision")
@@ -686,7 +693,7 @@ struct ContentView: View {
                         LazyVStack(spacing: 12) {
                             ForEach(page.blocks) { block in
                                 BlockEditor(block: block, active: reader.selectedBlock == block.id,
-                                            disabled: reader.busy, save: { source, target in
+                                            disabled: reader.busy, readingNote: reader.readingPreserved[block.id], save: { source, target in
                                     reader.saveEdit(id: block.id, source: source, translation: target)
                                 }, retry: { reader.retryBlock(block.id) }, select: { reader.selectedBlock = block.id })
                                 .id(block.id)
@@ -714,6 +721,7 @@ struct BlockEditor: View {
     let block: TextBlock
     let active: Bool
     let disabled: Bool
+    let readingNote: String?
     let save: (String, String) -> Void
     let retry: () -> Void
     let select: () -> Void
@@ -738,6 +746,9 @@ struct BlockEditor: View {
             if !block.error.isEmpty { Text(block.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
             ForEach((block.quality_warnings ?? []).filter { $0.hasPrefix("原文与译文相同") }, id: \.self) { warning in
                 Text(warning).font(.caption2).foregroundStyle(.orange)
+            }
+            if let reason = readingNote {
+                Text(reason).font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Button("重新翻译", action: retry).font(.caption).disabled(disabled || changed)

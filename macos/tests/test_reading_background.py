@@ -68,7 +68,13 @@ class ReadingBackgroundTests(unittest.TestCase):
     def test_aligned_text_across_panel_divider_is_not_grouped(self):
         page, gray = narration_fixture()
         cv2.line(gray, (196, 270), (196, 590), 0, 3)
-        self.assertFalse(any(r["overlay"] == "narration" for r in reading_regions(page, gray)))
+        regions = reading_regions(page, gray)
+        for region in regions:
+            self.assertFalse("1" in region["block_ids"] and ("2" in region["block_ids"] or "3" in region["block_ids"]))
+            patch = decode(region)
+            x, y, r, d = region["background_box"]
+            if x <= 196 < r:
+                self.assertFalse(patch[max(0, 270-y):min(d-y, 590-y), 196-x, 3].any())
 
     def test_substantial_artwork_in_narration_gap_is_not_a_blank_canvas(self):
         page, gray = narration_fixture()
@@ -118,6 +124,68 @@ class ReadingBackgroundTests(unittest.TestCase):
         self.assertEqual(patch[185-y, 228-x, 3], 255)
         if x <= 280 < r:
             self.assertEqual(patch[185-y, 280-x, 3], 0)
+
+    def test_detector_mask_protects_art_inside_the_same_ocr_box(self):
+        gray = np.full((200, 200), 220, np.uint8)
+        cv2.line(gray, (60, 20), (60, 180), 0, 3)  # hair crossing OCR
+        cv2.rectangle(gray, (90, 80), (100, 95), 10, -1)
+        mask = np.zeros_like(gray)
+        mask[80:96, 90:101] = 255
+        calls = []
+        def restore(image, selection):
+            calls.append(selection.copy())
+            return np.full_like(image, 220)
+        region = background_patch(gray, [[50, 40, 110, 150]], source_mask=mask, restorer=restore)
+        patch = decode(region)
+        x, y, r, d = region["background_box"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(patch[85-y, 95-x, 0], 220)
+        self.assertEqual(patch[85-y, 60-x, 3], 0)
+        np.testing.assert_array_equal(patch[:, :, 0][patch[:, :, 3] == 0], gray[y:d, x:r][patch[:, :, 3] == 0])
+
+    def test_detector_missed_long_dash_in_plain_balloon_is_removed(self):
+        gray = np.full((200, 200), 255, np.uint8)
+        cv2.line(gray, (100, 50), (100, 150), 0, 2)
+        mask = np.ones_like(gray)
+        region = background_patch(gray, [[90, 40, 110, 160]], clip=(mask, (0, 0)), source_mask=np.zeros_like(gray))
+        patch = decode(region)
+        x, y, _, _ = region["background_box"]
+        self.assertGreater(patch[100-y, 100-x, 0], 240)
+        self.assertEqual(patch[100-y, 100-x, 3], 255)
+
+    def test_missing_detached_stroke_next_to_detected_text_is_recovered(self):
+        gray = np.full((200, 200), 255, np.uint8)
+        cv2.rectangle(gray, (90, 70), (110, 82), 0, -1)
+        cv2.rectangle(gray, (92, 95), (110, 100), 0, -1)
+        source_mask = np.zeros_like(gray)
+        source_mask[70:83, 90:111] = 255
+        region = background_patch(gray, [[85, 60, 115, 120]], source_mask=source_mask)
+        patch = decode(region)
+        x, y, _, _ = region["background_box"]
+        self.assertEqual(patch[97-y, 100-x, 3], 255)
+        self.assertGreater(patch[97-y, 100-x, 0], 240)
+
+    def test_textured_detector_refinement_keeps_dark_and_light_labels_separate(self):
+        gray = tone(300, 300)
+        glyphs(gray, [100, 50, 160, 230])
+        source_mask = np.zeros_like(gray)
+        source_mask[55:225, 110:135] = 255
+        region = background_patch(gray, [[100, 50, 160, 230]], textured=True, source_mask=source_mask,
+                                  restorer=lambda crop, mask: np.full_like(crop, 205))
+        self.assertTrue(decode(region)[:, :, 3].any())
+
+    def test_color_restoration_changes_only_selected_ink(self):
+        color = np.full((200, 200, 3), [50, 100, 180], np.uint8)
+        color[80:96, 90:101] = 0
+        gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+        mask = np.zeros_like(gray)
+        mask[80:96, 90:101] = 255
+        region = background_patch(gray, [[80, 60, 110, 130]], color=color, source_mask=mask,
+                                  restorer=lambda crop, ink: np.full_like(crop, [50, 100, 180]))
+        patch = decode(region)
+        x, y, r, d = region["background_box"]
+        np.testing.assert_array_equal(patch[:, :, :3][patch[:, :, 3] == 0], color[y:d, x:r][patch[:, :, 3] == 0])
+        np.testing.assert_array_equal(patch[85-y, 95-x, :3], [50, 100, 180])
 
 
 if __name__ == "__main__":

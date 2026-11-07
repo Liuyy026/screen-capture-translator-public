@@ -28,6 +28,8 @@ struct ReadingOverlayView: View {
         let origin = CGPoint(x: left, y: top)
         let components = region.fill_color.count == 3 ? region.fill_color : [255, 255, 255]
         let fill = Color(red: components[0] / 255, green: components[1] / 255, blue: components[2] / 255)
+        let textColor: Color = region.dark_background == true ? .white : .black
+        let outlineColor: Color = region.dark_background == true ? .black : .white
         Canvas { context, _ in
             let contour = polygon(region.points, origin: origin)
             context.clip(to: contour)
@@ -47,12 +49,12 @@ struct ReadingOverlayView: View {
                     let stroke = max(0.5, presentation.layout.fontSize * 0.055) * scale
                     for direction in 0..<8 {
                         let angle = Double(direction) * .pi / 4
-                        context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(.white),
+                        context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(outlineColor),
                                      at: CGPoint(x: (glyph.center.x - left) * scale + cos(angle) * stroke,
                                                  y: (glyph.center.y - top) * scale + sin(angle) * stroke))
                     }
                 }
-                context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(.black),
+                context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(textColor),
                              at: CGPoint(x: (glyph.center.x - left) * scale, y: (glyph.center.y - top) * scale))
             }
             if selected { context.stroke(contour, with: .color(.teal), lineWidth: 2) }

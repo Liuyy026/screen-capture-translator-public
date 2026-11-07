@@ -110,18 +110,36 @@ macos/.venv/bin/python macos/backend/vision_worker.py --help
 
 ## 中文气泡排版
 
-「中文」模式在打开已有结果时，单独分析封闭气泡的安全内部空间，不调用模型，也不改写漫画或页面缓存。同一气泡的碎片文字合并排版；有狭窄连接的双气泡会尝试分开。原图/文字框模式仍按原 OCR 框显示。
+「中文」模式在打开已有结果时，单独分析气泡和原文字范围，不调用翻译服务，也不改写漫画或译文缓存。同一气泡的碎片文字合并排版；有狭窄连接的双气泡会尝试分开。支持矩形旁白框、页底被截断的气泡；无封闭轮廓时，只在原文字范围内尝试排版。原图/文字框模式仍按原 OCR 框显示。
 
 中文默认从左到右、从上到下横排。每行按气泡的实际轮廓寻找可用宽度，长句可以利用异形气泡的安全空间，不局限于单个内接矩形；不同译文保留段落分隔。字号以页面宽度统一计算，并保留可读下限。点击中文区域可定位其第一段对白，右侧仍可逐段编辑。
 
-白底气泡只擦除文字笔画及邻近残留；灰底和网点背景使用局部背景修复，旁白按阅读顺序合并为横排段落，并加细描边以便阅读，不再铺长条纯白底。局部修复根据周围图像估计纹理，可能留下轻微痕迹，并非精确还原被原字遮住的内容。原图和译文缓存不被改写。
+清字复用已安装的 Comic Text Detector 的逐像素文字蒙版，并限制在已翻译文字范围和气泡轮廓内。白底气泡清除笔画、标点和长划线；连续旁白按阅读顺序合并为横排段落，检测分镜线以避免跨栏合并。中文使用实际字宽换行、细描边增强对比，不铺长条纯白底。
+
+复杂背景可使用本地 Anime LaMa 修补模型（约 197 MiB），只重建文字蒙版内的像素，保留蒙版外的画面。首次需要显式安装；阅读时不会联网下载，也不会启动 oMLX/Ollama：
+
+```sh
+python3 macos/scripts/setup_reading_model.py
+```
+
+权重保存于 `.models/anime-manga-big-lama.pt`，下载后核对发布方提供的校验值。来源：[IOPaint AnimeLaMa](https://github.com/Sanster/IOPaint/blob/main/iopaint/model/lama.py)。没有该模型时使用局部传统修补，复杂网点效果较弱。修补是在估计原字遮住的背景，仍可能留下模糊或纹理痕迹，不等于精确恢复原画。
+
+显示结果和文字蒙版单独保存在 `~/Library/Application Support/KomaReader/reading-v3/`；图片、译文、显示算法或模型变化后自动重建显示结果，已经翻译的旧页面无需重译。纯省略号、相同的数字保留原样，不算漏填；疑似页码误识别会保留原图并提示，手动核对保存后可覆盖。
 
 旧缓存中的白色矩形不会直接作为回退覆盖；打开页面时重新检查背景和文字范围。译文不完整、排版空间不足或背景不可靠时保留原图，右侧明确提示“已有译文暂未覆盖”，并显示完整译文。此项改善显示，不自动修正 OCR 或翻译语义，也不保证手写字、复杂背景、漏检文字和所有异形气泡都能覆盖。
 
-显示分析入口为 `macos/backend/reading_overlay.py`，测试不需要启动模型：
+显示分析入口为 `macos/backend/reading_overlay.py`，单元测试不需要加载模型：
 
 ```sh
-macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_reading_overlay.py' -v
+macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_reading*.py' -v
 xcrun swiftc macos/Sources/ReadingLayout.swift macos/tests/ReadingLayoutTests.swift -o macos/.build/reading-layout-tests
 macos/.build/reading-layout-tests
 ```
+
+检查已有翻译的整章效果，生成与阅读器相同的原生渲染图片、文字边界和原图/缓存不变性报告：
+
+```sh
+macos/.venv/bin/python macos/tools/review_chapter.py --folder /path/to/chapter --output macos/.runtime/chapter-review
+```
+
+该工具选取每张图片最新的普通/视觉缓存，不执行 OCR 文本识别或翻译；`--pages 13,14,15` 可抽查指定页。需要检查截图确认画面效果，自动边界检查不能证明没有漏检文字或修补痕迹。

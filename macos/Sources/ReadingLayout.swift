@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import NaturalLanguage
+import AppKit
 
 struct TextBlock: Codable, Identifiable {
     var id: String
@@ -12,6 +13,12 @@ struct TextBlock: Codable, Identifiable {
     var edited: Bool
     var vision_source: String?
     var quality_warnings: [String]?
+
+    var needsReadingOverlay: Bool {
+        let original = source.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translated = translation.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !translated.isEmpty && error.isEmpty && original != translated
+    }
 }
 
 struct PageResult: Codable {
@@ -35,6 +42,7 @@ struct ReadingRegion: Codable, Identifiable {
     var overlay: String?
     var background_png: String?
     var background_box: [Double]?
+    var dark_background: Bool?
 
     var rectangle: CGRect? {
         guard text_box.count == 4, text_box.allSatisfy(\.isFinite),
@@ -152,8 +160,12 @@ enum ReadingLayout {
         guard maxY > minY, maxX > minX else { return nil }
         var font = preferred
         // Keep a modest font floor. Full shape flow generally fits more text than one inscribed rectangle.
-        while font >= preferred * 0.72 {
+        while font >= max(12, preferred * 0.50) {
             let advance = font * 1.03, lineHeight = font * 1.38
+            let face = NSFont.systemFont(ofSize: font, weight: .medium)
+            let widths = paragraphs.map { chars in chars.map {
+                max(font * 0.3, (String($0) as NSString).size(withAttributes: [.font: face]).width + font * 0.03)
+            }}
             let halfHeight = font * 0.66, margin = max(4, font * 0.2)
             // Quantize candidate row centers, then reuse spans across every possible starting row.
             let step = lineHeight / 4
@@ -176,8 +188,11 @@ enum ReadingLayout {
                         (offset == 0 && maxX - minX >= advance * 4 ? 3.0 : min(2, Double(chars.count - offset)))
                     let spans = rows[rowIndex].filter { $0.right - $0.left >= advance * minimumColumns }
                     if let span = spans.max(by: { $0.right - $0.left < $1.right - $1.left }) {
-                        let capacity = Int(floor((span.right - span.left) / advance))
-                        var end = min(offset + capacity, chars.count)
+                        var end = offset, occupied = 0.0
+                        while end < chars.count && occupied + widths[paragraph][end] <= span.right - span.left {
+                            occupied += widths[paragraph][end]; end += 1
+                        }
+                        guard end > offset else { rowIndex += 4; continue }
                         if end < chars.count {
                             if !wordBoundaries[paragraph].contains(end),
                                let boundary = wordBoundaries[paragraph].filter({ $0 > offset && $0 < end && end - $0 <= 2 }).max() {
@@ -192,9 +207,12 @@ enum ReadingLayout {
                         let length = end - offset
                         if chars.count > 7 && length < 3 { shortLinePenalty += Double(3 - length) * font * 0.7 }
                         if length > 0 {
-                            let left = paragraphStyle ? span.left : (span.left + span.right - Double(length) * advance) / 2
+                            let runWidth = widths[paragraph][offset..<end].reduce(0, +)
+                            var cursor = paragraphStyle ? span.left : (span.left + span.right - runWidth) / 2
                             for index in offset..<end {
-                                glyphs.append(ReadingGlyph(text: String(chars[index]), center: CGPoint(x: left + (Double(index - offset) + 0.5) * advance, y: y)))
+                                let width = widths[paragraph][index]
+                                glyphs.append(ReadingGlyph(text: String(chars[index]), center: CGPoint(x: cursor + width / 2, y: y)))
+                                cursor += width
                             }
                             offset = end
                             if offset == chars.count { paragraph += 1; offset = 0 }
