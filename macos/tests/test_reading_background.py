@@ -192,6 +192,19 @@ class ReadingBackgroundTests(unittest.TestCase):
                                   restorer=lambda crop, mask: np.full_like(crop, 205))
         self.assertTrue(decode(region)[:, :, 3].any())
 
+    def test_foreground_uses_restored_ground_instead_of_original_white_halo(self):
+        gray = np.full((200, 200), 30, np.uint8)
+        gray[70:130, 70:130] = 250
+        source_mask = np.zeros_like(gray)
+        source_mask[70:130, 70:130] = 255
+        clip = np.zeros_like(gray)
+        clip[65:135, 65:135] = 1
+        region = background_patch(gray, [[70, 70, 130, 130]], clip=(clip, (0, 0)),
+                                  textured=True, source_mask=source_mask,
+                                  restorer=lambda crop, mask: np.full_like(crop, 30))
+        self.assertTrue(region["dark_background"])
+        self.assertGreater(np.median(gray[clip > 0]), 115)
+
     def test_color_restoration_changes_only_selected_ink(self):
         color = np.full((200, 200, 3), [50, 100, 180], np.uint8)
         color[80:96, 90:101] = 0

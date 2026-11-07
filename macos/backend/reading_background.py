@@ -233,5 +233,7 @@ def background_patch(gray, boxes, *, clip=None, textured=False, color=None, sour
     if not ok:
         raise ValueError("Could not encode reading background patch")
     return {"background_png": base64.b64encode(png).decode("ascii"),
-            "dark_background": bool(allowed.any() and np.median(patch[allowed > 0]) < 115),
+            # Original white glyph halos can dominate a small dark balloon.
+            # Choose foreground contrast against the cleaned ground instead.
+            "dark_background": bool(allowed.any() and np.median(restored[allowed > 0]) < 115),
             "background_box": [left, top, right, bottom]}
