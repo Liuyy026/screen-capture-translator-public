@@ -2,9 +2,33 @@
 
 简体中文 | [English](README.en.md)
 
-项目进度、修改指导和开发计划已统一整理至 [进度汇总](进度汇总/README.md)，当前七项目标状态见 [当前进度](进度汇总/当前进度_2026-09-14.md)。进度文档已纳入本仓库；模型和原始评测产物保留在本地。
+使用 Manga OCR 识别日文，通过本地 Ollama 和 Qwen3 翻译成简体中文。macOS 与 Windows 分目录维护，共用 Python 后端。
 
-Koma 是一个本地运行的漫画翻译工具：打开包含图片的文件夹，自动检测漫画文字，用 Manga OCR 识别日文，再通过本机 Ollama 和 Qwen3 翻译成简体中文。项目包含 macOS 原生 SwiftUI 阅读器和 Windows PySide6 验证版，共用同一套 Python 后端。
+## 选择版本
+
+| 版本 | 使用说明 | 启动入口 |
+| --- | --- | --- |
+| macOS / SwiftUI | [macOS 说明](macos/README.md) | `macos/安装.command`、`macos/启动.command` |
+| Windows / PySide6 | [Windows 说明](windows/README.md) | `windows/启动Windows.bat` |
+
+```text
+macos/      macOS 源码、依赖、安装与构建
+windows/    Windows 源码、依赖、启动器与界面测试
+backend/    共用 OCR、翻译、缓存、结构与覆盖逻辑
+scripts/    共用模型准备、标注、评估工具
+tests/      共用后端测试与固定样例
+samples/    原创测试图片
+docs/       开发说明与评估记录
+进度汇总/   历史计划与评测报告
+```
+
+请保留完整仓库。平台各自管理虚拟环境、客户端日志和构建产物；模型仍保存在仓库根目录 `.models/`。
+
+[共享开发说明](docs/development.md) · [新旧路径对照](docs/layout-migration.md) · [历史进度](进度汇总/README.md)
+
+[macOS 安装与翻译流程验证（2026-11-07）](docs/macos-verification-2026-11-07.md)：已在本机完成构建、启动、依赖与模型安装，以及样例 OCR 和翻译验证。
+
+[Ollama / oMLX 接口设置与验证](docs/omlx-integration-2026-11-07.md)：两端已支持地址、API Key 和模型选择，macOS 已完成两种后端的真实样例测试。
 
 ## 功能
 
@@ -16,189 +40,9 @@ Koma 是一个本地运行的漫画翻译工具：打开包含图片的文件夹
 
 以上编辑保存、单句重译和整文件夹批处理已有 macOS 界面入口。Windows 验证版目前支持单页处理、停止、缓存读取和结构诊断，右侧结果区仍为只读；编辑、重译和文件夹队列入口尚待接入。英文 README 仅提供英文说明，应用界面和翻译目标仍为中文。
 
-## macOS 启动
-
-项目针对 Apple Silicon、macOS 14+ 开发。完成安装后，双击根目录的 **启动.command**，或打开 **dist/Koma 漫画翻译.app**。
-
-1. 点击「打开文件夹」，选择直接包含图片的文件夹。
-2. 点击「识别并翻译」。也可以通过「更多」菜单只识别日文，或翻译整个文件夹。
-3. 切换「原图 / 文字框 / 中文」查看不同显示模式。
-4. 在右侧编辑文本，点击「保存修改」；修改日文会清除对应旧译文。
-5. 重新翻译单句前先保存编辑，再点击该句下方的「重新翻译」。
-
-`samples/` 中的两张原创 WebP 测试图包含横排和竖排日文，可用于检查流程，不代表真实漫画上的识别准确率。
-
-## Windows 启动
-
-Windows 阅读器直接双击根目录的 **启动Windows.bat**。启动器会按顺序检查 `.venv-cuda` 和 `.venv`，选择第一个能加载 PySide6 的 Python；OCR 子进程沿用相同解释器。它会在 `11439` 端口未监听时尝试启动本机 Ollama，并通过系统级单实例锁避免重复打开窗口。
-
-模型仓库可以集中放在系统 Ollama 默认目录，同时保留项目路径兼容现有启动流程。先退出翻译软件和 Ollama，预览迁移计划：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\migrate_ollama_models.ps1
-```
-
-确认目标目录为空且路径正确后，才执行实际迁移：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\migrate_ollama_models.ps1 -Apply
-```
-
-脚本会移动完整的 `blobs` 和 `manifests`，然后在原 `.models\ollama` 路径建立 Windows junction。启动器仍默认使用原路径，因此翻译软件不需要改用另一套模型仓库；也可以通过 `KOMA_OLLAMA_MODELS` 指向其他完整仓库。迁移前必须关闭监听 `11434` 或 `11439` 的 Ollama 实例，目标目录必须为空。不要只移动大文件，Ollama 的 manifests 与 blobs 必须一起迁移。
-
-启动过程和错误记录在 `.runtime\windows-launch.log`。只检查环境、不启动界面时运行：
-
-```powershell
-.\启动Windows.bat --check
-```
-
-启动成功后会看到 **Koma · 本地漫画翻译** 窗口。最小验证流程：打开项目内 `samples` 文件夹，选中 `01.webp`，点击「识别并翻译」，等待状态变为「完成」，右侧应显示 5 条日文及其中文译文。
-
-如果双击后没有窗口，先查看 `.runtime\windows-launch.log`。启动器会区分 Python 运行时失败、PySide6 加载失败和应用自身错误。
-
-## Windows 环境复现
-
-Windows 开发环境使用 Python 3.12.14 验证，系统中的其他 Python 版本可以保留。无需激活虚拟环境，直接指定解释器即可：
-
-```powershell
-.\.venv\Scripts\python.exe --version
-.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -X utf8 backend\worker.py --help
-```
-
-如需激活环境，可在 PowerShell 中执行：
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-$env:PYTHONUTF8 = '1'
-```
-
-如果执行策略阻止激活，继续使用上面的完整解释器路径即可。
-
-Windows 后端读写中文 JSON 时建议使用上面的 `-X utf8` 参数，或设置 `PYTHONUTF8=1`。
-
-IDE 的 Python 解释器请选择 `.venv\Scripts\python.exe`。本机完整 Python 运行时放在 `.runtime\python`；如果移动整个项目目录，需要同步更新两个虚拟环境中的 `pyvenv.cfg`，使其 `home` 指向新的运行时位置。
-
-在另一台已有 Python 3.12 的 Windows 机器上，可从项目目录重新创建基础环境：
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -X utf8 -m pip install -r requirements-windows.lock
-```
-
-也可以使用项目内的 uv：
-
-```powershell
-.\.runtime\tools\uv.exe pip install --python .venv\Scripts\python.exe -r requirements-windows.lock
-```
-
-`requirements-windows.txt` 是 Windows 基础依赖，`requirements-windows.lock` 记录本次验证过的完整依赖。原 `requirements.lock` 中的 `transformers==4.44.2` 与 Manga OCR 0.1.16 不兼容，因此 Windows 使用 `transformers==4.45.2`。Windows 依赖文件不要直接用于 macOS。
-
-### CUDA 环境
-
-有 NVIDIA GPU 时，Windows 阅读器优先使用 `.venv-cuda`。当前验证环境使用 RTX 5070、CUDA 12.8：
-
-```powershell
-.\.venv\Scripts\python.exe -m venv .venv-cuda
-.\.venv-cuda\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1 torchvision==0.22.1
-.\.venv-cuda\Scripts\python.exe -m pip install -r requirements-windows-cuda.txt
-.\.venv-cuda\Scripts\python.exe -m pip install PySide6==6.9.2
-```
-
-没有 NVIDIA GPU 时可只使用 `.venv`；程序会自动回退到 CPU 或系统可用的加速后端。
-
-## Ollama 与模型
-
-### 对白单元与 A/B 验证
-
-后端缓存会保存 `dialogues`、成员块编号、阅读顺序和 `diagnostics`。翻译时可选择按文字块或完整对白单元组织请求：
-
-```powershell
-python backend\worker.py --image page.webp --operation translate --translation-unit dialogues --status status.json
-```
-
-固定测试集可分别用 `--translation-unit blocks` 与 `--translation-unit dialogues` 运行，再用 `scripts\compare_translation_units.py` 比较块级和对白级成功率。已有缓存可用 `scripts\migrate_structure.py` 补齐结构字段。
-
-结构评估可用 `python scripts/evaluate_structure.py <缓存目录> --output structure-report.json`。该命令只在内存中迁移旧结构，保留原始缓存，报告每页 OCR 指纹、成员归属、阅读顺序连续性和需复核候选。连续性是结构完整性检查，不等同于人工阅读顺序正确率。
-
-完整 A/B 可使用 `python scripts/run_translation_ab.py <原始缓存目录> <图片目录> <新的输出目录>`。脚本清空副本中的机器译文，固定 OCR、记录图片和模型摘要，逐页交替运行 blocks/dialogues，并保存每次请求耗时。输出目录必须是新目录，防止历史缓存冒充新推理。之后运行 `python scripts/render_translation_ab.py <输出目录>` 检查两组全部页面的布局和轮廓约束。此检查不能代替人工判断气泡是否误检或画面是否被误伤。
-
-对白模式以 `dN` 为翻译目标，缓存 `full_translation`、`mapping_status` 及每个成员的结果。只有一个源块时可直接映射；多行一一对应时标为 `lines_unreviewed`；无法确认拆分时标为 `whole_only`，成员译文留空，整句仅在成员完全匹配的可信区域显示。暂不对无明确拆分的整句按字数硬切，逐块模式保留为回退。页面文字、拟声词和标点只标候选类型，不因短语或拉丁字母启发式直接丢弃。
-
-固定 62 页的 v5 结果与局限见 [结构与翻译评估记录](docs/structure-evaluation-2026-09-14.md)。v5 A/B 中对白模式自动完整率为 589/604（97.5%），逐块模式为 543/604（89.9%）；默认仍为逐块模式，因为自动完整率不等于语义准确率。
-
-分镜 v5 的快速回归可用 `python scripts/run_translation_ab.py <原始缓存目录> <图片目录> <新的输出目录> --limit 3`，再运行 `python scripts/render_translation_ab.py <输出目录>`。历史 3 页回归中对白单元自动完成率为 16/17，逐块为 15/17；两组均无轮廓外绘制像素。该数字只用于协议和排版回归。
-
-人工结构标注可先运行 `python scripts/annotate_structure.py <缓存页.json> <标注.json> --init`，在模板中填写 `expected_dialogues`、`expected_panel_order` 或按块填写 `expected_block_attributes`（`vertical`/`text_kind`），再用 `--score` 计算严格精确匹配率、顺序无关的最佳 Jaccard 覆盖率和属性字段准确率。已有标注文件默认不会被 `--init` 覆盖，确需重建时显式加 `--force`。未填写的模板不会生成虚假的准确率；两类指标分别保留，不能互相替代。
-
-批量汇总使用 `python scripts/score_structure_annotations.py <标注目录> --output annotation-score.json`。未完成标注的页面会单独计数，不参与平均值；未知块编号、重复归属和空单元会作为 `label_warnings` 报告，避免标签错误被误当成模型准确率。
-
-macOS 和 Windows 都使用本机 `127.0.0.1:11439`，并关闭云端功能。模型文件放在项目 `.models\ollama`（macOS 为 `.models/ollama`），不纳入 Git。Windows 手动启动服务时：
-
-```powershell
-$env:OLLAMA_HOST = '127.0.0.1:11439'
-$env:OLLAMA_MODELS = (Resolve-Path '.models\ollama').Path
-$env:OLLAMA_NO_CLOUD = '1'
-$env:OLLAMA_MAX_LOADED_MODELS = '1'
-$env:OLLAMA_NUM_PARALLEL = '1'
-ollama serve
-```
-
-检查已安装模型和 GPU 占用：
-
-```powershell
-$env:OLLAMA_HOST = '127.0.0.1:11439'
-ollama list
-ollama ps
-```
-
-当前 Windows 默认使用已验证的 `qwen3:4b-q6k`（Q6_K，约 3.3 GB）；`qwen3:4b` 和 `qwen3:8b` 仍可在界面中切换。官方没有 `qwen3:9b` 标签。完整翻译流程需要 Ollama 保持在上述端口运行。原 `scripts/setup.py` 下载的是 macOS 二进制，不能用于 Windows 完整安装。
-
-网络可用时下载 OCR 模型：
-
-```powershell
-.\.venv\Scripts\python.exe -X utf8 scripts\prepare_models.py
-```
-
-## 数据、缓存与日志
-
-- macOS 缓存：`~/Library/Application Support/KomaReader/pages/`。
-- Windows 缓存：`%LOCALAPPDATA%\KomaReader\pages\`。
-- Linux 缓存：`$XDG_DATA_HOME/KomaReader/pages/`，未设置时使用 `~/.local/share/KomaReader/pages/`。
-- 缓存按图片内容 SHA-256 命名；文件重命名仍可命中，同名但内容不同的图片不会串页。
-- OCR 日志：`.runtime/ocr.log`；模型下载日志：`.runtime/model-download.log`；Windows 启动日志：`.runtime\windows-launch.log`。
-- `.venv`、`.venv-cuda`、`.runtime`、`.models`、构建产物和 Python 缓存均不应提交到 Git。
-
-## 开发与验证
-
-macOS：
-
-```sh
-zsh scripts/build.sh
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python backend/worker.py --image samples/01.webp --operation both --status .runtime/test-status.json
-```
-
-Windows：
-
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -X utf8 backend\worker.py --image samples\01.webp --operation both --status .runtime\test-status.json
-```
-
-实现位置：
-
-- `Sources/KomaReader.swift`：macOS 原生窗口、文件夹选择、阅读、覆盖和编辑。
-- `windows_app.py`：Windows PySide6 阅读器、缩放、覆盖和单实例控制。
-- `backend/worker.py`：单页 OCR、缓存、翻译、编号校验和错误保存。
-- `backend/overlay.py`：文字区域分析和中文覆盖几何计算。
-- `scripts/build.sh`：使用系统 Swift 编译器生成并本地签名 macOS App。
-- `启动Windows.bat`：Windows Python、Ollama 和日志启动器。
-- `tests/`：缓存隔离、覆盖区域、漏译/重复编号、手动编辑保留等后端测试。
-
-每页在独立 Python 进程中处理，页面完成后释放 OCR 内存；未缓存页面需要重新加载模型。文字检测在 CPU 运行，Manga OCR 会使用本机可用的 MPS 或 CUDA 加速。翻译模型从 4B 起步，可按机器资源切换其他本地模型。
-
 ## 当前验证结果与限制
+
+以下验证结果为原项目保留的历史记录；本次整理未重新运行真实 OCR、GPU 或模型评测。
 
 - macOS 原生应用已编译并本地签名；Windows 阅读器可通过启动器运行。
 - Windows 基础环境此前通过 `pip check`；2026-09-19 上传前在 `.venv-cuda` 环境完成 93 项 Python 回归测试，全部通过。

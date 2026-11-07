@@ -3,6 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 set "PROJECT=%~dp0"
 if "%PROJECT:~-1%"=="\" set "PROJECT=%PROJECT:~0,-1%"
+for %%I in ("%PROJECT%\..") do set "REPO=%%~fI"
 set "LOGDIR=%PROJECT%\.runtime"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>&1
 set "LOG=%LOGDIR%\windows-launch.log"
@@ -19,6 +20,11 @@ if not defined PYTHON call :check_python "%PROJECT%\.venv\Scripts\python.exe"
 if not defined PYTHON goto no_python
 >>"%LOG%" echo selected Python: "%PYTHON%"
 if defined CHECK_ONLY exit /b 0
+rem Only auto-start the bundled local Ollama connection. External services
+rem (including oMLX) are managed by their own applications.
+rem Read settings inside Python; never expand user-supplied URLs into cmd syntax.
+"%PYTHON%" -I -X utf8 -c "from PySide6.QtCore import QSettings; import sys; s=QSettings('KomaReader','WindowsReader'); p=s.value('translation/provider','ollama'); u=s.value('translation/ollama/base_url','http://127.0.0.1:11439'); sys.exit(0 if p=='ollama' and str(u).rstrip('/')=='http://127.0.0.1:11439' else 1)" >>"%LOG%" 2>&1
+if errorlevel 1 goto launch_reader
 set "OLLAMA=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
 if not exist "%OLLAMA%" (
   set "OLLAMA="
@@ -33,7 +39,7 @@ rem KOMA_OLLAMA_MODELS can point to a shared Ollama store. The project path
 rem remains the default so an existing junction works without extra settings.
 set "MODEL_ROOT=%KOMA_OLLAMA_MODELS%"
 if not defined MODEL_ROOT set "MODEL_ROOT=%OLLAMA_MODELS%"
-if not defined MODEL_ROOT set "MODEL_ROOT=%PROJECT%\.models\ollama"
+if not defined MODEL_ROOT set "MODEL_ROOT=%REPO%\.models\ollama"
 if exist "%MODEL_ROOT%\manifests\" (
   set "OLLAMA_MODELS=%MODEL_ROOT%"
   >>"%LOG%" echo Ollama model store: "%OLLAMA_MODELS%"
@@ -46,6 +52,7 @@ if not defined LISTENING if defined OLLAMA (
   >>"%LOG%" echo starting Ollama: "%OLLAMA%"
   powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath $env:OLLAMA -ArgumentList 'serve' -WindowStyle Hidden" >>"%LOG%" 2>&1
 )
+:launch_reader
 >>"%LOG%" echo launching windows_app.py
 cd /d "%PROJECT%"
 "%PYTHON%" -X utf8 "%PROJECT%\windows_app.py" >>"%LOG%" 2>&1

@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $Source) {
-    $Source = Join-Path (Split-Path -Parent $PSScriptRoot) '.models\ollama'
+    $Source = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) '.models\ollama'
 }
 if (-not $Target) {
     $Target = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ollama\models'

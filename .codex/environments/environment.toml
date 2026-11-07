@@ -1,0 +1,10 @@
+version = 1
+name = "Koma"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "./macos/scripts/build_and_run.sh"

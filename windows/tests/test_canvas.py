@@ -12,7 +12,7 @@ from PySide6.QtCore import QPointF, Qt, QRectF
 from PySide6.QtGui import QColor, QImage, QPixmap, QFont, QFontMetricsF, QFontDatabase, QRawFont, QPainter
 from PySide6.QtWidgets import QApplication, QListWidgetItem
 
-from windows_app import ImageCanvas, Reader
+from windows.windows_app import ImageCanvas, Reader
 
 
 class CanvasTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class CanvasTests(unittest.TestCase):
         }
 
     def install(self, page):
-        with patch("windows_app.ensure_page_overlays", return_value=False):
+        with patch("windows.windows_app.ensure_page_overlays", return_value=False):
             self.canvas.set_page(page)
 
     def pixels(self, mode):
@@ -175,7 +175,7 @@ class CanvasTests(unittest.TestCase):
         page = self.page()
         self.install(page)
         layout = copy.deepcopy(self.canvas._overlay_layouts)
-        with patch("windows_app.ensure_page_overlays", side_effect=AssertionError("detector called")), \
+        with patch("windows.windows_app.ensure_page_overlays", side_effect=AssertionError("detector called")), \
                 patch.object(self.canvas, "_build_layouts", side_effect=AssertionError("layout called")), \
                 patch.object(self.canvas, "_overlay_font", side_effect=AssertionError("font discovery called")):
             self.pixels(0)
@@ -205,7 +205,7 @@ class CanvasTests(unittest.TestCase):
             value["overlay_regions"] = (copy.deepcopy(page["overlay_regions"])
                                         if value["blocks"][0]["translation"].strip() else [])
 
-        with patch("windows_app.ensure_page_overlays", side_effect=classify) as detector:
+        with patch("windows.windows_app.ensure_page_overlays", side_effect=classify) as detector:
             self.canvas.set_blocks(blocks)
             self.assertFalse(self.canvas._overlay_regions)
             blocks[0]["translation"] = "Hello world"

@@ -1,7 +1,9 @@
 mokuro==0.2.0
-transformers==4.44.2
+manga-ocr==0.1.16
+transformers==4.45.2
 torch==2.5.1
+torchvision==0.20.1
 setuptools<81
 numpy==1.26.4
 opencv-python==4.11.0.86
-scipy==1.15.3
+scipy==1.17.1

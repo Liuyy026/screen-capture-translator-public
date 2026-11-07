@@ -5,20 +5,273 @@ import json
 import hashlib
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QProcess, QStandardPaths, Qt, QTimer, QRectF, QPointF, Signal
+from PySide6.QtCore import QLockFile, QProcess, QProcessEnvironment, QSettings, QStandardPaths, Qt, QTimer, QRectF, QPointF, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont, QPainter, QPainterPath, QPen, QColor, QWheelEvent, QMouseEvent, QFontMetrics, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QPushButton, QComboBox, QHBoxLayout, QVBoxLayout, QWidget,
-    QPlainTextEdit,
+    QPlainTextEdit, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
 )
+
+# Direct execution adds windows/ to sys.path; resolve the shared backend from
+# the repository so launching from Explorer or another directory also works.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.overlay import ensure_page_overlays
 from backend.structure import ensure_dialogues
+from backend.translation_service import DEFAULT_URLS, TranslationServiceError, normalize_base_url
 
 IMAGE_EXTS = {".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+SERVICE_DEFAULTS = dict(DEFAULT_URLS)
+SERVICE_NAMES = {"ollama": "Ollama", "omlx": "oMLX"}
+DEFAULT_MODEL = "qwen3:4b-q6k"
+
+
+@dataclass(frozen=True)
+class ServiceConfig:
+    provider: str
+    base_url: str
+    api_key: str = field(default="", repr=False)
+
+    def arguments(self) -> list[str]:
+        return ["--provider", self.provider, "--base-url", self.base_url]
+
+    def environment(self) -> QProcessEnvironment:
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.remove("KOMA_TRANSLATION_API_KEY")
+        if self.api_key:
+            environment.insert("KOMA_TRANSLATION_API_KEY", self.api_key)
+        return environment
+
+
+def valid_service_url(value: str, provider: str = "ollama") -> bool:
+    """Keep credentials out of persisted URLs; the separate key is session only."""
+    try:
+        normalize_base_url(provider, value)
+        return True
+    except TranslationServiceError:
+        return False
+
+
+class ServiceSettingsDialog(QDialog):
+    """Edit a service draft and discover models without blocking the reader."""
+
+    def __init__(self, reader):
+        super().__init__(reader)
+        self.setWindowTitle("翻译服务设置")
+        self.setMinimumWidth(560)
+        self._reader = reader
+        self._shown_provider = reader.provider
+        self._drafts = {provider: {"base_url": reader.service_endpoints[provider],
+                                   "api_key": reader._api_keys[provider],
+                                   "model": reader.service_models[provider]}
+                        for provider in SERVICE_DEFAULTS}
+        self._generation = 0
+        self._probe: QProcess | None = None
+        self._processes: set[QProcess] = set()
+        self.discovered_models: list[str] | None = None
+        self.provider = QComboBox()
+        for provider, name in SERVICE_NAMES.items():
+            self.provider.addItem(name, provider)
+        self.provider.setCurrentIndex(self.provider.findData(reader.provider))
+        self.endpoint = QLineEdit()
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.setPlaceholderText("无需认证时留空")
+        self.model = QComboBox()
+        self.model.setObjectName("translationModel")
+        self.model.setEditable(True)
+        self.model.setInsertPolicy(QComboBox.NoInsert)
+        self.model.lineEdit().setPlaceholderText("获取模型后选择，也可输入模型 ID")
+        self.refresh_button = QPushButton("测试连接并获取模型")
+        self.message = QLabel("填写服务地址后，测试连接并选择模型。")
+        self.message.setWordWrap(True)
+        note = QLabel("API Key 仅在本次运行的内存中保留，关闭应用后需重新填写。\noMLX 模型由服务端管理，本应用不会启动或停止 oMLX 服务。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#66747a; font-size:12px;")
+        form = QFormLayout()
+        form.addRow("服务", self.provider)
+        form.addRow("服务地址", self.endpoint)
+        form.addRow("API Key", self.api_key)
+        form.addRow("模型", self.model)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Save).setText("保存")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(self.refresh_button)
+        layout.addWidget(self.message)
+        layout.addWidget(self.buttons)
+        self._load_provider()
+        self.provider.currentIndexChanged.connect(self._provider_changed)
+        self.endpoint.textChanged.connect(self._endpoint_changed)
+        self.api_key.textChanged.connect(self._connection_changed)
+        self.refresh_button.clicked.connect(self.refresh_models)
+        self.buttons.accepted.connect(self._save)
+        self.buttons.rejected.connect(self.reject)
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.timeout.connect(self._probe_timed_out)
+
+    def _load_provider(self):
+        draft = self._drafts[self._shown_provider]
+        self.endpoint.setText(draft["base_url"])
+        self.api_key.setText(draft["api_key"])
+        self.model.clear()
+        models = (self._reader._service_model_lists.get((self._shown_provider, draft["base_url"]))
+                  if draft["api_key"] == self._reader._api_keys[self._shown_provider] else None)
+        if models:
+            self.model.addItems(models)
+        self.model.setEditText(draft["model"])
+        self.discovered_models = list(models) if models is not None else None
+        self._key_endpoint = self.config().base_url
+
+    def _provider_changed(self, _index):
+        self._drafts[self._shown_provider] = {"base_url": self.endpoint.text().strip().rstrip("/"),
+                                              "api_key": self.api_key.text(),
+                                              "model": self.model.currentText().strip()}
+        self._cancel_probe()
+        self._shown_provider = self.provider.currentData()
+        self.endpoint.blockSignals(True)
+        self.api_key.blockSignals(True)
+        self._load_provider()
+        self.endpoint.blockSignals(False)
+        self.api_key.blockSignals(False)
+        self.message.setText("服务已切换，请测试连接并选择该服务的模型。")
+
+    def _connection_changed(self, _text):
+        self._cancel_probe()
+        selected = self.model.currentText()
+        self.model.clear()
+        self.model.setEditText(selected)
+        self.discovered_models = None
+        self.message.setText("连接配置已更改，请重新测试并获取模型。")
+
+    def _endpoint_changed(self, text):
+        endpoint = self.config().base_url
+        cleared = endpoint != self._key_endpoint and bool(self.api_key.text())
+        if endpoint != self._key_endpoint:
+            # A key supplied for one server must not travel to a new address.
+            self.api_key.blockSignals(True)
+            self.api_key.clear()
+            self.api_key.blockSignals(False)
+            self._key_endpoint = endpoint
+        self._connection_changed(text)
+        if cleared:
+            self.message.setText("服务地址已更改，原 API Key 已清空。请为新地址填写密钥并重新测试。")
+
+    def config(self) -> ServiceConfig:
+        provider = self.provider.currentData()
+        endpoint = self.endpoint.text().strip()
+        try:
+            endpoint = normalize_base_url(provider, endpoint)
+        except TranslationServiceError:
+            pass  # A draft may be incomplete while the user edits its address.
+        return ServiceConfig(provider, endpoint, self.api_key.text())
+
+    def _cancel_probe(self):
+        self._generation += 1
+        if hasattr(self, "_timeout"):
+            self._timeout.stop()
+        process, self._probe = self._probe, None
+        if process is not None and process.state() != QProcess.NotRunning:
+            process.kill()
+        self.refresh_button.setText("测试连接并获取模型")
+
+    def refresh_models(self):
+        self._cancel_probe()
+        config = self.config()
+        if not valid_service_url(config.base_url):
+            self.message.setText("请输入有效的 HTTP 或 HTTPS 服务地址；认证信息请填写在 API Key 中。")
+            return
+        generation = self._generation
+        process = QProcess(self)
+        self._processes.add(process)
+        self._probe = process
+        process.setProgram(sys.executable)
+        process.setArguments(["-X", "utf8", str(self._reader.root / "backend" / "worker.py"),
+                              "--list-models", *config.arguments()])
+        process.setProcessEnvironment(config.environment())
+        process.finished.connect(lambda code, status: self._probe_finished(process, generation, config, code, status))
+        process.errorOccurred.connect(lambda error: self._probe_error(process, generation, error))
+        self.message.setText("正在连接服务并获取模型…")
+        self.refresh_button.setText("重新测试连接")
+        self._timeout.start(30000)
+        process.start()
+
+    def _release_probe(self, process):
+        self._processes.discard(process)
+        process.deleteLater()
+
+    def _probe_error(self, process, generation, error):
+        if error != QProcess.FailedToStart:
+            return
+        if process is self._probe and generation == self._generation:
+            self._timeout.stop()
+            self._probe = None
+            self.refresh_button.setText("测试连接并获取模型")
+            self.message.setText("无法启动连接测试，请检查应用的 Python 环境。")
+        self._release_probe(process)
+
+    def _probe_timed_out(self):
+        self._cancel_probe()
+        self.message.setText("连接测试超时，请检查服务是否启动以及地址和认证信息。")
+
+    def _probe_finished(self, process, generation, config, code, _status):
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        current = process is self._probe and generation == self._generation and config == self.config()
+        self._release_probe(process)
+        if not current:
+            return
+        self._timeout.stop()
+        self._probe = None
+        self.refresh_button.setText("测试连接并获取模型")
+        try:
+            result = json.loads(output)
+            if not isinstance(result, dict):
+                raise ValueError
+            if result.get("ok") is not True or code != 0:
+                error = str(result.get("error") or f"测试进程退出（代码 {code}）")
+                if config.api_key:
+                    error = error.replace(config.api_key, "[已隐藏]")
+                self.message.setText(f"连接失败：{error[:350]}")
+                return
+            models = result.get("models")
+            if not isinstance(models, list) or any(not isinstance(model, str) or not model.strip() for model in models):
+                raise ValueError
+        except (json.JSONDecodeError, ValueError):
+            self.message.setText("连接失败：服务返回的模型列表格式无效。")
+            return
+        selected = self.model.currentText().strip()
+        models = list(dict.fromkeys(model.strip() for model in models))
+        self.model.clear()
+        self.model.addItems(models)
+        self.model.setEditText(selected or (models[0] if models else ""))
+        self.discovered_models = models
+        if not models:
+            self.message.setText("连接成功，服务尚未列出模型。请先在服务端准备模型，也可填写模型 ID。")
+        elif selected and selected not in models:
+            self.message.setText(f"连接成功，发现 {len(models)} 个模型。已保留当前模型 ID；列表未包含它，请核对或重新选择。")
+        else:
+            self.message.setText(f"连接成功，发现 {len(models)} 个模型。")
+
+    def _save(self):
+        if self._reader.worker_active():
+            return
+        if not valid_service_url(self.config().base_url):
+            self.message.setText("请输入有效的 HTTP 或 HTTPS 服务地址；认证信息请填写在 API Key 中。")
+            return
+        self._cancel_probe()
+        self.accept()
+
+    def done(self, result):
+        self._cancel_probe()
+        super().done(result)
 
 
 def natural_key(path: Path):
@@ -539,18 +792,35 @@ class ImageCanvas(QWidget):
 
 
 class Reader(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: QSettings | None = None):
         super().__init__()
         self.setWindowTitle("Koma · 本地漫画翻译")
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
-        self.root = Path(__file__).resolve().parent
+        self.root = PROJECT_ROOT
+        self.platform_root = Path(__file__).resolve().parent
         self.images: list[Path] = []
         self.process: QProcess | None = None
         self._worker_image: Path | None = None
+        self._worker_generation = 0
+        self._worker_config: ServiceConfig | None = None
         self.current: Path | None = None
         self.cache_path: Path | None = None
         self._display_initialized = False
+        self.settings = settings if settings is not None else QSettings("KomaReader", "WindowsReader")
+        saved_provider = self.settings.value("translation/provider", "ollama")
+        self.provider = saved_provider if saved_provider in SERVICE_DEFAULTS else "ollama"
+        self.service_endpoints = {}
+        self.service_models = {}
+        for provider, endpoint in SERVICE_DEFAULTS.items():
+            saved_endpoint = str(self.settings.value(f"translation/{provider}/base_url", endpoint))
+            self.service_endpoints[provider] = (normalize_base_url(provider, saved_endpoint)
+                                                if valid_service_url(saved_endpoint, provider) else endpoint)
+            self.service_models[provider] = str(self.settings.value(
+                f"translation/{provider}/model", DEFAULT_MODEL if provider == "ollama" else ""))
+        self._api_keys = {provider: "" for provider in SERVICE_DEFAULTS}
+        self._service_model_lists: dict[tuple[str, str], list[str]] = {}
+        self.service_dialog: ServiceSettingsDialog | None = None
 
         self.list = QListWidget()
         self.list.setMinimumWidth(240)
@@ -565,9 +835,17 @@ class Reader(QMainWindow):
         self.results.setMinimumWidth(390)
         self.results.setObjectName("results")
         self.model = QComboBox()
-        # Keep the locally validated Q6_K model as the primary choice while
-        # retaining the original models as explicit alternatives.
-        self.model.addItems(["qwen3:4b-q6k", "qwen3:4b", "qwen3:8b"])
+        self.model.setObjectName("translationModel")
+        self.model.setEditable(True)
+        self.model.setInsertPolicy(QComboBox.NoInsert)
+        self.model.setMinimumWidth(260)
+        self.model.lineEdit().setPlaceholderText("在服务设置中获取模型，或输入模型 ID")
+        self._update_model_choices()
+        self.model.currentIndexChanged.connect(self._remember_model)
+        self.model.lineEdit().editingFinished.connect(self._remember_model)
+        self.service_button = QPushButton()
+        self.service_button.clicked.connect(self.open_service_settings)
+        self._update_service_button()
         open_btn = QPushButton("📁  打开文件夹")
         open_btn.setObjectName("primary")
         open_btn.clicked.connect(self.open_folder)
@@ -594,9 +872,14 @@ class Reader(QMainWindow):
         bar.setContentsMargins(18, 14, 18, 10)
         bar.addWidget(self.folder_label)
         bar.addStretch(1)
-        for widget in (open_btn, run_btn, ocr_btn, stop_btn, QLabel("模型"), self.model):
+        for widget in (open_btn, run_btn, ocr_btn, stop_btn):
             bar.addWidget(widget)
         bar.addWidget(QLabel("显示")); bar.addWidget(self.display); bar.addWidget(self.zoom)
+        service_bar = QHBoxLayout()
+        service_bar.setContentsMargins(18, 0, 18, 8)
+        for widget in (QLabel("翻译服务"), self.service_button, QLabel("模型"), self.model):
+            service_bar.addWidget(widget)
+        service_bar.addStretch(1)
         main = QHBoxLayout()
         main.setContentsMargins(14, 0, 14, 10)
         main.setSpacing(12)
@@ -605,6 +888,7 @@ class Reader(QMainWindow):
         main.addWidget(self.results)
         layout = QVBoxLayout()
         layout.addLayout(bar)
+        layout.addLayout(service_bar)
         layout.addLayout(main, 1)
         layout.addWidget(self.status)
         layout.setContentsMargins(0, 0, 0, 6)
@@ -619,6 +903,8 @@ class Reader(QMainWindow):
             QPushButton#primary:hover { background:#0ea6b4; }
             QPushButton#danger { color:#c74343; }
             QComboBox { background:white; border:1px solid #d7e0e5; border-radius:7px; padding:7px 10px; min-width:90px; }
+            QComboBox#translationModel { min-width:300px; }
+            QLineEdit { background:white; border:1px solid #d7e0e5; border-radius:7px; padding:7px 10px; }
             QComboBox#displayMode { min-width:84px; color:#263238; selection-background-color:#16b9c8; }
             QComboBox#displayMode:hover { border-color:#16b9c8; }
             QListWidget#pageList { background:#dce6ec; border:1px solid #c8d6dd; border-radius:8px; padding:8px; }
@@ -631,6 +917,78 @@ class Reader(QMainWindow):
         """)
         self.poll = QTimer(self)
         self.poll.timeout.connect(self.read_status)
+
+    def service_config(self) -> ServiceConfig:
+        return ServiceConfig(self.provider, self.service_endpoints[self.provider], self._api_keys[self.provider])
+
+    def worker_active(self) -> bool:
+        return self._worker_image is not None
+
+    def _set_worker_busy(self, busy):
+        self.model.setEnabled(not busy)
+        self.service_button.setEnabled(not busy)
+        if self.service_dialog is not None:
+            if busy:
+                self.service_dialog._cancel_probe()
+            self.service_dialog.setEnabled(not busy)
+
+    def _update_service_button(self):
+        self.service_button.setText(f"{SERVICE_NAMES[self.provider]} · 服务设置…")
+        self.service_button.setToolTip(self.service_endpoints[self.provider])
+
+    def _update_model_choices(self):
+        self.model.blockSignals(True)
+        self.model.clear()
+        models = self._service_model_lists.get((self.provider, self.service_endpoints[self.provider]), [])
+        self.model.addItems(models)
+        self.model.setEditText(self.service_models[self.provider])
+        self.model.blockSignals(False)
+
+    def _remember_model(self, *_args):
+        if self.worker_active():
+            return
+        model = self.model.currentText().strip()
+        self.service_models[self.provider] = model
+        self.settings.setValue(f"translation/{self.provider}/model", model)
+
+    def open_service_settings(self):
+        if self.worker_active():
+            return
+        if self.service_dialog is not None and self.service_dialog.isVisible():
+            self.service_dialog.raise_()
+            self.service_dialog.activateWindow()
+            return
+        self._remember_model()
+        if self.service_dialog is not None:
+            self.service_dialog.deleteLater()
+        dialog = ServiceSettingsDialog(self)
+        self.service_dialog = dialog
+        dialog.accepted.connect(lambda: self._apply_service_settings(dialog))
+        # Window-modal keeps an unfinished service draft from racing a new
+        # translation; QDialog.open() and its QProcess leave the event loop free.
+        dialog.open()
+
+    def _apply_service_settings(self, dialog):
+        if self.worker_active():
+            return
+        config = dialog.config()
+        self._remember_model()
+        if (self._api_keys[config.provider] != config.api_key
+                or self.service_endpoints[config.provider] != config.base_url):
+            self._service_model_lists.pop((config.provider, self.service_endpoints[config.provider]), None)
+            self._service_model_lists.pop((config.provider, config.base_url), None)
+        self.provider = config.provider
+        self.service_endpoints[config.provider] = config.base_url
+        self._api_keys[config.provider] = config.api_key
+        self.service_models[config.provider] = dialog.model.currentText().strip()
+        self.settings.setValue("translation/provider", config.provider)
+        self.settings.setValue(f"translation/{config.provider}/base_url", config.base_url)
+        self.settings.setValue(f"translation/{config.provider}/model", self.service_models[config.provider])
+        self.settings.sync()
+        if dialog.discovered_models is not None:
+            self._service_model_lists[(config.provider, config.base_url)] = list(dialog.discovered_models)
+        self._update_model_choices()
+        self._update_service_button()
 
     def open_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择包含图片的文件夹")
@@ -692,23 +1050,43 @@ class Reader(QMainWindow):
         if not self.current:
             self.status.setText("请先打开文件夹并选择图片")
             return
+        if operation != "ocr" and not self.model.currentText().strip():
+            self.status.setText("请先在服务设置中获取模型，或输入模型 ID")
+            return
         self.stop_worker()
-        status_path = self.root / ".runtime" / "windows-status.json"
+        self._remember_model()
+        config = self.service_config()
+        status_path = self.platform_root / ".runtime" / "windows-status.json"
         status_path.parent.mkdir(exist_ok=True)
-        self.process = QProcess(self)
+        process = QProcess(self)
+        self.process = process
         # The running GUI already has a working interpreter. Reuse it for OCR.
-        self.process.setProgram(sys.executable)
+        process.setProgram(sys.executable)
         args = ["-X", "utf8", str(self.root / "backend" / "worker.py"), "--image", str(self.current),
-                "--operation", operation, "--model", self.model.currentText(), "--status", str(status_path)]
-        self.process.setArguments(args)
+                "--operation", operation, "--model", self.model.currentText().strip(), "--status", str(status_path),
+                *config.arguments()]
+        process.setArguments(args)
+        process.setProcessEnvironment(config.environment())
         self._worker_image = self.current
-        self.process.finished.connect(self.worker_finished)
-        self.process.start()
+        self._worker_config = config
+        generation = self._worker_generation
+        process.finished.connect(lambda code, status: self.worker_finished(code, status, process, generation))
+        process.errorOccurred.connect(lambda error: self._worker_error(process, generation, error))
+        self._set_worker_busy(True)
         self.poll.start(250)
         self.status.setText(f"正在处理：{self.current.name}")
+        process.start()
+
+    def _worker_error(self, process, generation, error):
+        if error == QProcess.FailedToStart and process is self.process and generation == self._worker_generation:
+            self.poll.stop()
+            self._worker_image = None
+            self._worker_config = None
+            self._set_worker_busy(False)
+            self.status.setText("无法启动处理进程，请检查应用的 Python 环境。")
 
     def read_status(self):
-        path = self.root / ".runtime" / "windows-status.json"
+        path = self.platform_root / ".runtime" / "windows-status.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("message"):
@@ -716,10 +1094,17 @@ class Reader(QMainWindow):
         except (OSError, json.JSONDecodeError):
             pass
 
-    def worker_finished(self, code, _status):
+    def worker_finished(self, code, _status, process=None, generation=None):
+        process = process if process is not None else self.process
+        if process is None or process is not self.process or (generation is not None and generation != self._worker_generation):
+            return
         self.poll.stop()
-        output = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
         worker_image = self._worker_image
+        config = self._worker_config
+        self._worker_image = None
+        self._worker_config = None
+        self._set_worker_busy(False)
         if worker_image is None or self.current != worker_image:
             return
         self.select_item(self.list.currentItem(), None)
@@ -730,8 +1115,11 @@ class Reader(QMainWindow):
                 self.load_cache()
                 self.status.setText("完成")
             else:
-                self.status.setText(f"失败：{result.get('error', '未知错误')}")
-        except json.JSONDecodeError:
+                error = str(result.get("error", "未知错误"))
+                if config and config.api_key:
+                    error = error.replace(config.api_key, "[已隐藏]")
+                self.status.setText(f"失败：{error}")
+        except (json.JSONDecodeError, AttributeError):
             self.status.setText(f"进程退出（代码 {code}）")
 
     def load_cache(self):
@@ -810,11 +1198,26 @@ class Reader(QMainWindow):
             self.display.setCurrentIndex(2)
 
     def stop_worker(self):
-        if self.process and self.process.state() != QProcess.NotRunning:
-            self.process.kill()
-            self.process.waitForFinished(1000)
+        self._worker_generation += 1
         self.poll.stop()
         self._worker_image = None
+        self._worker_config = None
+        self._set_worker_busy(False)
+        process, self.process = self.process, None
+        if process is not None:
+            if process.state() != QProcess.NotRunning:
+                # Let finished arrive asynchronously. Its captured generation
+                # prevents it from applying a result to a replacement worker.
+                process.finished.connect(process.deleteLater)
+                process.kill()
+            else:
+                process.deleteLater()
+
+    def closeEvent(self, event):
+        if self.service_dialog is not None:
+            self.service_dialog.reject()
+        self.stop_worker()
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":

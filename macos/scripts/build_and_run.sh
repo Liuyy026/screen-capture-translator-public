@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+
+MODE="${1:-run}"
+case "$MODE" in
+  run|--verify|--logs|--debug) ;;
+  *) echo "Usage: $0 [--verify|--logs|--debug]" >&2; exit 2 ;;
+esac
+
+PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_BUNDLE="$PLATFORM_DIR/dist/Koma 漫画翻译.app"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/KomaReader"
+
+# Restart only the copy built from this checkout.
+for pid in $(pgrep -x KomaReader || true); do
+  if [[ "$(ps -p "$pid" -o comm=)" == "$APP_BINARY" ]]; then
+    /usr/bin/osascript - "$APP_BUNDLE" <<'APPLESCRIPT'
+on run argv
+  tell application (item 1 of argv) to quit
+end run
+APPLESCRIPT
+    for _ in {1..40}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "请先退出本项目正在运行的 Koma，再重新构建。" >&2
+      exit 1
+    fi
+  fi
+done
+
+zsh "$PLATFORM_DIR/scripts/build.sh"
+if [[ "$MODE" == --debug ]]; then
+  exec lldb -- "$APP_BINARY"
+fi
+/usr/bin/open -n "$APP_BUNDLE"
+
+if [[ "$MODE" == --verify ]]; then
+  for _ in {1..30}; do
+    for pid in $(pgrep -x KomaReader || true); do
+      if [[ "$(ps -p "$pid" -o comm=)" == "$APP_BINARY" ]]; then
+        echo "Koma 已启动（PID ${pid}）"
+        exit 0
+      fi
+    done
+    sleep 1
+  done
+  echo "应用未能启动。" >&2
+  exit 1
+elif [[ "$MODE" == --logs ]]; then
+  exec /usr/bin/log stream --info --style compact --predicate 'process == "KomaReader"'
+fi

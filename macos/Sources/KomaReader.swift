@@ -2,29 +2,22 @@ import SwiftUI
 import AppKit
 import CryptoKit
 
-struct TextBlock: Codable, Identifiable {
-    var id: String
-    var box: [Double]
-    var source: String
-    var translation: String
-    var error: String
-    var vertical: Bool
-    var edited: Bool
-}
-struct PageResult: Codable {
-    var version: Int
-    var width: Int
-    var height: Int
-    var blocks: [TextBlock]
-    var model: String
-    var ocr: String
-}
+// Keep property-wrapper state on SDKs that also export a State macro.
+// Command Line Tools do not ship the SwiftUI macro plugin.
+private typealias EditorState<Value> = SwiftUI.State<Value>
+
 struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: String }
 
 @MainActor final class Reader: ObservableObject {
     @Published var files: [URL] = []
     @Published var selected: URL?
-    @Published var page: PageResult?
+    @Published var page: PageResult? { didSet { presentationCache = nil } }
+    @Published var readingRegions: [ReadingRegion]? { didSet { presentationCache = nil } }
+    private var presentationCache: [ReadingPresentation]?
+    @Published var readingLayoutError: String?
+    private var readingTask: Task<Void, Never>?
+    private var readingRequest = UUID()
+    private var readingCache: [String: [ReadingRegion]] = [:]
     @Published var image: NSImage?
     @Published var folderName = "本地漫画"
     @Published var busy = false
@@ -33,8 +26,12 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     @Published var selectedBlock: String?
     @Published var displayMode = 1
     @Published var zoom = 1.0
-    @Published var model = "qwen3:4b-q6k"
-    @Published var availableModels: [String] = ["qwen3:4b-q6k"]
+    @Published var model = "qwen3:4b"
+    @Published var processingMode = "text"
+    @Published var availableModels: [String] = ["qwen3:4b"]
+    @Published var connection = TranslationConnection(provider: "ollama", baseURL: TranslationConnection.defaultURL("ollama"), apiKey: "")
+    @Published var showConnectionSettings = false
+    @Published var connectionError: String?
     @Published var engineReady = false
     @Published var queueTotal = 0
     @Published var queueDone = 0
@@ -47,13 +44,108 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     private var statusURL: URL?
     private var started = false
     private var folderRequest = UUID()
+    private var connectionRequest = UUID()
+    private var sessionKeys: [String: String] = [:]
+    private let connectionConfigStore = TranslationLocalConfigStore()
+    private var localConfiguration = TranslationLocalConfiguration.migrating(defaults: .standard)
+    private(set) var configurationLoadError: String?
+    private var localOllamaProbes: Set<UUID> = []
     let root: URL
+    var platformRoot: URL { root.appendingPathComponent("macos") }
     let cacheDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
 
     init() {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
         root = URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
-        if let saved = UserDefaults.standard.string(forKey: "model") { model = saved }
+        do {
+            if let saved = try connectionConfigStore.load() {
+                localConfiguration = saved
+            } else {
+                // Preserve legacy endpoint/model choices, without consulting Keychain.
+                try connectionConfigStore.save(localConfiguration)
+            }
+        } catch {
+            configurationLoadError = error.localizedDescription
+            connectionError = configurationLoadError
+        }
+        connection = savedConnection(localConfiguration.selectedProvider)
+        let preferred = savedModel(provider: connection.provider, baseURL: connection.baseURL)
+        model = preferred.isEmpty && connection.provider == "ollama" ? "qwen3:4b" : preferred
+        availableModels = model.isEmpty ? [] : [model]
+        if connection.provider == "omlx", UserDefaults.standard.string(forKey: "processingMode") == "vision" {
+            processingMode = "vision"
+        }
+    }
+
+    func savedConnection(_ provider: String) -> TranslationConnection {
+        var config = localConfiguration.savedConnection(provider)?.connection
+            ?? TranslationConnection(provider: provider, baseURL: TranslationConnection.defaultURL(provider), apiKey: "")
+        if let cached = sessionKeys[config.identity] { config.apiKey = cached }
+        return config
+    }
+
+    func hasRememberedKey(_ config: TranslationConnection) -> Bool {
+        guard let saved = localConfiguration.savedConnection(config.provider),
+              saved.connection.identity == config.identity else { return false }
+        return !saved.apiKey.isEmpty
+    }
+
+    func savedModel(provider: String, baseURL: String) -> String {
+        guard let saved = localConfiguration.savedConnection(provider), saved.baseURL == baseURL else { return "" }
+        return saved.model
+    }
+
+    private func persistModel(_ value: String) throws {
+        if let configurationLoadError { throw ConnectionError(configurationLoadError) }
+        let updated = localConfiguration.updatingModel(value, for: connection)
+        guard updated != localConfiguration else { return }
+        try connectionConfigStore.save(updated)
+        localConfiguration = updated
+    }
+
+    func chooseModel(_ value: String) {
+        guard !busy, availableModels.contains(value) else { return }
+        do {
+            try persistModel(value)
+            model = value
+            UserDefaults.standard.set(value, forKey: "translationModel." + connection.identity)
+        } catch { connectionError = error.localizedDescription }
+    }
+
+    func chooseProcessingMode(_ value: String) {
+        guard !busy, ["text", "vision"].contains(value), value != "vision" || connection.provider == "omlx" else { return }
+        processingMode = value
+        UserDefaults.standard.set(value, forKey: "processingMode")
+        if value == "vision", availableModels.contains("Qwen3.8-27B-Uncensored-MLX-4bit") {
+            chooseModel("Qwen3.8-27B-Uncensored-MLX-4bit")
+        }
+        if let selected { select(selected) }
+    }
+
+    func applyConnection(_ config: TranslationConnection, model: String, models: [String], rememberKey: Bool) throws {
+        guard !busy else { throw ConnectionError("请等待当前任务结束后再切换接口。") }
+        guard models.contains(model) else { throw ConnectionError("请先获取并选择一个模型。") }
+        if let configurationLoadError { throw ConnectionError(configurationLoadError) }
+        let config = try config.normalized()
+        let updated = try localConfiguration.applying(config, model: model, rememberKey: rememberKey)
+        try connectionConfigStore.save(updated)
+        localConfiguration = updated
+        sessionKeys[config.identity] = config.apiKey
+        connectionRequest = UUID()
+        connection = config
+        availableModels = models
+        self.model = model
+        connectionError = nil
+        engineReady = true
+        UserDefaults.standard.set(config.provider, forKey: "translationProvider")
+        UserDefaults.standard.set(config.baseURL, forKey: "translationURL." + config.provider)
+        UserDefaults.standard.set(model, forKey: "translationModel." + config.identity)
+        if config.provider != "omlx", processingMode == "vision" { chooseProcessingMode("text") }
+        message = "已连接 " + config.name + " · " + model
+        if config.provider != "ollama" || config.baseURL != TranslationConnection.defaultURL("ollama") {
+            if ollama?.isRunning == true { ollama?.terminate() }
+            ollama = nil
+        }
     }
 
     func startup() {
@@ -68,49 +160,99 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         }
     }
 
-    func startEngine() {
-        let executable = root.appendingPathComponent(".runtime/ollama/ollama")
+    func discoverModels(_ config: TranslationConnection, allowLocalStart: Bool,
+                        requireCurrentConnection: Bool = false) async throws -> [String] {
+        let probe = UUID()
+        let mayStartLocal = allowLocalStart && config.provider == "ollama" && config.apiKey.isEmpty
+            && config.baseURL == TranslationConnection.defaultURL("ollama")
+        if mayStartLocal { localOllamaProbes.insert(probe) }
+        var completed = false
+        defer {
+            localOllamaProbes.remove(probe)
+            if mayStartLocal && (!completed || Task.isCancelled) { releaseUnusedLocalOllama() }
+        }
+        do {
+            let ids = try await TranslationModels.fetch(config)
+            try Task.checkCancellation()
+            completed = true
+            return ids
+        }
+        catch {
+            try Task.checkCancellation()
+            guard allowLocalStart, config.provider == "ollama", config.apiKey.isEmpty,
+                  config.baseURL == TranslationConnection.defaultURL("ollama") else { throw error }
+            guard !requireCurrentConnection || config == connection else { throw CancellationError() }
+        }
+        let executable = platformRoot.appendingPathComponent(".runtime/ollama/ollama")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            message = "翻译引擎未安装；请运行安装脚本"
-            return
+            throw ConnectionError("本机 Ollama 尚未安装，请运行 macos/安装.command 或配置其他接口。")
         }
-        Task {
-            if !(await refreshModels()) {
-                let p = Process()
-                p.executableURL = executable
-                p.arguments = ["serve"]
-                var env = ProcessInfo.processInfo.environment
-                env["OLLAMA_HOST"] = "127.0.0.1:11439"
-                env["OLLAMA_MODELS"] = root.appendingPathComponent(".models/ollama").path
-                env["OLLAMA_NO_CLOUD"] = "1"
-                env["OLLAMA_NUM_PARALLEL"] = "1"
-                env["OLLAMA_MAX_LOADED_MODELS"] = "1"
-                p.environment = env
-                p.standardOutput = FileHandle.nullDevice
-                p.standardError = FileHandle.nullDevice
-                do { try p.run(); ollama = p } catch { self.error = error.localizedDescription }
-                for _ in 0..<20 {
-                    try? await Task.sleep(for: .seconds(1))
-                    if await refreshModels() { break }
-                }
+        if ollama?.isRunning != true {
+            let p = Process()
+            p.executableURL = executable
+            p.arguments = ["serve"]
+            var env = ProcessInfo.processInfo.environment
+            env["OLLAMA_HOST"] = "127.0.0.1:11439"
+            env["OLLAMA_MODELS"] = root.appendingPathComponent(".models/ollama").path
+            env["OLLAMA_NO_CLOUD"] = "1"
+            env["OLLAMA_NUM_PARALLEL"] = "1"
+            env["OLLAMA_MAX_LOADED_MODELS"] = "1"
+            p.environment = env
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do { try p.run(); ollama = p }
+            catch { throw ConnectionError("无法启动本机 Ollama，请检查安装或配置其他接口。") }
+        }
+        for _ in 0..<24 {
+            try await Task.sleep(for: .milliseconds(250))
+            if let ids = try? await TranslationModels.fetch(config) {
+                try Task.checkCancellation()
+                completed = true
+                return ids
             }
+            if ollama?.isRunning != true { break }
         }
+        throw ConnectionError("本机 Ollama 未能连接，请检查端口或接口设置。")
     }
 
-    func refreshModels() async -> Bool {
+    func releaseUnusedLocalOllama() {
+        guard localOllamaProbes.isEmpty,
+              connection.provider != "ollama" || connection.baseURL != TranslationConnection.defaultURL("ollama") else { return }
+        if ollama?.isRunning == true { ollama?.terminate() }
+        ollama = nil
+    }
+
+    func startEngine() {
+        Task { _ = await refreshModels(allowLocalStart: true) }
+    }
+
+    func refreshModels(allowLocalStart: Bool = false) async -> Bool {
+        guard configurationLoadError == nil else {
+            connectionError = configurationLoadError
+            engineReady = false
+            return false
+        }
+        guard !busy else { return engineReady }
+        let snapshot = connection
+        let request = UUID()
+        connectionRequest = request
         do {
-            var request = URLRequest(url: URL(string: "http://127.0.0.1:11439/api/tags")!)
-            request.timeoutInterval = 3
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let models = (json?["models"] as? [[String: Any]] ?? []).filter {
-                $0["remote_host"] == nil && $0["remote_model"] == nil
-            }.compactMap { $0["name"] as? String }.filter { !$0.lowercased().contains("cloud") }.sorted()
-            availableModels = models.isEmpty ? [model] : models
-            if !models.isEmpty && !models.contains(model) { model = models[0] }
+            let models = try await discoverModels(snapshot, allowLocalStart: allowLocalStart, requireCurrentConnection: true)
+            guard request == connectionRequest, snapshot == connection, !busy else { return false }
+            let selectedModel = models.contains(model) ? model : (models.first ?? "")
+            if !selectedModel.isEmpty { try persistModel(selectedModel) }
+            availableModels = models
+            model = selectedModel
+            if !model.isEmpty { UserDefaults.standard.set(model, forKey: "translationModel." + connection.identity) }
             engineReady = !models.isEmpty
+            connectionError = models.isEmpty ? "连接成功，但服务没有返回可用模型。" : nil
             return true
-        } catch { engineReady = false; return false }
+        } catch {
+            guard request == connectionRequest, snapshot == connection, !busy else { return false }
+            engineReady = false
+            connectionError = error.localizedDescription
+            return false
+        }
     }
 
     func chooseFolder() {
@@ -146,10 +288,11 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         }
     }
 
-    func cacheFor(_ url: URL) throws -> URL {
+    func cacheFor(_ url: URL, mode: String? = nil) throws -> URL {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        return cacheDir.appendingPathComponent(digest + ".json")
+        let directory = (mode ?? processingMode) == "vision" ? cacheDir.appendingPathComponent("vision-v1") : cacheDir
+        return directory.appendingPathComponent(digest + ".json")
     }
 
     func select(_ url: URL) {
@@ -163,6 +306,10 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     }
 
     func reloadPage() {
+        readingTask?.cancel()
+        readingRequest = UUID()
+        readingRegions = nil
+        readingLayoutError = nil
         guard let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) else { page = nil; return }
         do {
             var cached = try JSONDecoder().decode(PageResult.self, from: Data(contentsOf: cacheURL))
@@ -179,8 +326,43 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
                 }
             }
             page = cached
+            prepareReadingRegions(cache: cacheURL)
         }
         catch { page = nil; self.error = "缓存无法读取：\(error.localizedDescription)" }
+    }
+
+    var readingPresentations: [ReadingPresentation] {
+        if let presentationCache { return presentationCache }
+        guard let page, let readingRegions else { return [] }
+        let items = ReadingLayout.presentations(page: page, regions: readingRegions)
+        presentationCache = items
+        return items
+    }
+
+    var unreadableOverlayCount: Int {
+        guard let page else { return 0 }
+        let shown = Set(readingPresentations.flatMap { $0.region.block_ids })
+        return page.blocks.filter { !$0.translation.isEmpty && $0.error.isEmpty && !shown.contains($0.id) }.count
+    }
+
+    private func prepareReadingRegions(cache: URL) {
+        guard let selected, let data = try? Data(contentsOf: cache) else { return }
+        let key = selected.path + ":" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        if let saved = readingCache[key] { readingRegions = saved; return }
+        let request = readingRequest
+        readingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let regions = try await ReadingOverlayService.load(root: root, image: selected, cache: cache)
+                guard !Task.isCancelled, request == readingRequest else { return }
+                if readingCache.count >= 16 { readingCache.removeAll() }
+                readingCache[key] = regions
+                readingRegions = regions
+            } catch {
+                guard !Task.isCancelled, request == readingRequest else { return }
+                readingLayoutError = "排版分析暂不可用，原图已保留；请在右侧阅读译文。"
+            }
+        }
     }
 
     func move(_ offset: Int) {
@@ -195,9 +377,13 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         p.blocks[i].translation = sourceChanged ? "" : translation
         p.blocks[i].edited = !sourceChanged && !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         p.blocks[i].error = ""
+        p.blocks[i].vision_source = nil
+        p.blocks[i].quality_warnings = []
         do {
-            try JSONEncoder().encode(p).write(to: cacheURL, options: .atomic)
-            page = p
+            try PageCacheEdits.update(cacheURL, id: id, values: [
+                "source": p.blocks[i].source, "translation": p.blocks[i].translation,
+                "edited": p.blocks[i].edited, "error": "", "vision_source": "", "quality_warnings": []])
+            reloadPage()
             message = sourceChanged ? "日文已修改，旧译文已清除；点击翻译生成新译文" : "修改已保存；手改的译文会保留"
         } catch { self.error = "保存失败：\(error.localizedDescription)" }
     }
@@ -206,7 +392,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         guard !busy, var p = page, let i = p.blocks.firstIndex(where: { $0.id == id }), let cacheURL else { return }
         p.blocks[i].translation = ""; p.blocks[i].error = ""; p.blocks[i].edited = false
         do {
-            try JSONEncoder().encode(p).write(to: cacheURL, options: .atomic)
+            try PageCacheEdits.update(cacheURL, id: id, values: ["translation": "", "edited": false, "error": ""])
             page = p; run(operation: "translate", blockID: id)
         } catch { self.error = error.localizedDescription }
     }
@@ -215,16 +401,19 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         guard !busy, let selected else { return }
         let urls = batch ? files : [selected]
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
-        UserDefaults.standard.set(model, forKey: "model")
+        let jobConnection = connection
+        let jobModel = model
+        let jobMode = processingMode
+        UserDefaults.standard.set(jobModel, forKey: "translationModel." + jobConnection.identity)
         task = Task {
             var failures = 0
             for url in urls {
                 if Task.isCancelled { break }
                 message = "准备处理 \(url.lastPathComponent)…"
                 do {
-                    try await processPage(url, operation: operation, blockID: blockID)
+                    try await processPage(url, operation: operation, blockID: blockID, connection: jobConnection, model: jobModel, mode: jobMode)
                     if self.selected == url { reloadPage() }
-                    let cached = try JSONDecoder().decode(PageResult.self, from: Data(contentsOf: cacheFor(url)))
+                    let cached = try JSONDecoder().decode(PageResult.self, from: Data(contentsOf: cacheFor(url, mode: jobMode)))
                     failures += cached.blocks.filter { !$0.error.isEmpty }.count
                 } catch {
                     if !Task.isCancelled { self.error = error.localizedDescription; failures += 1 }
@@ -240,19 +429,26 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         }
     }
 
-    func processPage(_ url: URL, operation: String, blockID: String? = nil) async throws {
+    func processPage(_ url: URL, operation: String, blockID: String? = nil, connection: TranslationConnection, model: String, mode: String) async throws {
         let status = FileManager.default.temporaryDirectory.appendingPathComponent("koma-\(UUID().uuidString).json")
         statusURL = status
         let p = Process()
-        p.executableURL = root.appendingPathComponent(".venv/bin/python")
-        p.arguments = [root.appendingPathComponent("backend/worker.py").path, "--image", url.path,
-                       "--operation", operation, "--model", model, "--status", status.path]
+        p.executableURL = platformRoot.appendingPathComponent(".venv/bin/python")
+        let workerPath = mode == "vision" ? "macos/backend/vision_worker.py" : "backend/worker.py"
+        p.arguments = [root.appendingPathComponent(workerPath).path, "--image", url.path,
+                       "--operation", operation, "--model", model, "--status", status.path,
+                       "--provider", connection.provider, "--base-url", connection.baseURL]
+        var workerEnv = ProcessInfo.processInfo.environment
+        workerEnv.removeValue(forKey: "KOMA_TRANSLATION_API_KEY")
+        if !connection.apiKey.isEmpty { workerEnv["KOMA_TRANSLATION_API_KEY"] = connection.apiKey }
+        p.environment = workerEnv
         if let blockID { p.arguments?.append(contentsOf: ["--block-id", blockID]) }
         p.currentDirectoryURL = root
         let out = Pipe()
         p.standardOutput = out
         // Logs stay on disk; never fill a stderr pipe while running a model.
-        let log = root.appendingPathComponent(".runtime/ocr.log")
+        let log = platformRoot.appendingPathComponent(".runtime/ocr.log")
+        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: log.path, contents: nil)
         let logHandle = try FileHandle(forWritingTo: log)
         p.standardError = logHandle
@@ -274,7 +470,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         }
         if Task.isCancelled { throw CancellationError() }
         guard let reply = try? JSONDecoder().decode(WorkerReply.self, from: data) else {
-            throw NSError(domain: "Koma", code: 1, userInfo: [NSLocalizedDescriptionKey: "处理进程意外结束。详细信息在 .runtime/ocr.log；已完成的缓存仍保留。"])
+            throw NSError(domain: "Koma", code: 1, userInfo: [NSLocalizedDescriptionKey: "处理进程意外结束。详细信息在 macos/.runtime/ocr.log；已完成的缓存仍保留。"])
         }
         if !reply.ok {
             throw NSError(domain: "Koma", code: 2, userInfo: [NSLocalizedDescriptionKey: reply.error ?? "处理失败"])
@@ -282,11 +478,12 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     }
 
     func cancel() { task?.cancel(); if process?.isRunning == true { process?.terminate() } }
-    func shutdown() { cancel(); modelTimer?.invalidate(); if ollama?.isRunning == true { ollama?.terminate() } }
+    func shutdown() { readingTask?.cancel(); cancel(); modelTimer?.invalidate(); if ollama?.isRunning == true { ollama?.terminate() } }
 }
 
 struct ContentView: View {
     @ObservedObject var reader: Reader
+    @StateObject private var imagePan = ImagePanController()
     var body: some View {
         HSplitView {
             sidebar.frame(minWidth: 170, idealWidth: 190, maxWidth: 250)
@@ -303,18 +500,33 @@ struct ContentView: View {
                 }.padding(14).background(.bar)
                 if let image = reader.image {
                     GeometryReader { geo in
-                        ScrollView([.horizontal, .vertical]) {
-                            let ratio = image.size.height / max(image.size.width, 1)
-                            let w = max(300, geo.size.width - 48) * reader.zoom
+                        let ratio = image.size.height / max(image.size.width, 1)
+                        let w = max(300, geo.size.width - 48) * reader.zoom
+                        PannableImageScrollView(controller: imagePan,
+                                               documentSize: CGSize(width: w + 48, height: w * ratio + 48),
+                                               pageID: reader.selected) {
                             ZStack(alignment: .topLeading) {
                                 Image(nsImage: image).resizable().frame(width: w, height: w * ratio)
                                 if reader.displayMode != 0, let page = reader.page {
+                                    if reader.displayMode == 2 {
+                                        ForEach(reader.readingPresentations) { item in
+                                            ReadingOverlayView(presentation: item, scale: w / Double(max(1, page.width)),
+                                                               selected: item.region.block_ids.contains(reader.selectedBlock ?? "")) {
+                                                reader.selectedBlock = item.region.block_ids.first
+                                            }
+                                        }
+                                    }
                                     ForEach(page.blocks) { block in
-                                        region(block, page: page, width: w, height: w * ratio)
+                                        if reader.displayMode == 1 || !block.error.isEmpty {
+                                            region(block, page: page, width: w, height: w * ratio)
+                                        }
                                     }
                                 }
                             }.frame(width: w, height: w * ratio).padding(24)
+                                .contentShape(Rectangle())
+                                .help("按住鼠标左键拖动图片；单击文字框定位对白。")
                         }
+                        .onChange(of: reader.zoom) { _, _ in imagePan.endDrag() }
                     }.background(Color(nsColor: .underPageBackgroundColor))
                 } else { welcome.frame(maxWidth: .infinity, maxHeight: .infinity) }
                 HStack {
@@ -362,6 +574,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1040, minHeight: 680)
+        .sheet(isPresented: $reader.showConnectionSettings) { TranslationSettingsView(reader: reader) }
         .task { reader.startup() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
     }
@@ -405,27 +618,56 @@ struct ContentView: View {
         let h = max(12, (block.box[3] - block.box[1]) / Double(page.height) * height)
         let active = reader.selectedBlock == block.id
         return ZStack(alignment: .topLeading) {
-            if reader.displayMode == 2 && !block.translation.isEmpty && block.error.isEmpty {
-                RoundedRectangle(cornerRadius: 3).fill(.white)
-                Text(block.translation).font(.system(size: 15 * reader.zoom)).foregroundStyle(.black)
-                    .minimumScaleFactor(0.4).multilineTextAlignment(.center)
-                    .frame(width: max(8, w - 6), height: max(8, h - 6)).padding(3)
-            } else { RoundedRectangle(cornerRadius: 3).fill(.teal.opacity(active ? 0.18 : 0.05)) }
+            RoundedRectangle(cornerRadius: 3).fill(.teal.opacity(active ? 0.18 : 0.05))
             RoundedRectangle(cornerRadius: 3).strokeBorder(block.error.isEmpty ? Color.teal : Color.orange, lineWidth: active ? 3 : 1)
             if reader.displayMode == 1 || !block.error.isEmpty {
                 Text(block.id).font(.system(size: 10, weight: .bold)).foregroundStyle(.white).padding(.horizontal, 4).padding(.vertical, 2).background(.teal, in: RoundedRectangle(cornerRadius: 3)).offset(y: -16)
             }
-        }.frame(width: w, height: h).offset(x: x, y: y)
+        }.frame(width: w, height: h)
             .contentShape(Rectangle()).onTapGesture { reader.selectedBlock = block.id }
             .help(block.translation.isEmpty ? block.source : block.translation)
+            .offset(x: x, y: y)
     }
 
     var inspector: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("对白对照").font(.title3.weight(.semibold))
-            Picker("本地模型", selection: $reader.model) {
+            if reader.displayMode == 2, reader.page != nil, reader.readingRegions == nil, reader.readingLayoutError == nil {
+                Text("正在整理中文排版…").font(.caption).foregroundStyle(.secondary)
+            }
+            if reader.displayMode == 2, reader.readingRegions != nil, reader.unreadableOverlayCount > 0 {
+                Text("有 \(reader.unreadableOverlayCount) 处已有译文暂未覆盖到图片，完整中文可在下方阅读。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let layoutError = reader.readingLayoutError {
+                Text(layoutError).font(.caption).foregroundStyle(.orange)
+            }
+            Picker("翻译方式", selection: Binding(get: { reader.processingMode }, set: { reader.chooseProcessingMode($0) })) {
+                Text("普通翻译").tag("text")
+                Text("视觉辅助").tag("vision")
+            }.pickerStyle(.segmented).disabled(reader.busy || reader.connection.provider != "omlx")
+                .accessibilityIdentifier("translation-mode")
+            if reader.processingMode == "vision" {
+                Text("结合整页画面与 OCR 翻译；需要支持图片的 oMLX 模型。结果单独保存，日文修正需手动核对。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("翻译服务：" + reader.connection.name).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("接口设置…") { reader.showConnectionSettings = true }.disabled(reader.busy)
+            }
+            Picker("翻译模型", selection: Binding(get: { reader.model }, set: { reader.chooseModel($0) })) {
+                if reader.availableModels.isEmpty { Text("请连接服务并获取模型").tag("") }
                 ForEach(reader.availableModels, id: \.self) { Text($0).tag($0) }
-            }.disabled(reader.busy)
+            }.disabled(reader.busy || !reader.engineReady)
+            HStack {
+                Text(reader.engineReady ? "已连接" : "未连接").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("刷新模型") { reader.startEngine() }.font(.caption).disabled(reader.busy)
+            }
+            if let connectionError = reader.connectionError {
+                Text(connectionError).font(.caption).foregroundStyle(.orange)
+            }
             if let error = reader.error {
                 Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
@@ -475,21 +717,28 @@ struct BlockEditor: View {
     let save: (String, String) -> Void
     let retry: () -> Void
     let select: () -> Void
-    @State private var source = ""
-    @State private var target = ""
+    @EditorState private var source = ""
+    @EditorState private var target = ""
     var changed: Bool { source != block.source || target != block.translation }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("\(block.id)").font(.caption.bold()).foregroundStyle(.teal)
-                Text(block.vertical ? "竖排" : "横排").font(.caption2).foregroundStyle(.secondary)
+                Text(block.vertical ? "原文竖排" : "原文横排").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 if block.edited { Text("已手动修改").font(.caption2).foregroundStyle(.teal) }
             }
             TextField("日文原文", text: $source, axis: .vertical).textFieldStyle(.plain).font(.system(size: 13)).lineLimit(2...8)
+            if let suggestion = block.vision_source, !suggestion.isEmpty, suggestion != block.source {
+                Text("画面复核建议：" + suggestion).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                Button("填入日文，核对后保存") { source = suggestion }.font(.caption).disabled(disabled)
+            }
             Divider()
             TextField("尚未翻译", text: $target, axis: .vertical).textFieldStyle(.plain).font(.system(size: 14)).lineLimit(2...10)
             if !block.error.isEmpty { Text(block.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+            ForEach((block.quality_warnings ?? []).filter { $0.hasPrefix("原文与译文相同") }, id: \.self) { warning in
+                Text(warning).font(.caption2).foregroundStyle(.orange)
+            }
             HStack {
                 Button("重新翻译", action: retry).font(.caption).disabled(disabled || changed)
                 Spacer()
@@ -510,6 +759,10 @@ struct BlockEditor: View {
         WindowGroup("Koma · 本地漫画翻译") { ContentView(reader: reader).tint(.teal) }
             .defaultSize(width: 1280, height: 850)
             .commands {
+                CommandGroup(after: .appSettings) {
+                    Button("翻译接口设置…") { reader.showConnectionSettings = true }
+                        .keyboardShortcut(",").disabled(reader.busy)
+                }
                 CommandGroup(replacing: .newItem) {
                     Button("打开漫画文件夹…") { reader.chooseFolder() }.keyboardShortcut("o").disabled(reader.busy)
                 }
