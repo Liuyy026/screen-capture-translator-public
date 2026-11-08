@@ -8,11 +8,11 @@ case "$MODE" in
 esac
 
 PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$PLATFORM_DIR/dist/Koma 漫画翻译.app"
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/KomaReader"
+APP_BUNDLE="$PLATFORM_DIR/dist/Koma Rust 候选版.app"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/KomaRustReader"
 
 # Restart only the copy built from this checkout.
-for pid in $(pgrep -x KomaReader || true); do
+for pid in $(pgrep -x KomaRustReader || true); do
   if [[ "$(ps -p "$pid" -o comm=)" == "$APP_BINARY" ]]; then
     /usr/bin/osascript - "$APP_BUNDLE" <<'APPLESCRIPT'
 on run argv
@@ -38,7 +38,7 @@ fi
 
 if [[ "$MODE" == --verify ]]; then
   for _ in {1..30}; do
-    for pid in $(pgrep -x KomaReader || true); do
+    for pid in $(pgrep -x KomaRustReader || true); do
       if [[ "$(ps -p "$pid" -o comm=)" == "$APP_BINARY" ]]; then
         echo "Koma 已启动（PID ${pid}）"
         exit 0
@@ -49,5 +49,5 @@ if [[ "$MODE" == --verify ]]; then
   echo "应用未能启动。" >&2
   exit 1
 elif [[ "$MODE" == --logs ]]; then
-  exec /usr/bin/log stream --info --style compact --predicate 'process == "KomaReader"'
+  exec /usr/bin/log stream --info --style compact --predicate 'process == "KomaRustReader"'
 fi

@@ -6,7 +6,7 @@ import CryptoKit
 // Command Line Tools do not ship the SwiftUI macro plugin.
 private typealias EditorState<Value> = SwiftUI.State<Value>
 
-struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: String }
+private struct NativeLoadedPage: Decodable { var cache: String; var page: PageResult?; var revision: String? }
 
 @MainActor final class Reader: ObservableObject {
     @Published var files: [URL] = []
@@ -36,13 +36,13 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     @Published var engineReady = false
     @Published var queueTotal = 0
     @Published var queueDone = 0
-    private var process: Process?
     private var ollama: Process?
     private var task: Task<Void, Never>?
-    private var timer: Timer?
+    private var pageTask: Task<Void, Never>?
+    private var pageRequest = UUID()
+    private var pageRevision: String?
     private var modelTimer: Timer?
     private var cacheURL: URL?
-    private var statusURL: URL?
     private var started = false
     private var folderRequest = UUID()
     private var connectionRequest = UUID()
@@ -55,21 +55,33 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     let root: URL
     var platformRoot: URL { root.appendingPathComponent("macos") }
     let cacheDir: URL
+    private lazy var nativeCore: NativeCoreService = {
+        let seed = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
+        return NativeCoreService(root: root, cache: cacheDir,
+                                 assets: cacheDir.deletingLastPathComponent().appendingPathComponent("reading-native-v1"),
+                                 seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil)
+    }()
 
-    init(root: URL? = nil, cacheDir: URL? = nil, defaults: UserDefaults = .standard,
-         configurationStore: TranslationLocalConfigStore = TranslationLocalConfigStore()) {
+    init(root: URL? = nil, cacheDir: URL? = nil,
+         defaults: UserDefaults = UserDefaults(suiteName: "local.koma.reader.rust")!,
+         configurationStore: TranslationLocalConfigStore? = nil) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
         self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
-        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
+        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReaderRust/pages")
         self.defaults = defaults
-        self.connectionConfigStore = configurationStore
+        self.connectionConfigStore = configurationStore ?? TranslationLocalConfigStore(url: self.cacheDir.deletingLastPathComponent().appendingPathComponent("config.json"))
         self.localConfiguration = TranslationLocalConfiguration.migrating(defaults: defaults)
         do {
-            if let saved = try connectionConfigStore.load() {
+            if let saved = try self.connectionConfigStore.load() {
                 localConfiguration = saved
+            } else if configurationStore == nil, FileManager.default.fileExists(atPath: TranslationLocalConfigStore.defaultURL.path) {
+                // Read stable configuration without changing its permissions or contents.
+                let data = try Data(contentsOf: TranslationLocalConfigStore.defaultURL)
+                localConfiguration = try JSONDecoder().decode(TranslationLocalConfiguration.self, from: data).validated()
+                try self.connectionConfigStore.save(localConfiguration)
             } else {
                 // Preserve legacy endpoint/model choices, without consulting Keychain.
-                try connectionConfigStore.save(localConfiguration)
+                try self.connectionConfigStore.save(localConfiguration)
             }
         } catch {
             configurationLoadError = error.localizedDescription
@@ -179,7 +191,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
             if mayStartLocal && (!completed || Task.isCancelled) { releaseUnusedLocalOllama() }
         }
         do {
-            let ids = try await TranslationModels.fetch(config)
+            let ids = try await nativeModels(config)
             try Task.checkCancellation()
             completed = true
             return ids
@@ -212,7 +224,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         }
         for _ in 0..<24 {
             try await Task.sleep(for: .milliseconds(250))
-            if let ids = try? await TranslationModels.fetch(config) {
+            if let ids = try? await nativeModels(config) {
                 try Task.checkCancellation()
                 completed = true
                 return ids
@@ -227,6 +239,13 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
               connection.provider != "ollama" || connection.baseURL != TranslationConnection.defaultURL("ollama") else { return }
         if ollama?.isRunning == true { ollama?.terminate() }
         ollama = nil
+    }
+
+    private func nativeModels(_ connection: TranslationConnection) async throws -> [String] {
+        struct Models: Decodable { var models: [String] }
+        let data = try await nativeCore.request("models", values: ["provider": connection.provider,
+            "base_url": connection.baseURL, "key": connection.apiKey])
+        return try JSONDecoder().decode(Models.self, from: data).models
     }
 
     func startEngine() {
@@ -306,37 +325,32 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         selected = url; selectedBlock = nil; error = nil
         image = NSImage(contentsOf: url)
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
-        cacheURL = try? cacheFor(url)
-        reloadPage()
+        page = nil; cacheURL = nil; pageRevision = nil
+        reloadPage(updateMessage: true)
         defaults.set(url.path, forKey: "lastPage")
-        if !busy { message = page == nil ? "这页尚未处理 · 点击「识别并翻译」" : "已读取本地缓存 · \(page?.blocks.count ?? 0) 处文字" }
     }
 
-    func reloadPage() {
-        readingTask?.cancel()
-        readingRequest = UUID()
-        readingRegions = nil
-        readingPreserved = [:]
-        readingLayoutError = nil
-        guard let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) else { page = nil; return }
-        do {
-            var cached = try JSONDecoder().decode(PageResult.self, from: Data(contentsOf: cacheURL))
-            let placeholderURL = root.appendingPathComponent("backend/translation_placeholders.json")
-            let placeholders = (try? JSONDecoder().decode([String].self, from: Data(contentsOf: placeholderURL))) ?? []
-            let excluded = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters).union(.symbols)
-            func normalize(_ value: String) -> String {
-                String(String.UnicodeScalarView(value.lowercased().unicodeScalars.filter { !excluded.contains($0) }))
+    func reloadPage(updateMessage: Bool = false) {
+        pageTask?.cancel(); readingTask?.cancel()
+        pageRequest = UUID(); readingRequest = UUID()
+        readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
+        guard let selected else { page = nil; return }
+        let request = pageRequest, mode = processingMode
+        pageTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let data = try await nativeCore.request("load_page", values: ["image": selected.path, "mode": mode])
+                let result = try JSONDecoder().decode(NativeLoadedPage.self, from: data)
+                guard !Task.isCancelled, request == pageRequest, self.selected == selected, processingMode == mode else { return }
+                cacheURL = URL(fileURLWithPath: result.cache); pageRevision = result.revision
+                page = result.page
+                if page != nil { prepareReadingRegions(cache: cacheURL!) }
+                if updateMessage, !busy { message = page == nil ? "这页尚未处理 · 点击「识别并翻译」" : "已读取本地缓存 · \(page?.blocks.count ?? 0) 处文字" }
+            } catch {
+                guard !Task.isCancelled, request == pageRequest else { return }
+                page = nil; self.error = "缓存无法读取：\(error.localizedDescription)"
             }
-            let invalid = Set(placeholders.map(normalize))
-            for i in cached.blocks.indices where !cached.blocks[i].edited {
-                if invalid.contains(normalize(cached.blocks[i].translation)) {
-                    cached.blocks[i].error = "模型返回了占位文字，没有提供实际译文"
-                }
-            }
-            page = cached
-            prepareReadingRegions(cache: cacheURL)
         }
-        catch { page = nil; self.error = "缓存无法读取：\(error.localizedDescription)" }
     }
 
     var readingPresentations: [ReadingPresentation] {
@@ -361,7 +375,7 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
         readingTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let regions = try await ReadingOverlayService.load(root: root, image: selected, cache: cache)
+                let regions = try await ReadingOverlayService.load(service: nativeCore, image: selected, cache: cache)
                 guard !Task.isCancelled, request == readingRequest else { return }
                 if readingCache.count >= 16 { readingCache.removeAll() }
                 readingCache[key] = regions
@@ -380,114 +394,80 @@ struct WorkerReply: Decodable { var ok: Bool; var error: String?; var cache: Str
     }
 
     func saveEdit(id: String, source: String, translation: String) {
-        guard !busy, var p = page, let i = p.blocks.firstIndex(where: { $0.id == id }), let cacheURL else { return }
-        let sourceChanged = source != p.blocks[i].source
-        p.blocks[i].source = source
-        p.blocks[i].translation = sourceChanged ? "" : translation
-        p.blocks[i].edited = !sourceChanged && !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        p.blocks[i].error = ""
-        p.blocks[i].vision_source = nil
-        p.blocks[i].quality_warnings = []
-        do {
-            try PageCacheEdits.update(cacheURL, id: id, values: [
-                "source": p.blocks[i].source, "translation": p.blocks[i].translation,
-                "edited": p.blocks[i].edited, "error": "", "vision_source": "", "quality_warnings": []])
-            reloadPage()
-            message = sourceChanged ? "日文已修改，旧译文已清除；点击翻译生成新译文" : "修改已保存；手改的译文会保留"
-        } catch { self.error = "保存失败：\(error.localizedDescription)" }
+        guard !busy, let p = page, let block = p.blocks.first(where: { $0.id == id }), let cacheURL else { return }
+        let sourceChanged = source != block.source
+        let selected = self.selected
+        let revision = pageRevision
+        busy = true
+        task = Task {
+            defer { busy = false; task = nil }
+            do {
+                var values: [String: Any] = ["cache": cacheURL.path, "block_id": id, "values": [
+                    "source": source, "translation": sourceChanged ? "" : translation,
+                    "edited": !sourceChanged && !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    "error": "", "vision_source": "", "quality_warnings": []] as [String: Any]]
+                if let revision { values["revision"] = revision }
+                _ = try await nativeCore.request("edit", values: values)
+                if self.selected == selected { reloadPage() }
+                message = sourceChanged ? "日文已修改，旧译文已清除；点击翻译生成新译文" : "修改已保存；手改的译文会保留"
+            } catch is CancellationError { message = "已停止；请重新打开页面确认保存结果" }
+            catch { self.error = "保存失败：\(error.localizedDescription)" }
+        }
     }
 
     func retryBlock(_ id: String) {
-        guard !busy, var p = page, let i = p.blocks.firstIndex(where: { $0.id == id }), let cacheURL else { return }
-        p.blocks[i].translation = ""; p.blocks[i].error = ""; p.blocks[i].edited = false
-        do {
-            try PageCacheEdits.update(cacheURL, id: id, values: ["translation": "", "edited": false, "error": ""])
-            page = p; run(operation: "translate", blockID: id)
-        } catch { self.error = error.localizedDescription }
+        guard !busy, page?.blocks.contains(where: { $0.id == id }) == true else { return }
+        run(operation: "translate", blockID: id)
     }
 
     func run(operation: String = "both", batch: Bool = false, blockID: String? = nil) {
         guard !busy, let selected else { return }
         let urls = batch ? files : [selected]
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
-        let jobConnection = connection
-        let jobModel = model
-        let jobMode = processingMode
+        let jobConnection = connection, jobModel = model, jobMode = processingMode
         defaults.set(jobModel, forKey: "translationModel." + jobConnection.identity)
-        task = Task {
-            var failures = 0
-            for url in urls {
-                if Task.isCancelled { break }
-                message = "准备处理 \(url.lastPathComponent)…"
-                do {
-                    try await processPage(url, operation: operation, blockID: blockID, connection: jobConnection, model: jobModel, mode: jobMode)
-                    if self.selected == url { reloadPage() }
-                    let cached = try JSONDecoder().decode(PageResult.self, from: Data(contentsOf: cacheFor(url, mode: jobMode)))
-                    failures += cached.blocks.filter { !$0.error.isEmpty }.count
-                } catch {
-                    if !Task.isCancelled { self.error = error.localizedDescription; failures += 1 }
-                    if self.selected == url { reloadPage() }
+        task = Task { [self] in
+            defer { busy = false; task = nil; reloadPage() }
+            do {
+                var values: [String: Any] = ["images": urls.map(\.path), "operation": operation,
+                    "mode": jobMode, "model": jobModel, "provider": jobConnection.provider,
+                    "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
+                if let blockID { values["block_id"] = blockID; values["retry"] = true }
+                let data = try await nativeCore.request("process", values: values) { [weak self] event in
+                    guard let self else { return }
+                    switch event["event"] as? String {
+                    case "progress": if let text = event["message"] as? String { message = text }
+                    case "page_started":
+                        if let path = event["image"] as? String { message = "正在处理 \(URL(fileURLWithPath: path).lastPathComponent)…" }
+                    case "page_finished":
+                        queueDone = event["done"] as? Int ?? queueDone
+                        if let result = event["page"] as? [String: Any] {
+                            if let text = result["error"] as? String { self.error = text }
+                            if result["image"] as? String == self.selected?.path { reloadPage() }
+                        }
+                    default: break
+                    }
                 }
-                queueDone += 1
-            }
-            timer?.invalidate(); timer = nil; process = nil; busy = false
-            if Task.isCancelled { message = "已停止；已完成的结果已保存" }
-            else if failures > 0 { message = "处理结束，有 \(failures) 处问题；请查看提示后重试" }
-            else { message = "处理完成 · \(queueDone) 页 · 结果已保存到本机" }
-            task = nil
+                try Task.checkCancellation()
+                let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let pages = result?["pages"] as? [[String: Any]] ?? []
+                let failures = pages.reduce(0) { total, page in
+                    total + ((page["ok"] as? Bool == true) ? ((page["result"] as? [String: Any])?["issues"] as? Int ?? 0) : 1)
+                }
+                queueDone = pages.count
+                message = failures > 0 ? "处理结束，有 \(failures) 处问题；请查看提示后重试" : "处理完成 · \(queueDone) 页 · 结果已保存到本机"
+            } catch is CancellationError { message = "已停止；已完成的结果已保存" }
+            catch { self.error = error.localizedDescription; message = "处理未完成；已保存的结果保留，可重试" }
         }
     }
 
-    func processPage(_ url: URL, operation: String, blockID: String? = nil, connection: TranslationConnection, model: String, mode: String) async throws {
-        let status = FileManager.default.temporaryDirectory.appendingPathComponent("koma-\(UUID().uuidString).json")
-        statusURL = status
-        let p = Process()
-        p.executableURL = platformRoot.appendingPathComponent(".venv/bin/python")
-        let workerPath = mode == "vision" ? "macos/backend/vision_worker.py" : "backend/worker.py"
-        p.arguments = [root.appendingPathComponent(workerPath).path, "--image", url.path,
-                       "--operation", operation, "--model", model, "--status", status.path,
-                       "--provider", connection.provider, "--base-url", connection.baseURL]
-        var workerEnv = ProcessInfo.processInfo.environment
-        workerEnv.removeValue(forKey: "KOMA_TRANSLATION_API_KEY")
-        if !connection.apiKey.isEmpty { workerEnv["KOMA_TRANSLATION_API_KEY"] = connection.apiKey }
-        p.environment = workerEnv
-        if let blockID { p.arguments?.append(contentsOf: ["--block-id", blockID]) }
-        p.currentDirectoryURL = root
-        let out = Pipe()
-        p.standardOutput = out
-        // Logs stay on disk; never fill a stderr pipe while running a model.
-        let log = platformRoot.appendingPathComponent(".runtime/ocr.log")
-        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: log.path, contents: nil)
-        let logHandle = try FileHandle(forWritingTo: log)
-        p.standardError = logHandle
-        process = p
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                if let data = try? Data(contentsOf: status),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                   let text = obj["message"] { self?.message = text }
-            }
-        }
-        defer { timer?.invalidate(); timer = nil; try? logHandle.close(); try? FileManager.default.removeItem(at: status) }
-        let data: Data = try await withCheckedThrowingContinuation { continuation in
-            p.terminationHandler = { _ in
-                continuation.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
-            }
-            do { try p.run() } catch { p.terminationHandler = nil; continuation.resume(throwing: error) }
-        }
-        if Task.isCancelled { throw CancellationError() }
-        guard let reply = try? JSONDecoder().decode(WorkerReply.self, from: data) else {
-            throw NSError(domain: "Koma", code: 1, userInfo: [NSLocalizedDescriptionKey: "处理进程意外结束。详细信息在 macos/.runtime/ocr.log；已完成的缓存仍保留。"])
-        }
-        if !reply.ok {
-            throw NSError(domain: "Koma", code: 2, userInfo: [NSLocalizedDescriptionKey: reply.error ?? "处理失败"])
-        }
+    func cancel() { task?.cancel() }
+    func shutdown() {
+        pageTask?.cancel(); readingTask?.cancel(); cancel(); modelTimer?.invalidate()
+        nativeCore.shutdown()
+        if ollama?.isRunning == true { ollama?.terminate() }
     }
 
-    func cancel() { task?.cancel(); if process?.isRunning == true { process?.terminate() } }
-    func shutdown() { readingTask?.cancel(); cancel(); modelTimer?.invalidate(); if ollama?.isRunning == true { ollama?.terminate() } }
 }
 
 struct ContentView: View {

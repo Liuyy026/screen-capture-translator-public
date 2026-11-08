@@ -1,6 +1,6 @@
 # Koma Rust core（重构进行中）
 
-本目录是独立分支的实验核心，完整显示生成已通过 35 页像素对照，尚未接入候选应用，也不能替代稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
+本目录是独立分支的实验核心，完整显示生成已通过 35 页像素对照，候选应用已完成主要调用接入并编译，真实界面验收尚未完成，暂不能替代稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
 
 ## 本地开发
 
@@ -53,7 +53,7 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
 
-实际 OCR 页面组装、持久显示缓存及常驻任务服务已实现，候选应用接入和最终性能对比仍未完成。
+实际 OCR 页面组装、持久显示缓存及常驻任务服务已实现；候选应用主要调用已接入，剩余服务生命周期迁移、真实界面验收和最终对照报告仍未完成。
 
 ## 常驻应用服务
 
@@ -64,6 +64,8 @@ Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启
 候选页面和显示缓存目录不得与只读种子缓存重叠。首次打开按图像哈希复制已有页面，原文、译文和未知元数据保留。编辑支持版本校验，拒绝过期修改及越界写入。显示缓存含代码、输入和模型文件身份以及载荷校验，损坏时重新生成。
 
 `verify_runtime.py --manifest <pages.json> --output <new-directory> --display --baseline-results <native-display-01>` 验证真实常驻服务的队列、取消、崩溃恢复、手改保护和整章显示缓存；故障测试使用模拟推理与回环 HTTP，整章显示使用已安装的真实检测/修补模型。`verify_ocr.py` 单独比较旧版与原生流程的真实 OCR 和完整页面装配。
+
+候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。当前本地 Ollama 自动启动/停止仍在 Swift，需迁移后才能认定职责切换完整。
 
 ## 普通翻译与 OCR 区域分类
 

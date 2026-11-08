@@ -63,7 +63,17 @@ impl Runtime{
     }
     pub async fn load_page(&self,image:&Path,mode:&str)->Result<Value>{
         let cache=self.cache_for(image,mode)?;let lock=self.page_lock(&cache).await;let _guard=lock.lock().await;
-        let page=self.seed_page(image,mode,&cache)?;
+        let mut page=self.seed_page(image,mode,&cache)?;
+        // Presentation-only warning previously applied by the Swift reader;
+        // preserve the stored source/translation and revision byte-for-byte.
+        if let Some(page)=page.as_mut(){
+            if let Some(blocks)=page["blocks"].as_array_mut(){for block in blocks{
+                if !truth(&block["edited"]){
+                    let reason=crate::translation::translation_error(&block["translation"]);
+                    if reason=="模型返回了占位文字，没有提供实际译文"{block["error"]=json!(reason);}
+                }
+            }}
+        }
         let revision=if cache.exists(){Some(format!("{:x}",Sha256::digest(std::fs::read(&cache)?)))}else{None};
         Ok(json!({"cache":cache,"page":page,"revision":revision}))
     }

@@ -180,6 +180,18 @@ def main():
         assert invalid['event'] == 'error'
         assert json.loads(Path(first['cache']).read_text()) == expected
         passed('edits preserve metadata, reject stale revisions and stable-cache writes')
+        warning_page = client.call('load_page', image=pages[1]['image'], mode='vision')
+        warning_path = Path(warning_page['cache'])
+        before = warning_path.read_bytes()
+        value = warning_page['page']
+        value['blocks'][0].update(translation='待翻译', edited=False, error='')
+        warning_path.write_text(json.dumps(value))
+        stored = warning_path.read_bytes()
+        shown = client.call('load_page', image=pages[1]['image'], mode='vision')['page']
+        assert shown['blocks'][0]['error'] == '模型返回了占位文字，没有提供实际译文'
+        assert warning_path.read_bytes() == stored
+        warning_path.write_bytes(before)
+        passed('placeholder display warning preserves stored OCR and translation')
         broken = client.call('process', images=[str(output/'missing.webp'), pages[1]['image']],
                              operation='ocr', mode='vision', model='unused')
         assert [p['ok'] for p in broken['pages']] == [False, True]

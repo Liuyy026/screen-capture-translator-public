@@ -36,7 +36,7 @@ import CryptoKit
     @MainActor private func settled() async throws {
         for _ in 0..<600 {
             if let error = reader.error ?? reader.readingLayoutError { throw failure(error) }
-            if reader.readingRegions != nil { return }
+            if !reader.busy, reader.readingRegions != nil { return }
             try await Task.sleep(for: .milliseconds(50))
         }
         throw failure("Timed out waiting for display assets")
@@ -131,6 +131,10 @@ import CryptoKit
         let badCache = try reader.cacheFor(images[33]), goodData = try Data(contentsOf: badCache)
         try Data("broken cache".utf8).write(to: badCache)
         reader.reloadPage()
+        for _ in 0..<200 {
+            if reader.error != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         guard reader.page == nil, reader.readingRegions == nil, reader.error != nil else { throw failure("Invalid cache retained stale overlays") }
         try goodData.write(to: badCache)
         reader.select(images[33]); try await settled()
