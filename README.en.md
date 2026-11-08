@@ -37,7 +37,9 @@ The candidate does not invoke the old Python business workers. Rust lazily start
 
 Requires Apple Silicon, macOS 14+, Swift build tools, Rust/Cargo, native OpenCV 4.11.0, a prepared `macos/.venv`, and installed weights under `.models/`. Follow the [macOS setup guide](macos/README.en.md) for first-time preparation.
 
-From this branch's repository root:
+For daily use, double-click **[启动 Rust 候选版.command](启动%20Rust%20候选版.command)** at the repository root, or `macos/启动.command`. Both open only the candidate, activate an existing instance, and build only if application/core artifacts are missing or the checkout has moved. Prepare the dependencies first.
+
+For development, from this branch's repository root:
 
 ```sh
 ./macos/scripts/build_and_run.sh --verify
@@ -45,7 +47,7 @@ From this branch's repository root:
 open 'macos/dist/Koma Rust 候选版.app'
 ```
 
-The script builds and restarts only this checkout's candidate, then checks that it stays alive for 10 seconds. Do not use the legacy `macos/启动.command`: it still targets the stable app name. The build depends on the checkout and local runtime; rebuild after moving the repository.
+The script builds and restarts only this checkout's candidate, then checks that it stays alive for 10 seconds. The double-click launcher uses `--open` to reuse an existing build without restarting the app. The build depends on the checkout and local runtime; rebuild after moving the repository.
 
 Open an image folder, configure the endpoint, optional API key and model, and process a page or folder. Visual assistance requires an image-capable model served by oMLX. It combines the page image with existing OCR boxes; it does not recover undetected text by adding boxes.
 

@@ -39,9 +39,11 @@ python3 macos/scripts/setup.py
 python3 macos/scripts/setup_reading_model.py
 ```
 
-此安装器会建立 Python 环境、下载 OCR、Ollama 与 Qwen3 4B，必要时启动本地 Ollama 完成模型下载，最后构建候选应用。仅使用现有 oMLX 时不需要此步骤；安装器也不会代为安装 Rust 或构建原生 OpenCV。安装结束的旧「启动.command」提示不适用于本候选分支。
+此安装器会建立 Python 环境、下载 OCR、Ollama 与 Qwen3 4B，必要时启动本地 Ollama 完成模型下载，最后构建候选应用。仅使用现有 oMLX 时不需要此步骤；安装器也不会代为安装 Rust 或构建原生 OpenCV。安装完成后可使用下方的候选版双击入口。
 
 ## 构建与启动
+
+日常双击仓库根目录的 **[启动 Rust 候选版.command](../启动%20Rust%20候选版.command)**，或本目录的 **启动.command**。两者共用 `scripts/build_and_run.sh --open`：已构建就直接打开，已运行就切回窗口；缺少应用/核心构建产物或移动仓库后自动构建并检查启动。首次依赖未准备时会保留具体错误，提示按本页完成准备，不自动安装或下载模型。
 
 ```sh
 # 构建、启动，并检查进程持续存活 10 秒
@@ -54,7 +56,7 @@ zsh macos/scripts/build.sh
 open 'macos/dist/Koma Rust 候选版.app'
 ```
 
-输出应用为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。不要使用旧 `macos/启动.command`，它仍指向 `Koma 漫画翻译.app`。构建脚本只重启本 checkout 的候选版，不覆盖稳定应用；`--logs` 查看日志，`--debug` 进入 LLDB。应用通过构建时记录的仓库绝对路径使用核心、环境和模型，移动仓库后须重新构建。
+输出应用为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。两个双击入口均指向该候选应用。开发用 `--verify` 会重新构建并重启本 checkout 的候选版，不覆盖稳定应用；`--logs` 查看日志，`--debug` 进入 LLDB。应用通过构建时记录的仓库绝对路径使用核心、环境和模型，移动仓库后须重新构建。
 
 首次访问桌面中的漫画或运行环境时，请完成 macOS 文件夹授权。`--verify` 是启动检查，不代替实际翻译或界面验收。
 

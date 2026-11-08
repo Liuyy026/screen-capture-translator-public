@@ -32,6 +32,8 @@ Alternatively, after preparing OpenCV, use `python3 macos/scripts/setup.py` to i
 
 ## Build and run
 
+For daily use, double-click **[启动 Rust 候选版.command](../启动%20Rust%20候选版.command)** at the repository root or `macos/启动.command`. Both use `scripts/build_and_run.sh --open`: reuse the existing build and activate an already-running candidate. Missing app/core artifacts or a moved checkout trigger a build and startup check. If setup is incomplete, the launcher keeps the error visible and points to this guide; it does not automatically install dependencies or download models.
+
 ```sh
 # Build, restart this checkout's candidate, check 10 seconds of survival:
 ./macos/scripts/build_and_run.sh --verify
@@ -41,7 +43,7 @@ zsh macos/scripts/build.sh
 open 'macos/dist/Koma Rust 候选版.app'
 ```
 
-The bundle identifier is `local.koma.reader.rust`. Do not use legacy `macos/启动.command` (including the old installer's final suggestion); it still points to the stable application name. The candidate build does not replace the stable app. Rebuild after moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when requested. The survival check alone is not a full UI or translation test.
+The bundle identifier is `local.koma.reader.rust`. Both double-click entry points target this candidate. Development mode `--verify` rebuilds and restarts it; daily `--open` does not. The candidate build does not replace the stable app. Rebuild after moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when requested. The survival check alone is not a full UI or translation test.
 
 Open an image folder, configure the provider/endpoint/key/model, then process a page or folder. Use the original, text-box and Chinese modes to inspect results. Source and translation text are editable; save before retranslating a single entry. Manually saved translations are protected during batch processing. Drag the image to pan; zoom and normal scrolling remain available.
 
