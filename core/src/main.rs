@@ -1,5 +1,6 @@
 mod compat;
 mod imaging;
+mod ink;
 mod models;
 mod panels;
 mod structure;
@@ -18,6 +19,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Inspect native display boxes and completed detached-stroke masks.
+    InkProbe {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        mask: Option<PathBuf>,
+    },
     /// Run native grouping/synchronization without changing the input file.
     StructureProbe {
         #[arg(long)]
@@ -66,6 +76,12 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::InkProbe { image, cache, mask } => {
+            let page = serde_json::from_slice(&std::fs::read(cache)?)?;
+            let gray = imaging::display_gray(&image)?;
+            let source = mask.as_deref().map(imaging::decode_gray).transpose()?;
+            println!("{}", ink::probe(&page, &gray, source.as_ref())?);
+        }
         Operation::StructureProbe { image, cache, mode } => {
             let mut page = serde_json::from_slice(&std::fs::read(cache)?)?;
             match mode.as_str() {

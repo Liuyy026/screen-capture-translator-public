@@ -113,3 +113,32 @@ pub fn python_json(value: &Value, ascii: bool) -> String {
 pub fn digest(value: &Value, ascii: bool) -> String {
     format!("{:x}", Sha256::digest(python_json(value, ascii).as_bytes()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_signature_encoding_preserves_unicode_and_python_separators() {
+        let value = json!({"z": ["日", "😀", "\u{7f}"], "a": 1e-7});
+        assert_eq!(
+            python_json(&value, true),
+            r#"{"a": 1e-07, "z": ["\u65e5", "\ud83d\ude00", "\u007f"]}"#
+        );
+        assert_eq!(
+            python_json(&json!({"z": "日", "a": [1, true, null]}), false),
+            r#"{"a": [1, true, null], "z": "日"}"#
+        );
+    }
+
+    #[test]
+    fn decoding_an_existing_cache_keeps_the_original_float() {
+        // A real cached duration that the default fast parser rounded differently.
+        let value: Value = serde_json::from_str("9.469662999996217").unwrap();
+        assert_eq!(
+            value.as_f64().unwrap().to_bits(),
+            9.469662999996217_f64.to_bits()
+        );
+    }
+}

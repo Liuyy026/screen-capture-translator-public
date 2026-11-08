@@ -35,6 +35,8 @@ python3 tools/rust_migration/cargo.py build
 
 `image-probe` 检查原生解码像素，`panel-probe` 和 `structure-probe` 运行 Rust 分镜、对话分组、阅读顺序和译文同步。输入缓存只读，结果输出到标准输出。`structure-probe --mode build` 强制重建，`--mode sync` 仅同步译文，默认 `ensure` 保留缓存失效规则。
 
+`ink-probe` 核对显示框、页码保留和独立长划线补全后的蒙版哈希。它使用已有检测蒙版，不加载模型；完整清字、背景合成和显示协议仍在迁移。
+
 差分检查使用稳定版本作为测试参照，生产核心不调用参照程序：
 
 ```sh

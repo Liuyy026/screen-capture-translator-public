@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use opencv::{imgcodecs, prelude::*};
+use opencv::{imgcodecs, imgproc, prelude::*};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -10,6 +10,13 @@ pub fn decode_color(path: &Path) -> Result<Mat> {
 
 pub fn decode_gray(path: &Path) -> Result<Mat> {
     decode(path, imgcodecs::IMREAD_GRAYSCALE)
+}
+
+pub fn display_gray(path: &Path) -> Result<Mat> {
+    let color = decode_color(path)?;
+    let mut gray = Mat::default();
+    imgproc::cvt_color_def(&color, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+    Ok(gray)
 }
 
 fn decode(path: &Path, flags: i32) -> Result<Mat> {
