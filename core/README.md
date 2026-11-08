@@ -4,7 +4,7 @@
 
 ## 本地开发
 
-使用 Rust 工具链以及现有、已安装模型的 Python 环境。无需重新下载模型，不读取 API Key，不访问翻译接口。
+使用 Rust 工具链以及现有、已安装模型的 Python 环境。下列基础测试无需重新下载模型，不读取 API Key，不访问翻译接口。
 
 ```sh
 python3 tools/rust_migration/cargo.py test
@@ -53,7 +53,25 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
 
-**当前尚无持久显示缓存、跨页任务队列或应用接入；翻译请求迁移和最终性能对比仍未完成。**
+**当前尚无持久显示缓存、跨页任务队列或应用接入；视觉翻译完整流程和最终性能对比仍未完成。**
+
+## 普通翻译与 OCR 区域分类
+
+`overlay-probe --cache /path/to/page.json --image /path/to/page.webp` 只读输入并返回旧 OCR 区域协议及缓存变化标记；它与最终显示区域生成是不同阶段。
+
+`translate` 从已有 OCR 页面开始，用 Rust 完成翻译请求、响应校验、普通翻译批处理和逐批保存。此命令会向配置的模型发出真实生成请求；`list-models` 仅查询模型元数据。认证读取进程环境变量 `KOMA_TRANSLATION_API_KEY`，不会写入页面缓存或指标，也不会传给 Python 模型进程。应用配置接入仍待完成。
+
+```sh
+core/target/release/koma-core translate \
+  --cache /path/to/input-page.json --destination /path/to/candidate-page.json \
+  --image /path/to/page.webp --status /path/to/candidate-status.json \
+  --provider omlx --base-url http://127.0.0.1:8000/v1 --model installed-model \
+  --unit blocks --batch-size 8
+```
+
+`--unit dialogues` 使用完整对白；`--block-id` 仅处理指定块，保留手工修改；`--metrics` 可选输出只含已知计时/计数字段的 JSONL。目标页面原子替换、权限 0600。部分翻译失败保存在对应文字块的 `error` 中，命令成功结束不等于所有句子都翻译成功。
+
+`verify_translation_protocol.py` 对照提示词、解析规则和本地模拟 HTTP；`verify_overlay.py` 对照 OCR 区域分类；`verify_translate_pipeline.py` 对照每批请求、页面与保存快照。这些脚本只使用模拟模型回复，不访问已有 oMLX/Ollama 服务。`protocol-probe`、`service-probe`、`translation-probe` 是开发验证入口，不能代表候选应用已接入。
 
 差分检查使用稳定版本作为测试参照，生产核心不调用参照程序：
 

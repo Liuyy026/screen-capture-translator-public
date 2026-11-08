@@ -5,11 +5,16 @@ mod imaging;
 mod ink;
 mod model_images;
 mod models;
+mod overlay;
 mod panels;
+mod persistence;
 mod raster;
 mod reading;
+mod service;
 mod structure;
 mod texture;
+mod translate_pipeline;
+mod translation;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -25,6 +30,62 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Translate an existing OCR page and checkpoint each batch atomically.
+    Translate {
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        image: Option<PathBuf>,
+        #[arg(long)]
+        status: Option<PathBuf>,
+        #[arg(long)]
+        metrics: Option<PathBuf>,
+        #[arg(long)]
+        model: String,
+        #[arg(long, default_value = "omlx")]
+        provider: String,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long,default_value="blocks",value_parser=["blocks","dialogues"])]
+        unit: String,
+        #[arg(long, default_value_t = 8)]
+        batch_size: usize,
+        #[arg(long)]
+        block_id: Option<String>,
+    },
+    /// Validate full native translation orchestration against fake services.
+    TranslationProbe {
+        #[arg(long)]
+        requests: PathBuf,
+    },
+    /// Rebuild OCR-side region metadata without mutating the input file.
+    OverlayProbe {
+        #[arg(long)]
+        image: Option<PathBuf>,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long,default_value="ensure",value_parser=["ensure","adjacent"])]
+        mode: String,
+    },
+    /// Exercise response validation and prompt construction against fixtures.
+    ProtocolProbe {
+        #[arg(long)]
+        requests: PathBuf,
+    },
+    /// Exercise transport/provider behavior against controlled test endpoints.
+    ServiceProbe {
+        #[arg(long)]
+        requests: PathBuf,
+    },
+    /// List existing local translation models, without loading a model.
+    ListModels {
+        #[arg(long, default_value = "omlx")]
+        provider: String,
+        #[arg(long)]
+        base_url: Option<String>,
+    },
     /// Generate final display regions from immutable OCR/translation inputs.
     Display {
         #[arg(long)]
@@ -130,6 +191,117 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::TranslationProbe { requests } => {
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let mut replies = vec![];
+            for request in requests {
+                replies.push(translate_pipeline::probe(&request).await?);
+            }
+            println!("{}", serde_json::to_string(&replies)?);
+        }
+        Operation::Translate {
+            cache,
+            destination,
+            image,
+            status,
+            metrics,
+            model,
+            provider,
+            base_url,
+            unit,
+            batch_size,
+            block_id,
+        } => {
+            let mut page = serde_json::from_slice(&std::fs::read(cache)?)?;
+            let service = service::TranslationService::new(&provider, base_url.as_deref(), None)?;
+            // Empty, skipped and fully edited pages intentionally need no
+            // translation checkpoints, but still have a valid destination.
+            persistence::atomic_json(&destination, &page)?;
+            let options = translate_pipeline::Options {
+                model: &model,
+                unit: &unit,
+                batch_size,
+                block_id: block_id.as_deref(),
+                image: image.as_deref(),
+            };
+            let mut observer = persistence::FileObserver {
+                destination: &destination,
+                status: status.as_deref(),
+                metrics: metrics.as_deref(),
+            };
+            match translate_pipeline::translate(&mut page, &service, &options, &mut observer).await
+            {
+                Ok(()) => println!("{}", json!({"ok":true,"cache":destination})),
+                Err(e) => {
+                    println!(
+                        "{}",
+                        json!({"ok":false,"cache":destination,"error":service.safe_error(e)})
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        Operation::OverlayProbe { image, cache, mode } => {
+            let mut page: serde_json::Value = serde_json::from_slice(&std::fs::read(cache)?)?;
+            if mode == "adjacent" {
+                let gray = imaging::decode_gray(
+                    image
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("image required"))?,
+                )?;
+                let first = serde_json::from_value(page["first"].clone())?;
+                let second = serde_json::from_value(page["second"].clone())?;
+                println!(
+                    "{}",
+                    overlay::adjacent(&gray, first, second, compat::truth(&page["vertical"]))?
+                );
+            } else {
+                let changed = overlay::ensure(&mut page, image.as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({"changed":changed,"page":page}))?
+                );
+            }
+        }
+        Operation::ProtocolProbe { requests } => {
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let replies: Vec<_> = requests
+                .iter()
+                .map(|r| match translation::protocol_probe(r) {
+                    Ok(value) => json!({"ok":true,"value":value}),
+                    Err(e) => json!({"ok":false,"error":e.to_string()}),
+                })
+                .collect();
+            println!("{}", serde_json::to_string(&replies)?);
+        }
+        Operation::ServiceProbe { requests } => {
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let mut replies = vec![];
+            for request in requests {
+                replies.push(match service::probe(&request).await {
+                    Ok(value) => json!({"ok":true,"value":value}),
+                    Err(e) => json!({"ok":false,"error":e.to_string()}),
+                });
+            }
+            println!("{}", serde_json::to_string(&replies)?);
+        }
+        Operation::ListModels { provider, base_url } => {
+            let reply = match service::TranslationService::new(&provider, base_url.as_deref(), None)
+            {
+                Ok(service) => service.list_models().await,
+                Err(e) => Err(e),
+            };
+            match reply {
+                Ok(models) => println!("{}", json!({"ok":true,"models":models})),
+                Err(e) => {
+                    println!("{}", json!({"ok":false,"error":e.to_string()}));
+                    std::process::exit(1);
+                }
+            }
+        }
         Operation::Display {
             image,
             cache,

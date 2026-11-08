@@ -54,7 +54,7 @@ pub fn classify(source: &Value) -> &'static str {
     "dialogue"
 }
 
-fn ocr_signature(page: &Value) -> String {
+pub fn ocr_signature(page: &Value) -> String {
     let mut blocks = array(&page["blocks"])
         .iter()
         .map(|b| json!([text(&b["id"]), b["box"], b["source"], truth(&b["vertical"])]))
