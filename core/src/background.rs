@@ -2,6 +2,7 @@
 //! selected local crop and final ink mask; it makes no geometric decisions.
 use crate::{ink::Box4, raster::*};
 use anyhow::Result;
+use base64::Engine;
 use opencv::{
     core::{self, Mat, Point, Size},
     imgproc,
@@ -19,6 +20,112 @@ pub struct BackgroundPlan {
 }
 
 impl BackgroundPlan {
+    pub async fn render(
+        &self,
+        color: Option<&Mat>,
+        models: Option<&mut crate::model_images::ImageModels>,
+    ) -> Result<Value> {
+        let [left, top, right, bottom] = self.bounds;
+        let has_ink = self.byte_mask.data_bytes()?.iter().any(|&v| v > 0);
+        let color = color
+            .map(|image| crop(image, left, top, right - left, bottom - top))
+            .transpose()?;
+        let mut restored_color = None;
+        let mut restored = if has_ink && self.textured && models.is_some() {
+            let result = models
+                .unwrap()
+                .restore(color.as_ref().unwrap_or(&self.patch), &self.byte_mask)
+                .await?;
+            if color.is_some() {
+                let mut gray = Mat::default();
+                imgproc::cvt_color_def(&result, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+                restored_color = Some(result);
+                gray
+            } else {
+                result
+            }
+        } else if !has_ink {
+            self.patch.try_clone()?
+        } else if self.textured {
+            crate::texture::fill(&self.patch, &self.byte_mask)?
+        } else {
+            let mut result = Mat::default();
+            opencv::photo::inpaint(
+                &self.patch,
+                &self.byte_mask,
+                &mut result,
+                3.0,
+                opencv::photo::INPAINT_TELEA,
+            )?;
+            result
+        };
+        let mask = self.byte_mask.data_bytes()?;
+        for ((v, &original), &alpha) in restored
+            .data_bytes_mut()?
+            .iter_mut()
+            .zip(self.patch.data_bytes()?)
+            .zip(mask)
+        {
+            if alpha == 0 {
+                *v = original;
+            }
+        }
+        let mut rgba = Mat::default();
+        if let Some(color) = &color {
+            if let Some(reconstructed) = restored_color {
+                imgproc::cvt_color_def(&reconstructed, &mut rgba, imgproc::COLOR_BGR2BGRA)?;
+            } else {
+                let mut ycc = Mat::default();
+                imgproc::cvt_color_def(color, &mut ycc, imgproc::COLOR_BGR2YCrCb)?;
+                let mut channels = core::Vector::<Mat>::new();
+                core::split(&ycc, &mut channels)?;
+                channels.set(0, restored.try_clone()?)?;
+                if has_ink {
+                    for index in [1, 2] {
+                        let mut repaired = Mat::default();
+                        opencv::photo::inpaint(
+                            &channels.get(index)?,
+                            &self.byte_mask,
+                            &mut repaired,
+                            3.0,
+                            opencv::photo::INPAINT_TELEA,
+                        )?;
+                        channels.set(index, repaired)?;
+                    }
+                }
+                core::merge(&channels, &mut ycc)?;
+                let mut bgr = Mat::default();
+                imgproc::cvt_color_def(&ycc, &mut bgr, imgproc::COLOR_YCrCb2BGR)?;
+                imgproc::cvt_color_def(&bgr, &mut rgba, imgproc::COLOR_BGR2BGRA)?;
+            }
+            for ((pixel, original), &alpha) in rgba
+                .data_bytes_mut()?
+                .chunks_exact_mut(4)
+                .zip(color.data_bytes()?.chunks_exact(3))
+                .zip(mask)
+            {
+                if alpha == 0 {
+                    pixel[..3].copy_from_slice(original);
+                }
+            }
+        } else {
+            imgproc::cvt_color_def(&restored, &mut rgba, imgproc::COLOR_GRAY2BGRA)?;
+        }
+        for (pixel, &alpha) in rgba.data_bytes_mut()?.chunks_exact_mut(4).zip(mask) {
+            pixel[3] = alpha;
+        }
+        let mut png = core::Vector::<u8>::new();
+        anyhow::ensure!(
+            opencv::imgcodecs::imencode(".png", &rgba, &mut png, &core::Vector::new())?,
+            "cannot encode background patch"
+        );
+        let ground = select(&restored, &self.allowed)?;
+        Ok(
+            json!({"background_png":base64::engine::general_purpose::STANDARD.encode(png.as_slice()),
+            "dark_background":!ground.is_empty() && percentile(&ground,50.0) < 115.0,"background_box":self.bounds}),
+        )
+    }
+
     pub fn snapshot(&self) -> Result<Value> {
         let hash =
             |m: &Mat| -> Result<String> { Ok(format!("{:x}", Sha256::digest(m.data_bytes()?))) };

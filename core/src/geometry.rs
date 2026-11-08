@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 
+#[derive(Clone)]
 pub struct Candidate {
     pub mask: Mat,
     pub origin: [i32; 2],

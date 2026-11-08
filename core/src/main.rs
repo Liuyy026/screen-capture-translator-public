@@ -3,10 +3,13 @@ mod compat;
 mod geometry;
 mod imaging;
 mod ink;
+mod model_images;
 mod models;
 mod panels;
 mod raster;
+mod reading;
 mod structure;
+mod texture;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -22,6 +25,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Generate final display regions from immutable OCR/translation inputs.
+    Display {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        text_mask: Option<PathBuf>,
+        #[arg(long,requires_all=["worker","weights"])]
+        python: Option<PathBuf>,
+        #[arg(long,requires_all=["python","weights"])]
+        worker: Option<PathBuf>,
+        #[arg(long,requires_all=["python","worker"])]
+        weights: Option<PathBuf>,
+    },
+    /// Render local repair requests; optional model paths enable local LaMa.
+    BackgroundRender {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        requests: PathBuf,
+        #[arg(long)]
+        mask: Option<PathBuf>,
+        #[arg(long,requires_all=["worker","weights"])]
+        python: Option<PathBuf>,
+        #[arg(long,requires_all=["python","weights"])]
+        worker: Option<PathBuf>,
+        #[arg(long,requires_all=["python","worker"])]
+        weights: Option<PathBuf>,
+    },
     /// Inspect local restoration masks without running an image model.
     BackgroundProbe {
         #[arg(long)]
@@ -97,6 +130,105 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::Display {
+            image,
+            cache,
+            text_mask,
+            python,
+            worker,
+            weights,
+        } => {
+            use opencv::prelude::*;
+            let page: serde_json::Value = serde_json::from_slice(&std::fs::read(cache)?)?;
+            let color = imaging::decode_color(&image)?;
+            let mut gray = opencv::core::Mat::default();
+            opencv::imgproc::cvt_color_def(&color, &mut gray, opencv::imgproc::COLOR_BGR2GRAY)?;
+            let has_color = color
+                .data_bytes()?
+                .chunks_exact(3)
+                .any(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 8);
+            let mut models =
+                if let (Some(python), Some(worker), Some(weights)) = (python, worker, weights) {
+                    Some(model_images::ImageModels::new(&python, &worker, &weights)?)
+                } else {
+                    None
+                };
+            let mut source = text_mask.as_deref().map(imaging::decode_gray).transpose()?;
+            if source.is_none()
+                && compat::array(&page["blocks"]).iter().any(ink::ready)
+                && let Some(models) = models.as_mut()
+            {
+                source = Some(models.detect(&color).await?);
+            }
+            let regions = reading::regions(
+                &page,
+                &gray,
+                if has_color { Some(&color) } else { None },
+                source.as_ref(),
+                models.as_mut(),
+            )
+            .await?;
+            if let Some(models) = models {
+                models.shutdown().await?;
+            }
+            println!(
+                "{}",
+                json!({"version":3,"regions":regions,"preserved":ink::preserved_markers(&page)})
+            );
+        }
+        Operation::BackgroundRender {
+            image,
+            requests,
+            mask,
+            python,
+            worker,
+            weights,
+        } => {
+            let color = imaging::decode_color(&image)?;
+            let gray = imaging::display_gray(&image)?;
+            let source = mask.as_deref().map(imaging::decode_gray).transpose()?;
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let mut models =
+                if let (Some(python), Some(worker), Some(weights)) = (python, worker, weights) {
+                    Some(model_images::ImageModels::new(&python, &worker, &weights)?)
+                } else {
+                    None
+                };
+            let mut replies = vec![];
+            for request in requests {
+                let boxes: Vec<ink::Box4> = serde_json::from_value(request["boxes"].clone())?;
+                let clip = request["clip_path"]
+                    .as_str()
+                    .map(|path| imaging::decode_gray(std::path::Path::new(path)))
+                    .transpose()?;
+                let origin: [i32; 2] = serde_json::from_value(
+                    request.get("clip_origin").cloned().unwrap_or(json!([0, 0])),
+                )?;
+                let plan = background::prepare(
+                    &gray,
+                    &boxes,
+                    clip.as_ref().map(|m| (m, origin)),
+                    compat::truth(&request["textured"]),
+                    source.as_ref(),
+                )?;
+                replies.push(
+                    plan.render(
+                        if compat::truth(&request["color"]) {
+                            Some(&color)
+                        } else {
+                            None
+                        },
+                        models.as_mut(),
+                    )
+                    .await?,
+                );
+            }
+            if let Some(models) = models {
+                models.shutdown().await?;
+            }
+            println!("{}", serde_json::to_string(&replies)?);
+        }
         Operation::BackgroundProbe {
             image,
             requests,

@@ -1,6 +1,6 @@
 # Koma Rust core（重构进行中）
 
-本目录是独立分支的实验核心，尚不能替代稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
+本目录是独立分支的实验核心，完整显示生成已通过 35 页像素对照，尚未接入候选应用，也不能替代稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
 
 ## 本地开发
 
@@ -31,13 +31,29 @@ python3 tools/rust_migration/cargo.py build
 - Python 模型延迟加载并在同一进程内复用，不自动下载模型，不保留任务/翻译缓存。
 - 输出路径必须位于任务目录，禁止覆盖已有数组；原图和原始译文不是输出目标。
 
-目前 `model-health` 可验证握手和退出，`model-run` 用于批量验证真实模型输入输出。它们是开发检查接口，不代表显示和翻译流程已完成 Rust 迁移。
+`model-health` 可验证握手和退出，`model-run` 用于批量验证真实模型输入输出。完整 `display` 流程经由 `model_images.rs` 交换受限原始数组，Python 只处理模型输入/输出。
 
 `image-probe` 检查原生解码像素，`panel-probe` 和 `structure-probe` 运行 Rust 分镜、对话分组、阅读顺序和译文同步。输入缓存只读，结果输出到标准输出。`structure-probe --mode build` 强制重建，`--mode sync` 仅同步译文，默认 `ensure` 保留缓存失效规则。
 
-`ink-probe` 核对显示框、页码保留和独立长划线补全后的蒙版哈希。它使用已有检测蒙版，不加载模型；完整清字、背景合成和显示协议仍在迁移。
+`ink-probe` 核对显示框、页码保留和独立长划线补全后的蒙版哈希。它使用已有检测蒙版，不加载模型。
 
 `geometry-probe` 核对气泡/旁白轮廓、排版矩形、擦除多边形及旧缓存边界。`background-probe` 接收一组局部修补请求，核对清字计划及蒙版，不运行修补模型。两者的差分验证脚本分别是 `verify_geometry.py` 和 `verify_background_plan.py`；原始图片及缓存保持只读。
+
+## 完整显示生成
+
+构建 release 后运行（输入路径由调用方指定，输出 JSON 写标准输出）：
+
+```sh
+python3 tools/rust_migration/cargo.py build --release
+core/target/release/koma-core display --image /path/to/page.webp --cache /path/to/page.json \
+  --python macos/.venv/bin/python --worker core/python/model_worker.py --weights .models
+```
+
+三个模型参数必须一起提供。省略时走原生非模型修补路径；`--text-mask /path/to/mask.png` 可提供已有检测蒙版。输出兼容现有显示协议 version 3，包含 `regions` 和 `preserved`。每次调用只读原图/译文，模型数组放在独立临时目录。
+
+`background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
+
+**当前尚无持久显示缓存、跨页任务队列或应用接入；翻译请求迁移和最终性能对比仍未完成。**
 
 差分检查使用稳定版本作为测试参照，生产核心不调用参照程序：
 
