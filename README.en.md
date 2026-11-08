@@ -88,7 +88,7 @@ The remaining 15 blocks follow existing skip/preservation rules. Original image 
 
 First generation is about 2.1× faster in this run. Gains include persistent processes and cache reuse, not just language choice. Timing excludes UI drawing; OS file caches were not forcibly cleared. **These are display measurements, not OCR/LLM inference speed or translation-quality improvements.** Memory measurements use different methods and do not establish lower memory usage; resident models retain memory.
 
-See the [validation report](docs/rust-core-validation.md), [migration record](docs/rust-core-migration.md) and [November 7–8 progress](进度汇总/当前进度_2026-11-08.md) for methods, reproducibility entry points and local evidence locations. This documentation update reports completed validation; it does not rerun model benchmarks.
+See the [validation report](docs/rust-core-validation.md), [migration record](docs/rust-core-migration.md) and [November 7–8 progress](进度汇总/07_填充修复与Rust重构_2026-11-08/当前进度_2026-11-08.md) for methods, reproducibility entry points and local evidence locations. This documentation update reports completed validation; it does not rerun model benchmarks.
 
 ## Limits and repository layout
 

@@ -91,7 +91,7 @@ python3 tools/rust_migration/cargo.py test
 macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
 ```
 
-35 页验收已完成真实 OCR 对照、完整显示像素对照、模拟 HTTP 流程验证、控制器及真实窗口检查。详细数字与计时口径见[验收报告](../docs/rust-core-validation.md)；复测入口见[核心说明](../core/README.md)和[最新进度](../进度汇总/当前进度_2026-11-08.md)。私人漫画、缓存及 `.runtime/rust-migration/pages.json` 未提交，克隆仓库不附带这套 35 页测试数据。
+35 页验收已完成真实 OCR 对照、完整显示像素对照、模拟 HTTP 流程验证、控制器及真实窗口检查。详细数字与计时口径见[验收报告](../docs/rust-core-validation.md)；复测入口见[核心说明](../core/README.md)和[最新进度](../进度汇总/07_填充修复与Rust重构_2026-11-08/当前进度_2026-11-08.md)。私人漫画、缓存及 `.runtime/rust-migration/pages.json` 未提交，克隆仓库不附带这套 35 页测试数据。
 
 ## 翻译服务：Ollama / oMLX
 
