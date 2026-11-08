@@ -1,5 +1,5 @@
-//! Eviction is restricted to reproducible SR/display assets. OCR, translations,
-//! edits, source images and model weights are deliberately outside these roots.
+//! Separate image and automatic page-cache budgets. Source images, model
+//! weights, manual edits and unclassified legacy pages are never evicted.
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::{
@@ -29,10 +29,12 @@ pub struct Report {
 pub struct Manager {
     sr: PathBuf,
     display: PathBuf,
+    translations: crate::translation_cache::Store,
     gate: Arc<RwLock<()>>,
-    viewed: Mutex<(u64, Option<File>)>,
+    viewed: Mutex<(u64, Vec<File>)>,
     serial: AtomicU64,
     last: Mutex<Option<Report>>,
+    last_translations: Mutex<Option<Report>>,
 }
 
 // Keep the filesystem locks alive through every image read/write/await. They
@@ -42,12 +44,12 @@ pub struct Activity {
     _files: Vec<File>,
 }
 
-fn open_lock(path: &Path) -> Result<File> {
+pub(super) fn open_lock(path: &Path) -> Result<File> {
     Ok(OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?)
 }
 
-fn try_lock(file: &File, exclusive: bool) -> Result<bool> {
+pub(super) fn try_lock(file: &File, exclusive: bool) -> Result<bool> {
     let mode = if exclusive { libc::LOCK_EX } else { libc::LOCK_SH };
     if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } == 0 { return Ok(true); }
     let error = std::io::Error::last_os_error();
@@ -55,10 +57,10 @@ fn try_lock(file: &File, exclusive: bool) -> Result<bool> {
     Err(error.into())
 }
 
-fn plain_dir(path: &Path) -> bool {
+pub(super) fn plain_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
 }
-fn hex_key(name: &str) -> bool {
+pub(super) fn hex_key(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
@@ -81,20 +83,23 @@ struct Entry {
 }
 
 impl Manager {
-    pub fn new(sr: &Path, display: &Path) -> Result<Arc<Self>> {
+    pub fn new(sr: &Path, display: &Path, translations: &Path) -> Result<Arc<Self>> {
         fs::create_dir_all(sr)?;
         fs::create_dir_all(display)?;
-        ensure!(plain_dir(sr) && plain_dir(display), "缓存目录不能是符号链接");
+        fs::create_dir_all(translations)?;
+        ensure!(plain_dir(sr) && plain_dir(display) && plain_dir(translations), "缓存目录不能是符号链接");
         let sr = sr.canonicalize()?;
         let display = display.canonicalize()?;
+        let translations = translations.canonicalize()?;
+        for root in [&sr, &display] { ensure!(!root.starts_with(&translations) && !translations.starts_with(root), "译文与图片缓存目录不能重叠"); }
         ensure!(!sr.starts_with(&display) && !display.starts_with(&sr), "缓存目录不能重叠");
-        Ok(Arc::new(Self { sr, display, gate: Arc::new(RwLock::new(())),
-            viewed: Mutex::new((0, None)), serial: AtomicU64::new(0), last: Mutex::new(None) }))
+        Ok(Arc::new(Self { sr, display, translations: crate::translation_cache::Store { root: translations }, gate: Arc::new(RwLock::new(())),
+            viewed: Mutex::new((0, Vec::new())), serial: AtomicU64::new(0), last: Mutex::new(None), last_translations: Mutex::new(None) }))
     }
 
     fn locks(&self, exclusive: bool) -> Result<Option<Vec<File>>> {
         let mut files = Vec::new();
-        for root in [&self.sr, &self.display] {
+        for root in [&self.sr, &self.display, &self.translations.root] {
             ensure!(plain_dir(root), "缓存目录不可用");
             let file = open_lock(&root.join(".cache-maintenance.lock"))?;
             if !try_lock(&file, exclusive)? { return Ok(None); }
@@ -116,7 +121,7 @@ impl Manager {
     // Called inside Activity, before returning an effective-image path to Swift.
     // An entry lock outlives the request, protecting the visible image even in
     // another process's eviction pass. Older, slow requests cannot replace it.
-    pub fn pin_view(&self, ticket: u64, image: &Path) -> Result<()> {
+    pub fn pin_view(&self, ticket: u64, image: &Path, cache: Option<&Path>) -> Result<()> {
         let mut viewed = self.viewed.lock().unwrap();
         if ticket < viewed.0 { return Ok(()); }
         let pin = if let Some(dir) = image.parent().filter(|dir|
@@ -127,24 +132,33 @@ impl Manager {
             ensure!(try_lock(&file, false)?, "增强缓存正在清理，请重试");
             Some(file)
         } else { None };
-        *viewed = (ticket, pin);
+        let mut pins: Vec<_> = pin.into_iter().collect();
+        if let Some(cache) = cache { pins.push(self.translations.pin(cache)?); }
+        *viewed = (ticket, pins);
         Ok(())
     }
 
     pub fn status(&self) -> serde_json::Value {
         serde_json::json!({"limit_bytes": LIMIT_BYTES, "low_water_bytes": LOW_WATER_BYTES,
-            "unused_days": 30, "scope": "reproducible_sr_and_display_only", "last_sweep": *self.last.lock().unwrap()})
+            "unused_days": 30, "scope": "reproducible_sr_and_display_only", "last_sweep": *self.last.lock().unwrap(),
+            "translations": {"limit_bytes": crate::translation_cache::LIMIT_BYTES,
+                "low_water_bytes": crate::translation_cache::LOW_WATER_BYTES, "unused_days": 30,
+                "manual_and_legacy_protected": true, "last_sweep": *self.last_translations.lock().unwrap()}})
     }
 
     pub async fn maintain(self: &Arc<Self>) -> Result<Option<Report>> {
         let Ok(gate) = self.gate.clone().try_write_owned() else { return Ok(None); };
         let Some(files) = self.locks(true)? else { return Ok(None); };
         let manager = self.clone();
-        let report = tokio::task::spawn_blocking(move || {
+        let (report, translations) = tokio::task::spawn_blocking(move || {
             let (_gate, _files) = (gate, files);
-            manager.sweep(SystemTime::now(), LIMIT_BYTES, LOW_WATER_BYTES)
+            let now = SystemTime::now();
+            let images = manager.sweep(now, LIMIT_BYTES, LOW_WATER_BYTES)?;
+            let translations = manager.translations.sweep(now, crate::translation_cache::LIMIT_BYTES, crate::translation_cache::LOW_WATER_BYTES)?;
+            Ok::<_, anyhow::Error>((images, translations))
         }).await??;
         *self.last.lock().unwrap() = Some(report.clone());
+        *self.last_translations.lock().unwrap() = Some(translations);
         Ok(Some(report))
     }
 
@@ -236,7 +250,7 @@ mod tests {
 
     fn setup() -> (tempfile::TempDir, Arc<Manager>) {
         let dir = tempfile::tempdir().unwrap();
-        let manager = Manager::new(&dir.path().join("super-resolution-v1"), &dir.path().join("reading-native-v1")).unwrap();
+        let manager = Manager::new(&dir.path().join("super-resolution-v1"), &dir.path().join("reading-native-v1"), &dir.path().join("pages")).unwrap();
         (dir, manager)
     }
     fn age(path: &Path, days: u64) {
@@ -307,13 +321,13 @@ mod tests {
         let second = sr(&manager, 2, 100, 60);
         let older = manager.view_ticket();
         let newer = manager.view_ticket();
-        manager.pin_view(newer, &second).unwrap();
-        manager.pin_view(older, &first).unwrap();
+        manager.pin_view(newer, &second, None).unwrap();
+        manager.pin_view(older, &first, None).unwrap();
         let report = sweep(&manager, 50, 45);
         assert!(!first.exists() && second.exists());
         assert!(report.over_limit);
         assert_eq!(report.protected_entries, 1);
-        manager.pin_view(manager.view_ticket(), Path::new("/original.png")).unwrap();
+        manager.pin_view(manager.view_ticket(), Path::new("/original.png"), None).unwrap();
         assert_eq!(sweep(&manager, 50, 45).bytes_after, 0);
         assert!(!second.exists());
     }
@@ -340,11 +354,11 @@ mod tests {
     #[tokio::test]
     async fn activity_and_other_runtime_pins_block_eviction() {
         let (_dir, manager) = setup();
-        let other = Manager::new(&manager.sr, &manager.display).unwrap();
+        let other = Manager::new(&manager.sr, &manager.display, &manager.translations.root).unwrap();
         let file = sr(&manager, 1, 10, 60);
         let activity = other.activity().await.unwrap();
         assert!(manager.maintain().await.unwrap().is_none());
-        other.pin_view(other.view_ticket(), &file).unwrap();
+        other.pin_view(other.view_ticket(), &file, None).unwrap();
         drop(activity);
         let report = manager.maintain().await.unwrap().unwrap();
         assert_eq!(report.protected_entries, 1);

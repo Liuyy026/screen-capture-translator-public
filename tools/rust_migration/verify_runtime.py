@@ -170,6 +170,7 @@ def main():
                               values={'translation':'手动校正内容', 'edited':True}, revision=first['revision'])
         expected = json.loads(json.dumps(original))
         expected['blocks'][0].update(translation='手动校正内容', edited=True)
+        expected['cache_retention'] = {'version': 1, 'kind': 'manual'}
         assert updated['page'] == expected
         stale = client.wait(client.send('edit', cache=first['cache'], block_id=block_id,
                                        values={'translation':'不应写入'}, revision=first['revision']))

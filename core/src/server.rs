@@ -42,7 +42,7 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
             let effective=runtime.sr.prepare(Path::new(required(r,"image")?),&settings).await?;
             let mut reply=runtime.load_page(&effective,r["mode"].as_str().unwrap_or("text")).await?;
-            runtime.cache_policy.pin_view(ticket,&effective)?;
+            runtime.cache_policy.pin_view(ticket,&effective,Some(Path::new(reply["cache"].as_str().context("missing cache path")?)))?;
             reply["effective_image"]=json!(effective);reply["original_image"]=r["image"].clone();Ok(reply)
         },
         "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
@@ -52,7 +52,10 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let _activity=runtime.cache_policy.activity().await?;
             runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?)).await
         },
-        "edit"=>runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str()).await,
+        "edit"=>{
+            let _activity=runtime.cache_policy.activity().await?;
+            runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str()).await
+        },
         "process"=>{
             let images=r["images"].as_array().context("missing images")?;
             ensure!(!images.is_empty()&&images.len()<=4096,"invalid page queue size");

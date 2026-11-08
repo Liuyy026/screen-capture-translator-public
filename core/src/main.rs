@@ -23,6 +23,7 @@ mod structure;
 mod texture;
 mod translate_pipeline;
 mod translation;
+mod translation_cache;
 mod vision_decode;
 mod vision_image;
 mod vision_pipeline;

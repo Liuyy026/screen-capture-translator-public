@@ -40,7 +40,7 @@ impl Runtime{
         std::fs::create_dir_all(&sr.root)?;
         ensure!(!sr.root.starts_with(&cache_root)&&!cache_root.starts_with(&sr.root),"增强缓存与译文目录不能重叠");
         if let Some(seed)=&seed_root {ensure!(!sr.root.starts_with(seed)&&!seed.starts_with(&sr.root),"增强缓存与稳定版缓存不能重叠");}
-        let cache_policy=crate::cache_policy::Manager::new(&sr.root,&assets_root)?;
+        let cache_policy=crate::cache_policy::Manager::new(&sr.root,&assets_root,&cache_root)?;
         Ok(Self{sr,cache_policy,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
             models:Mutex::new(ImageModels::new(python,worker,weights)?),pages:Mutex::new(HashMap::new()),
             engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
@@ -57,7 +57,11 @@ impl Runtime{
         pages.entry(path.to_owned()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
     }
     fn seed_page(&self,image:&Path,mode:&str,target:&Path)->Result<Option<Value>>{
-        if target.exists(){return Ok(Some(serde_json::from_slice(&std::fs::read(target)?)?));}
+        if target.exists(){
+            let page=serde_json::from_slice(&std::fs::read(target)?)?;
+            let _=crate::cache_policy::touch(target);
+            return Ok(Some(page));
+        }
         if let Some(seed)=self.seed_root.as_ref().filter(|_|!image.starts_with(&self.sr.root)){
             let source=seed.join(if mode=="vision"{"vision-v1"}else{""}).join(target.file_name().unwrap());
             if source.is_file(){
@@ -66,7 +70,9 @@ impl Runtime{
             }
         }
         if mode=="vision"{
-            let mut page=vision_pipeline::prepare(image,target,if image.starts_with(&self.sr.root){target.parent().unwrap().parent().unwrap()}else{&self.cache_root})?;
+            let ordinary_root=if image.starts_with(&self.sr.root){target.parent().unwrap().parent().unwrap()}else{&self.cache_root};
+            let mut page=vision_pipeline::prepare(image,target,ordinary_root)?;
+            if page.is_some(){let _=crate::cache_policy::touch(&persistence::cache_path(image,ordinary_root)?);}
             if page.is_none()&&!image.starts_with(&self.sr.root)&&let Some(seed)=&self.seed_root{page=vision_pipeline::prepare(image,target,seed)?;}
             if let Some(page)=&page{persistence::atomic_json(target,page)?;}
             return Ok(page);
@@ -103,7 +109,8 @@ impl Runtime{
         }else{
             observer.progress("正在自动寻找文字并识别日文，首次处理会稍慢…")?;
             let mut models=self.models.lock().await;
-            let page=ocr::recognize(image,&mut models).await?;
+            let mut page=ocr::recognize(image,&mut models).await?;
+            crate::translation_cache::mark_automatic(&mut page);
             persistence::atomic_json(&cache,&page)?;page
         };
         if options.retry{
@@ -131,6 +138,7 @@ impl Runtime{
         let lock=self.page_lock(&cache).await;let _guard=lock.lock().await;
         let image_bytes=std::fs::read(image)?;let cache_bytes=std::fs::read(&cache)?;
         let key=self.display.key(&image_bytes,&cache_bytes)?;
+        let _=crate::cache_policy::touch(&cache);
         if let Some(reply)=self.display.load(&key){return Ok(json!({"reply":reply,"cache_hit":true}));}
         let page=serde_json::from_slice(&cache_bytes)?;
         let mut models=self.models.lock().await;
@@ -151,6 +159,7 @@ impl Runtime{
                 "quality_warnings"=>value.as_array().is_some_and(|a|a.iter().all(Value::is_string)),_=>false};
             ensure!(valid,"invalid edit field");block[key]=value.clone();
         }
+        crate::translation_cache::mark_manual(&mut page);
         persistence::atomic_json(&cache,&page)?;
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
     }
