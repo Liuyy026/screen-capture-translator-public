@@ -1,64 +1,108 @@
-# Koma · Local Manga Translation
+# Koma · Local Manga Translation (Rust candidate)
 
 [简体中文](README.md) | English
 
-Native macOS and Windows readers with a shared local OCR/translation backend. The UI and translation target remain Chinese.
+Local Japanese manga OCR, translation and Chinese typesetting. **This is the independent `refactor/rust-core` development branch.** The macOS business core now runs in Rust; Swift retains the UI and Chinese layout, while Python runs detection, OCR and background-restoration models. The Windows reader still uses the original Python backend.
 
-## Choose a platform
+The stable version remains on [`main`](https://github.com/Liuyy026/screen-capture-translator-public/tree/main). The frozen pre-migration baseline is `a08b421` / `stable/pre-rust-20261108`. The candidate has a separate app identity, configuration and caches; it has not been merged into stable and is not a standalone distribution package.
 
-| Platform | Guide | Entry point |
-| --- | --- | --- |
-| macOS / SwiftUI | [macOS guide](macos/README.en.md) | `macos/安装.command`, `macos/启动.command` |
-| Windows / PySide6 | [Windows guide](windows/README.en.md) | `windows/启动Windows.bat` |
+## Architecture
 
-```text
-macos/      macOS: Sources, scripts, requirements
-windows/    Windows: reader, launcher, scripts, requirements, tests
-backend/    Shared OCR / translation / cache / structure / overlays
-scripts/    Shared model preparation / annotation / evaluation
-tests/      Shared backend tests and fixtures
-samples/    Test images
-docs/       Development and evaluation
-进度汇总/   Historical plans and reports
+```mermaid
+flowchart TD
+    UI["Swift · Reader UI and editing"] -->|JSONL pipes| R["Rust · Persistent service, queue, cancellation and recovery"]
+    R --> O["Rust · Image input, OCR assembly, panels and dialogue groups"]
+    O --> P["Python · CTD / Manga OCR inference"]
+    P --> O
+    O --> T["Rust · Text/vision prompts, image encoding, HTTP and validation"]
+    T --> L["External model service · oMLX / Ollama"]
+    L --> T
+    T --> C["Rust · Manual-edit protection and atomic caches"]
+    C --> D["Rust · Contours, masks, compositing and display cache"]
+    D --> M["Python · CTD / LaMa inference"]
+    M --> D
+    D --> S["Swift · Chinese line layout and final drawing"]
 ```
 
-Keep the full repository. Platform environments and client logs live in their respective directories. Models stay in `.models/` at the repository root.
+| Layer | Responsibilities |
+| --- | --- |
+| Swift / SwiftUI | Reader interaction, connection settings, left-to-right Chinese layout and drawing |
+| Rust / native libraries | Task control, OCR assembly, structure, HTTP, image codecs, persistence, cleanup/compositing and owned engine lifecycle |
+| Python adapter | Installed CTD, Manga OCR and Anime LaMa inference, including model preprocessing/output conversion |
+| oMLX / Ollama | Language or vision model serving; model inference was not rewritten in Rust |
 
-[Shared development](docs/development.en.md) · [Path migration](docs/layout-migration.md) · [Historical progress](进度汇总/README.md)
+The candidate does not invoke the old Python business workers. Rust lazily starts and reuses the inference adapter and only manages local Ollama processes it owns. Existing services and oMLX are not taken over. See [core documentation](core/README.md).
 
-[macOS installation and translation verification (2026-11-07, Chinese)](docs/macos-verification-2026-11-07.md): built and launched on Apple Silicon, with dependencies, models, and sample OCR/translation checked.
+## Run
 
-[Ollama / oMLX service settings and verification](docs/omlx-integration-2026-11-07.md): configurable endpoint, API key, and discovered model selection in both clients; macOS real-service sample tests completed.
+Requires Apple Silicon, macOS 14+, Swift build tools, Rust/Cargo, native OpenCV 4.11.0, a prepared `macos/.venv`, and installed weights under `.models/`. Follow the [macOS setup guide](macos/README.en.md) for first-time preparation.
+
+From this branch's repository root:
+
+```sh
+./macos/scripts/build_and_run.sh --verify
+# Open an existing build:
+open 'macos/dist/Koma Rust 候选版.app'
+```
+
+The script builds and restarts only this checkout's candidate, then checks that it stays alive for 10 seconds. Do not use the legacy `macos/启动.command`: it still targets the stable app name. The build depends on the checkout and local runtime; rebuild after moving the repository.
+
+Open an image folder, configure the endpoint, optional API key and model, and process a page or folder. Visual assistance requires an image-capable model served by oMLX. It combines the page image with existing OCR boxes; it does not recover undetected text by adding boxes.
+
+Candidate data lives under `~/Library/Application Support/KomaReaderRust/`: `config.json`, `pages/`, `pages/vision-v1/` and `reading-native-v1/`. Stable configuration/pages may be copied read-only into independent candidate files on first use. Keys can be saved in the local plaintext config with mode `0600`; Keychain is not accessed. If key persistence is disabled, the key is session-only. Configs, images, weights and private evaluation artifacts are not committed.
+
+For Windows, use the existing [Windows guide](windows/README.en.md); the Rust migration and measurements do not apply to that client.
 
 ## Features
 
-- Supports WebP, PNG, JPG, JPEG, BMP, and TIFF, with natural filename sorting.
-- Recognizes horizontal and vertical Japanese text and displays text boxes, source text, and Chinese overlays.
-- Supports editing Japanese source text and Chinese translations; manually saved translations are preserved during batch translation.
-- Supports translating an individual line again, folder batch processing, cancellation, and cache reuse.
-- Keeps original images read-only. Recognition results, translations, errors, and overlay metadata are stored in a local cache.
+- WebP, PNG, JPG, JPEG, BMP and TIFF, naturally sorted; original images remain read-only.
+- macOS page/folder processing, cancellation, individual retranslation, source/translation editing and manual-edit protection.
+- Separate text and vision caches; proposed OCR corrections require manual confirmation.
+- Left-to-right Chinese text with measured glyph widths and contour-aware lines for long sentences and irregular/connected bubbles.
+- Pixel masks and local background restoration replace broad white strips; narration is grouped in reading order.
+- Display caches are separate from translations. Unsafe layouts preserve the image and show the full translation and reason in the sidebar.
 
-Editing, single-line retranslation, and folder batch processing currently have UI controls in the macOS reader. The Windows validation build supports single-page processing, stopping a task, cache loading, and structure diagnostics. Its results pane is read-only; editing, retranslation, and folder queue controls are still planned.
+## 35-page validation — November 8, 2026
 
-## Validation status and limitations
+Comparisons use the same 35 images and frozen translations as the stable baseline.
 
-The following validation results are historical records from the original project; this reorganization does not rerun real OCR, GPU, or model evaluation.
+| Check | Result |
+| --- | --- |
+| Real OCR and page assembly | Identical structured output for 259 blocks |
+| Final Swift rendering | All 35 pages pixel-identical; identical layout audits |
+| Existing translations | 244 displayed; no new omissions, glyph crossings or text loss |
+| Text / vision translation pipelines | 209 / 100 differential scenarios passed with simulated model replies |
+| Vision image encoding | Identical JPEG bytes for 35 pages and 56 format/size/orientation cases |
+| Controller / real-window flows | 8 / 6 scenarios passed; actual app startup crash separately fixed and verified |
+| Native foundations and lifecycle | 11 tests passed; all 35 display caches reused after service restart |
 
-- The native macOS app has previously been built and locally signed; the Windows reader runs through its launcher.
-- The base Windows environment previously passed `pip check`. Before the 2026-09-19 upload, all 93 Python regression tests passed in `.venv-cuda`.
-- Two original WebP samples completed OCR and Qwen3 4B translation, covering horizontal and vertical text.
-- In the validated RTX 5070 setup, Manga OCR logged `Using CUDA`, and Ollama reported GPU use. `samples/01.webp` produced five text boxes and five valid translations with both 4B and 8B models.
-- Responses are checked against the requested IDs. Placeholder text, empty translations, duplicate IDs, and missing entries produce explicit errors. Existing caches and manual edits are preserved.
-- A fixed 62-page manga set has undergone automatic A/B and layout evaluation. Independent labels and human semantic review are still insufficient for overall quality acceptance. Vertical text, handwriting, sound effects, low-resolution images, and reading order across panels can still fail; pages 16 and 24 have known structure defects.
-- Chinese mode uses white-background overlays, not seamless inpainting or professional typesetting. Freehand OCR box editing, cross-page character memory, glossaries, translated-image export, ZIP/PDF input, and recursive subfolders are not supported yet.
-- Local models can refuse, mistranslate, or return malformed output. The application retains source text and errors; a valid translation is not guaranteed for every request.
+The remaining 15 blocks follow existing skip/preservation rules. Original image and translation-cache hashes are unchanged. Pages 13 and 15 were visually reviewed for narration, long sentences and irregular bubbles, with no regression against the baseline.
 
-## Upstream projects and licenses
+| Display-processing metric | Stable Python | Rust candidate |
+| --- | ---: | ---: |
+| First generation of 35 pages, including service startup | 98.035 s | 47.243 s |
+| 105 cache hits, total | 13.259 s | 0.751 s |
+| Median cache-hit time per page | 125.49 ms | 6.54 ms |
 
-- [Mokuro](https://github.com/kha-white/mokuro): GPL-3.0; manga text detection and line-by-line OCR.
-- [Manga OCR](https://github.com/kha-white/manga-ocr): Japanese text recognition.
-- [Comic Text Detector](https://github.com/dmMaze/comic-text-detector): manga text detection.
-- [Ollama](https://github.com/ollama/ollama): local model service.
-- [Qwen3](https://github.com/QwenLM/Qwen3): translation model family.
+First generation is about 2.1× faster in this run. Gains include persistent processes and cache reuse, not just language choice. Timing excludes UI drawing; OS file caches were not forcibly cleared. **These are display measurements, not OCR/LLM inference speed or translation-quality improvements.** Memory measurements use different methods and do not establish lower memory usage; resident models retain memory.
 
-Model weights and dependencies are not included in Git. Each component remains subject to its upstream license.
+See the [validation report](docs/rust-core-validation.md), [migration record](docs/rust-core-migration.md) and [November 7–8 progress](进度汇总/当前进度_2026-11-08.md) for methods, reproducibility entry points and local evidence locations. This documentation update reports completed validation; it does not rerun model benchmarks.
+
+## Limits and repository layout
+
+Parity on 35 pages does not establish universal correctness. OCR omissions, handwriting, names/dates and translation semantics still need review; restoration may leave texture artifacts. This migration preserved existing source text and translations without content corrections.
+
+Standalone packaging, broader long-term testing and a Windows Rust integration remain unfinished. Manual box editing, cross-page character memory, glossaries, in-app translated-image export, ZIP/PDF input and recursive subfolders are outside this delivery. Test rendering tools are not an in-app export feature.
+
+```text
+core/                   Rust core, native bridge and Python model adapter
+macos/                  Swift UI, candidate build and model environment
+windows/                Original Python Windows reader
+backend/                Original backend retained for stable/reference use
+tools/rust_migration/    Build, differential validation and benchmark tools
+scripts/ tests/          Original model preparation, evaluation and tests
+docs/                   Architecture, migration and validation
+进度汇总/                Current progress and dated historical records
+```
+
+Upstream components include [Mokuro](https://github.com/kha-white/mokuro), [Manga OCR](https://github.com/kha-white/manga-ocr), [Comic Text Detector](https://github.com/dmMaze/comic-text-detector), [IOPaint / Anime LaMa](https://github.com/Sanster/IOPaint), [OpenCV](https://github.com/opencv/opencv) and [Ollama](https://github.com/ollama/ollama), under their respective licenses. See [native third-party notices](core/THIRD_PARTY.md) for image compatibility code and the Pillow license. Weights and dependencies are not included in Git.

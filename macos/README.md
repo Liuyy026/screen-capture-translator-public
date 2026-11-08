@@ -2,21 +2,61 @@
 
 简体中文 | [English](README.en.md) | [项目首页](../README.md)
 
-请保留完整仓库。要求 Apple Silicon、macOS 14+、Swift 编译工具和 uv。双击本目录 `安装.command`，或在仓库根目录执行以下安装命令；安装会下载 OCR/Ollama/Qwen3 模型并建立 `macos/.venv`：
+本页说明 `refactor/rust-core` 的独立候选应用。架构和验收摘要见[项目首页](../README.md)，稳定版仍位于 `main`。以下命令均在仓库根目录执行。
+
+## 首次准备
+
+要求 Apple Silicon、macOS 14+、可用的 `xcrun swiftc`、Rust/Cargo、Python 3 和 uv。候选应用还依赖项目内原生 OpenCV、Python 3.12 环境和模型权重，不是独立安装包。
+
+先构建项目内 OpenCV 4.11.0，不写入系统库目录（首次会下载源码和构建工具）：
+
+```sh
+python3 -m venv .runtime/build-tools
+.runtime/build-tools/bin/python -m pip install cmake==3.31.6 ninja==1.11.1.4
+python3 tools/rust_migration/build_opencv.py \
+  --directory .runtime/native-deps \
+  --cmake .runtime/build-tools/bin/cmake \
+  --ninja .runtime/build-tools/bin/ninja
+```
+
+若已经有本项目可用的 `macos/.venv` 和 `.models/`，无需重复安装。新环境可选择下列一种准备方式：
+
+**使用已有 oMLX 服务：**只准备识别与修补依赖，oMLX 及其视觉/语言模型由用户在现有服务中配置。
+
+```sh
+uv venv --python 3.12 macos/.venv
+uv pip install --python macos/.venv/bin/python -r macos/requirements.lock
+macos/.venv/bin/python scripts/prepare_models.py
+python3 macos/scripts/setup_reading_model.py
+```
+
+以上命令会下载 OCR/检测及约 197 MiB 的背景修补权重。已安装的权重由运行时离线读取，不会在阅读时自动下载。
+
+**需要项目内 Ollama 和 Qwen3 4B：**在 OpenCV 准备完成后执行旧安装器，再安装背景模型：
 
 ```sh
 python3 macos/scripts/setup.py
+python3 macos/scripts/setup_reading_model.py
 ```
 
-只构建应用（不安装依赖、不启动模型）：
+此安装器会建立 Python 环境、下载 OCR、Ollama 与 Qwen3 4B，必要时启动本地 Ollama 完成模型下载，最后构建候选应用。仅使用现有 oMLX 时不需要此步骤；安装器也不会代为安装 Rust 或构建原生 OpenCV。安装结束的旧「启动.command」提示不适用于本候选分支。
+
+## 构建与启动
 
 ```sh
+# 构建、启动，并检查进程持续存活 10 秒
+./macos/scripts/build_and_run.sh --verify
+
+# 只构建，不启动应用或翻译服务
 zsh macos/scripts/build.sh
+
+# 打开已构建的候选版
+open 'macos/dist/Koma Rust 候选版.app'
 ```
 
-## macOS 启动
+输出应用为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。不要使用旧 `macos/启动.command`，它仍指向 `Koma 漫画翻译.app`。构建脚本只重启本 checkout 的候选版，不覆盖稳定应用；`--logs` 查看日志，`--debug` 进入 LLDB。应用通过构建时记录的仓库绝对路径使用核心、环境和模型，移动仓库后须重新构建。
 
-项目针对 Apple Silicon、macOS 14+ 开发。完成安装后，双击本目录的 **启动.command**，或打开 **macos/dist/Koma 漫画翻译.app**。
+首次访问桌面中的漫画或运行环境时，请完成 macOS 文件夹授权。`--verify` 是启动检查，不代替实际翻译或界面验收。
 
 1. 点击「打开文件夹」，选择直接包含图片的文件夹。
 2. 点击「识别并翻译」。也可以通过「更多」菜单只识别日文，或翻译整个文件夹。
@@ -27,37 +67,37 @@ zsh macos/scripts/build.sh
 仓库根目录 `samples/` 中的两张原创 WebP 测试图包含横排和竖排日文，可用于检查流程，不代表真实漫画上的识别准确率。
 
 
-## 开发与数据
+## 开发、数据与验证
 
-以下命令在仓库根目录执行：
+Swift 的 `NativeCoreService.swift` 通过 JSONL 管道连接 `core/target/release/koma-core serve`。Rust 负责队列、缓存、翻译请求、页面分析及背景合成；`core/python/model_worker.py` 仅运行 CTD/Manga OCR/LaMa 推理；Swift 保留排版与绘制。旧 `backend/` 和 `macos/backend/` 是稳定实现及差分参照，不是候选阅读器的业务执行入口。
+
+| 路径 | 用途 |
+| --- | --- |
+| `macos/.venv/`、`.models/` | Python 模型环境、已安装权重 |
+| `.runtime/native-deps/`、`core/target/` | 原生 OpenCV、Rust 构建产物 |
+| `macos/.runtime/ollama/` | 可选的项目内 Ollama |
+| `~/Library/Application Support/KomaReaderRust/config.json` | 候选版连接配置 |
+| 同目录 `pages/`、`pages/vision-v1/` | 普通/视觉结果与手工编辑 |
+| 同目录 `reading-native-v1/`、`native-core.log` | 原生显示缓存、服务日志 |
+
+首次可只读复制 `KomaReader` 中的稳定配置和对应页面，之后写入候选独立目录。稳定数据不会随候选编辑变化，普通和视觉模式的编辑也不自动互相同步。
+
+已准备原生依赖后，可运行不需要真实模型权重或翻译服务的基础检查：
 
 ```sh
-macos/.venv/bin/python -m unittest discover -s tests -v
-macos/.venv/bin/python backend/worker.py --help
-macos/.venv/bin/python backend/worker.py --image samples/01.webp --operation both --model qwen3:4b --status macos/.runtime/test-status.json
+python3 tools/rust_migration/cargo.py test
+macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
 ```
 
-界面：`macos/Sources/KomaReader.swift`；依赖：`macos/requirements.txt`、`macos/requirements.lock`，不要与 Windows 混装。
-
-环境：`macos/.venv/`；Ollama 可执行文件和 OCR 日志：`macos/.runtime/`；应用：`macos/dist/`。模型仍保存在仓库根目录 `.models/`。Ollama 使用 `127.0.0.1:11439`，关闭云端功能。
-
-页面缓存：`~/Library/Application Support/KomaReader/pages/`。应用记录构建时的仓库位置；移动整个仓库后需要重新构建。macOS OCR 依赖已固定为 Manga OCR 0.1.16、Transformers 4.45.2、PyTorch 2.5.1、SciPy 1.17.1；安装器下载并默认使用 `qwen3:4b`。界面使用状态属性包装器别名，兼容缺少 SwiftUI 宏插件的 macOS 27 Command Line Tools SDK。
-
-[共用开发说明](../docs/development.md) · [旧路径对照](../docs/layout-migration.md)
-
-开发时可在仓库根目录运行 `./macos/scripts/build_and_run.sh --verify`，重新构建并验证启动；Codex 的 Run 按钮也使用同一入口。`--logs` 可查看日志，`--debug` 可进入 LLDB。
-
-首次使用时，macOS 可能请求访问“桌面”文件夹，因为当前项目和 Python 环境放在桌面。请在系统弹窗中手动允许；等待授权期间，OCR 会停留在“准备处理”。
-
-[本机安装与样例翻译验证报告（2026-11-07）](../docs/macos-verification-2026-11-07.md)。
+35 页验收已完成真实 OCR 对照、完整显示像素对照、模拟 HTTP 流程验证、控制器及真实窗口检查。详细数字与计时口径见[验收报告](../docs/rust-core-validation.md)；复测入口见[核心说明](../core/README.md)和[最新进度](../进度汇总/当前进度_2026-11-08.md)。私人漫画、缓存及 `.runtime/rust-migration/pages.json` 未提交，克隆仓库不附带这套 35 页测试数据。
 
 ## 翻译服务：Ollama / oMLX
 
 在阅读器中打开接口/服务设置，选择服务，填写地址与可选 API Key，获取模型列表、选择模型后保存。oMLX 默认为 `http://127.0.0.1:8000/v1`，Ollama 默认为 `http://127.0.0.1:11439`。oMLX 需自行运行，应用不会启停它。
 
-开发期间，服务、接口地址、模型和可选 API Key 保存在 `~/Library/Application Support/KomaReader/config.json`，不放入仓库。配置是明文文件，权限为 `0600`，仅当前用户可读写；每次保存均原子替换。设置中的「将 API Key 保存在本地配置文件」不勾选时，密钥只用于本次运行，并从该服务的持久配置中清除。应用不会读取、写入或弹出系统钥匙串授权；钥匙串接入留待稳定后再处理。
+开发期间，服务、接口地址、模型和可选 API Key 保存在 `~/Library/Application Support/KomaReaderRust/config.json`，不放入仓库。配置是明文文件，权限为 `0600`，仅当前用户可读写；每次保存均原子替换。设置中的「将 API Key 保存在本地配置文件」不勾选时，密钥只用于本次运行，并从该服务的持久配置中清除。应用不会读取、写入或弹出系统钥匙串授权；钥匙串接入留待稳定后再处理。
 
-首次没有配置文件时，只迁移已有偏好中的服务、地址和模型，不读取旧钥匙串密钥。JSON 格式错误、版本不支持或权限异常会显示具体文件位置与修复提示，并阻止自动连接和覆盖原配置。手工修改前先退出应用；修复文件，或将它移走保留备份后，重新启动。
+首次没有候选配置时，可从稳定版本地配置只读导入独立副本；没有稳定配置则使用已有偏好中的服务、地址和模型，不读取旧钥匙串密钥。JSON 格式错误、版本不支持或权限异常会显示具体文件位置与修复提示，并阻止自动连接和覆盖原配置。手工修改前先退出应用；修复文件，或将它移走保留备份后，重新启动。
 
 配置格式示例（不需要认证时 `apiKey` 填空字符串；`connections` 每个服务最多一项）：
 
@@ -98,15 +138,9 @@ macos/.build/connection-config-tests
 
 选择「视觉辅助」后，点击「识别并翻译」，也可只识别、重译单句或批量处理。原文与中文仍可手动编辑；图片中发现的疑似 OCR 错误显示为「画面复核建议」，点击填入日文后，核对并保存才会修改原文。中日共用词的相同译文会保留并提示核对。
 
-视觉结果保存到 `~/Library/Application Support/KomaReader/pages/vision-v1/`，普通结果仍在 `pages/`。两种模式单独保存编辑；首次建立视觉结果时，可复用普通模式已有 OCR 和手动译文，后续修改不自动跨模式同步。图片长边最多 1775 像素；当前仍依赖 OCR 找框，漏检文字、拟声词不会自动补框。视觉模式不保证比普通翻译更准确，也不保证模型不会拒译。
+视觉结果保存到 `~/Library/Application Support/KomaReaderRust/pages/vision-v1/`，普通结果仍在 `pages/`。两种模式单独保存编辑；首次建立视觉结果时，可复用普通模式已有 OCR 和手动译文，后续修改不自动跨模式同步。图片长边最多 1775 像素；当前仍依赖 OCR 找框，漏检文字、拟声词不会自动补框。视觉模式不保证比普通翻译更准确，也不保证模型不会拒译。
 
-实现仅位于 `macos/backend/vision_worker.py` 与 Mac 界面；不改变 Windows 和共享后端的处理方式。[1209806 实测记录](../docs/macos-vision-1209806-2026-11-07.md)。
-
-```sh
-macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_vision_worker.py' -v
-macos/.venv/bin/python macos/backend/vision_worker.py --help
-```
-
+候选版实现位于 `core/src/vision_pipeline.rs`、`vision_image.rs` 和 `vision_decode.rs`，由 Rust 完成请求、编码及保存；Windows 未迁移。[早期真实模型试用记录](../docs/macos-vision-1209806-2026-11-07.md)保留当时的 Python/钥匙串/白底方案，不代表当前实现。Rust 迁移使用确定的模拟回复做流程对照，没有重新进行真实语言模型质量评测。
 
 ## 中文气泡排版
 
@@ -124,22 +158,12 @@ python3 macos/scripts/setup_reading_model.py
 
 权重保存于 `.models/anime-manga-big-lama.pt`，下载后核对发布方提供的校验值。来源：[IOPaint AnimeLaMa](https://github.com/Sanster/IOPaint/blob/main/iopaint/model/lama.py)。没有该模型时使用局部传统修补，复杂网点效果较弱。修补是在估计原字遮住的背景，仍可能留下模糊或纹理痕迹，不等于精确恢复原画。
 
-显示结果和文字蒙版单独保存在 `~/Library/Application Support/KomaReader/reading-v3/`；图片、译文、显示算法或模型变化后自动重建显示结果，已经翻译的旧页面无需重译。纯省略号、相同的数字保留原样，不算漏填；疑似页码误识别会保留原图并提示，手动核对保存后可覆盖。
+显示结果和文字蒙版单独保存在 `~/Library/Application Support/KomaReaderRust/reading-native-v1/`；图片、译文、显示算法或模型变化后自动重建显示结果，已经翻译的旧页面无需重译。纯省略号、相同的数字保留原样，不算漏填；疑似页码误识别会保留原图并提示，手动核对保存后可覆盖。
 
 旧缓存中的白色矩形不会直接作为回退覆盖；打开页面时重新检查背景和文字范围。译文不完整、排版空间不足或背景不可靠时保留原图，右侧明确提示“已有译文暂未覆盖”，并显示完整译文。此项改善显示，不自动修正 OCR 或翻译语义，也不保证手写字、复杂背景、漏检文字和所有异形气泡都能覆盖。
 
-显示分析入口为 `macos/backend/reading_overlay.py`，单元测试不需要加载模型：
+候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。`macos/backend/reading_overlay.py` 和 `macos/tools/review_chapter.py` 保留作 Python 参照工具，其默认缓存路径仍属于稳定版，不能用它们证明 Rust 候选流程通过。
 
-```sh
-macos/.venv/bin/python -m unittest discover -s macos/tests -p 'test_reading*.py' -v
-xcrun swiftc macos/Sources/ReadingLayout.swift macos/tests/ReadingLayoutTests.swift -o macos/.build/reading-layout-tests
-macos/.build/reading-layout-tests
-```
+Rust 对照工具位于 `tools/rust_migration/`：`verify_display.py` 检查完整显示输出，`verify_rendered_pages.py` 检查最终 Swift 像素，`run_reader_flow.py` 检查独立窗口流程。它们需要本地准备的 manifest、基线和已安装模型；运行会生成独立测试结果，不提供产品界面的汉化导出功能。
 
-检查已有翻译的整章效果，生成与阅读器相同的原生渲染图片、文字边界和原图/缓存不变性报告：
-
-```sh
-macos/.venv/bin/python macos/tools/review_chapter.py --folder /path/to/chapter --output macos/.runtime/chapter-review
-```
-
-该工具选取每张图片最新的普通/视觉缓存，不执行 OCR 文本识别或翻译；`--pages 13,14,15` 可抽查指定页。需要检查截图确认画面效果，自动边界检查不能证明没有漏检文字或修补痕迹。
+模型复用会保留内存；退出候选应用时清理所属推理进程。Rust 只管理自己启动的、无密钥且位于既定 `127.0.0.1:11439` 地址的本地 Ollama；已有 Ollama/oMLX 服务不被接管。
