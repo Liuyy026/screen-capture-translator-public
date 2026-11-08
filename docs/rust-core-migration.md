@@ -17,7 +17,7 @@
 | 任务队列、取消、重试、持久缓存、模型进程管理 | Rust | 待迁移 |
 | 文字检测与 Manga OCR 推理 | 常驻 Python 模型进程，由 Rust 调用 | 接口已隔离；检测 4 页像素一致，OCR 待实测 |
 | 分镜、对白分组、阅读顺序 | Rust / 原生 OpenCV | 已移植；35 页结构化结果与旧版一致，尚待接入应用 |
-| 图片编码、翻译请求、oMLX HTTP、响应校验与保存 | Rust | HTTP、协议、普通翻译批处理与原子保存已移植；视觉图片编码和视觉流程待迁移 |
+| 图片编码、翻译请求、oMLX HTTP、响应校验与保存 | Rust | 普通/视觉翻译完整批处理、图片编码、协议、HTTP 和原子保存均已移植；待接入应用 |
 | 图像解码、轮廓与连通区域、蒙版、气泡与清字规则 | Rust / 原生 OpenCV | 完整显示生成已移植；35 页整页像素一致，尚待接入候选应用 |
 | Anime LaMa 推理 | 常驻 Python 模型进程，由 Rust 调用 | 已隔离；4 页真实修补裁剪逐像素一致 |
 | 纯色修补、局部合成、PNG 输出 | Rust / 原生 OpenCV | 已移植；模型/非模型修补及彩色合成像素一致 |
@@ -66,14 +66,20 @@ Python 模型进程不得调用旧的分镜、几何、清字、翻译请求或�
 - OCR 后区域分类：`overlay.rs` 已替代旧 `backend/overlay.py` 的候选区域、片段合并、局部填充、短语气词与缓存签名规则。35 页首次重建/缓存命中/无图/清空机器译文的 140 次对照，加既有形状与异常 OCR 框案例，共 176 次严格 JSON 对照通过。旧 10 项行为测试中 9 项通过，1 项 Windows 专属样本缺失而跳过。保留整数与浮点坐标类型，避免下游对白结构签名产生无效变化。
 - 普通翻译完整批处理：`translate_pipeline.rs` 负责模型/接口/翻译单位变化时的失效、保留手改、对白或文字块批处理、按编号重试、逐批保存、质量提示和失败恢复；实际 HTTP 由 Rust 发送。35 页分别以文字块/完整对白翻译并复用缓存，连同缺句、重复编号、原文回声、异常长度、服务错误、模型/接口/单位切换等，共 209 组差分场景、385 次模拟翻译请求通过。对照包括最终页面、每次保存快照、完整请求、进度和去除计时值后的安全指标。原图、原始译文及测试输入副本哈希不变。
 - 原子保存使用同目录临时文件与替换，文件权限为 0600；CLI 已验证逐批结果、进度和指标写入。4 项 Rust 单元测试通过，包括替换后内容/权限/临时文件清理以及模型超时旧响应隔离。
+- 视觉图片输入：`vision_image.rs` 以 Rust 实现旧 Pillow RGB 缩略图的 Lanczos 系数、定点取整和整数预缩小；`vision_decode.rs` 处理颜色模式与 EXIF 方向。OpenCV 原生构建补齐 TIFF；一个小型 C ABI 桥只暴露现有 libjpeg 的 CMYK 原始采样，颜色转换仍由 Rust 完成。35 页及 56 个大图/极窄图/PNG/JPEG/WebP/BMP/TIFF/EXIF 八方向/CMYK/调色板/透明/16 位及浮点灰度案例的最终 JPEG 字节全部相同。没有把图片编码留在 Python。Pillow 派生缩放规则的许可已保存在 `core/LICENSES/Pillow.txt`。
+- 完整视觉翻译：`vision_pipeline.rs` 实现独立视觉缓存初始化、配置变化失效、8 块分批、整页图片上下文、Han 共用词回声提示、OCR 修正建议、原文不自动替换、失败移除旧建议、50 条运行记录上限及逐批原子保存。35 页首次处理和缓存复用，加异常回复、模型/接口/原文变化等共 100 组场景通过；另有 3 次缓存初始化检查，合计 103 次原生调用、117 次模拟生成请求。完整 HTTP 请求（含 JPEG 与提示词）、最终页、每次保存快照和除时间值外的指标均与旧版一致。CLI `translate --vision` 已验证独立输出和手工译文保护。
+- 图片兼容修复后，15 项阅读显示行为测试再次通过；新增损坏 JPEG 的 C 边界错误返回及截断 EXIF 元数据边界测试。仍未对真实语言模型重新生成译文，因此这些结果证明输入/协议/持久化一致，不是新一轮模型质量评测。
 
 当前私有证据：`background-fallback-render-01/report.json`、`background-model-render-01/report.json`、`native-display-01/report.json`、`native-rendered-01/report.json`、`native-reader-behavior-01/report.json`，均位于 `.runtime/rust-migration/`。
 
 新增私有证据：`translation-protocol-01/report.json`、`overlay-parity-02/report.json`、`translate-pipeline-02/report.json`、`translate-cli-empty/report.json`、`native-unit-tests-02.log`。空页、跳过页和全手改页另有 3 项 CLI 检查，确认不访问模型也能得到有效目标文件。翻译对照使用确定的模拟回复，不证明真实模型翻译质量或推理速度。
+
+视觉阶段证据：`vision-image-04/report.json`、`vision-pipeline-02/report.json`、`native-reader-behavior-02/report.json`、`native-unit-tests-03.log`。
 
 ## 接续实施点
 
 - 原生几何在 `core/src/geometry.rs`，图像辅助操作在 `raster.rs`，清字计划在 `background.rs`。
 - 完整显示区域装配在 `reading.rs`，网点修补在 `texture.rs`，模型图像交换在 `model_images.rs`；显示生成已能直接运行，持久显示缓存和跨页任务调度待实现。
 - OCR 后区域分类在 `overlay.rs`；服务、提示词与普通翻译流程分别在 `service.rs`、`translation.rs`、`translate_pipeline.rs`，原子保存位于 `persistence.rs`。
-- 尚须完成视觉图片编码与视觉翻译流程、实际 OCR 验证/页面组装、显示缓存与任务控制，并接入独立候选应用。不能将开发用 probe 命令视作应用迁移已完成。
+- 视觉图像编码位于 `vision_decode.rs` / `vision_image.rs`，视觉翻译与缓存初始化在 `vision_pipeline.rs`。
+- 尚须完成实际 OCR 验证/页面组装、显示缓存与任务控制，并接入独立候选应用。不能将开发用 probe 命令视作应用迁移已完成。

@@ -15,6 +15,9 @@ mod structure;
 mod texture;
 mod translate_pipeline;
 mod translation;
+mod vision_decode;
+mod vision_image;
+mod vision_pipeline;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -30,8 +33,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Encode exactly the visual-model image input, without sending it.
+    VisionImage {
+        #[arg(long)]
+        image: PathBuf,
+    },
     /// Translate an existing OCR page and checkpoint each batch atomically.
     Translate {
+        #[arg(long, requires = "image")]
+        vision: bool,
         #[arg(long)]
         cache: PathBuf,
         #[arg(long)]
@@ -57,6 +67,11 @@ enum Operation {
     },
     /// Validate full native translation orchestration against fake services.
     TranslationProbe {
+        #[arg(long)]
+        requests: PathBuf,
+    },
+    /// Validate visual translation/cache seeding against controlled fixtures.
+    VisionProbe {
         #[arg(long)]
         requests: PathBuf,
     },
@@ -191,6 +206,22 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::VisionProbe { requests } => {
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let mut replies = vec![];
+            for request in requests {
+                replies.push(vision_pipeline::probe(&request).await?);
+            }
+            println!("{}", serde_json::to_string(&replies)?);
+        }
+        Operation::VisionImage { image } => {
+            let encoded = vision_image::encode(&image)?;
+            println!(
+                "{}",
+                json!({"url":encoded.url,"width":encoded.width,"height":encoded.height})
+            );
+        }
         Operation::TranslationProbe { requests } => {
             let requests: Vec<serde_json::Value> =
                 serde_json::from_slice(&std::fs::read(requests)?)?;
@@ -201,6 +232,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&replies)?);
         }
         Operation::Translate {
+            vision,
             cache,
             destination,
             image,
@@ -230,8 +262,20 @@ async fn main() -> Result<()> {
                 status: status.as_deref(),
                 metrics: metrics.as_deref(),
             };
-            match translate_pipeline::translate(&mut page, &service, &options, &mut observer).await
-            {
+            let outcome = if vision {
+                vision_pipeline::translate(
+                    &mut page,
+                    image.as_deref().expect("clap requires image"),
+                    &model,
+                    &service,
+                    block_id.as_deref(),
+                    &mut observer,
+                )
+                .await
+            } else {
+                translate_pipeline::translate(&mut page, &service, &options, &mut observer).await
+            };
+            match outcome {
                 Ok(()) => println!("{}", json!({"ok":true,"cache":destination})),
                 Err(e) => {
                     println!(

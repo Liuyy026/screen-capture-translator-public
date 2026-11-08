@@ -28,7 +28,7 @@ pub trait Observer {
     fn metrics(&mut self, event: &Value) -> Result<()>;
 }
 
-fn remove(value: &mut Value, keys: &[&str]) {
+pub(crate) fn remove(value: &mut Value, keys: &[&str]) {
     if let Some(obj) = value.as_object_mut() {
         for key in keys {
             obj.shift_remove(*key);

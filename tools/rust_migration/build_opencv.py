@@ -46,7 +46,7 @@ def main():
         '-DBUILD_EXAMPLES=OFF', '-DBUILD_opencv_apps=OFF', '-DBUILD_opencv_python3=OFF',
         '-DBUILD_opencv_python2=OFF', '-DBUILD_JAVA=OFF', '-DWITH_FFMPEG=OFF',
         '-DWITH_AVFOUNDATION=OFF', '-DWITH_OPENCL=OFF', '-DWITH_IPP=OFF',
-        '-DWITH_OPENEXR=OFF', '-DWITH_TIFF=OFF', '-DWITH_JASPER=OFF',
+        '-DWITH_OPENEXR=OFF', '-DWITH_TIFF=ON', '-DBUILD_TIFF=ON', '-DWITH_JASPER=OFF',
         '-DWITH_JPEG=ON', '-DBUILD_JPEG=ON', '-DWITH_PNG=ON', '-DBUILD_PNG=ON',
         '-DWITH_WEBP=ON', '-DBUILD_WEBP=ON', '-DOPENCV_GENERATE_PKGCONFIG=ON'], check=True)
     subprocess.run([str(args.cmake.resolve()), '--build', str(build), '--parallel', str(args.jobs)], check=True)

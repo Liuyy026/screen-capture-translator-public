@@ -53,7 +53,7 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
 
-**当前尚无持久显示缓存、跨页任务队列或应用接入；视觉翻译完整流程和最终性能对比仍未完成。**
+**当前尚无持久显示缓存、跨页任务队列或应用接入；实际 OCR 页面组装和最终性能对比仍未完成。**
 
 ## 普通翻译与 OCR 区域分类
 
@@ -72,6 +72,14 @@ core/target/release/koma-core translate \
 `--unit dialogues` 使用完整对白；`--block-id` 仅处理指定块，保留手工修改；`--metrics` 可选输出只含已知计时/计数字段的 JSONL。目标页面原子替换、权限 0600。部分翻译失败保存在对应文字块的 `error` 中，命令成功结束不等于所有句子都翻译成功。
 
 `verify_translation_protocol.py` 对照提示词、解析规则和本地模拟 HTTP；`verify_overlay.py` 对照 OCR 区域分类；`verify_translate_pipeline.py` 对照每批请求、页面与保存快照。这些脚本只使用模拟模型回复，不访问已有 oMLX/Ollama 服务。`protocol-probe`、`service-probe`、`translation-probe` 是开发验证入口，不能代表候选应用已接入。
+
+## 视觉翻译
+
+给上述 `translate` 命令加 `--vision` 即使用视觉流程；必须提供 `--image`，服务须为 oMLX。此模式使用固定 8 块一批及最长边 1775 像素的完整页 JPEG，不使用普通模式的对白单位和批大小选项。生成的识别修正建议保存在 `vision_source`，原 `source` 不自动替换。
+
+`vision-image --image /path/to/page.webp` 只生成模型输入图片，返回包含 JPEG data URL 和尺寸的 JSON，不调用任何模型。解码、EXIF 方向、颜色转换、缩放和 JPEG 编码均在原生核心内执行。Rust 缩放规则对照 Pillow，许可与来源见 [第三方说明](THIRD_PARTY.md)。CMYK 解码通过一个受限 C ABI 桥调用与 OpenCV 相同的 libjpeg，桥内没有业务流程。`core/build.rs` 使用任务目录里的头文件和静态库；自定义依赖根目录时，可对 `cargo.py` 设置 `KOMA_NATIVE_DEPS`。
+
+`verify_vision_image.py` 对照 35 页和格式/方向/大图案例的 JPEG 字节；`verify_vision_pipeline.py` 以本地模拟服务对照完整图片请求、源文保护、建议、缓存初始化和保存快照。`vision-probe` 仅作为这些开发验证的传输入口。
 
 差分检查使用稳定版本作为测试参照，生产核心不调用参照程序：
 
