@@ -28,7 +28,8 @@ import Darwin
         arguments = ["serve", "--cache-root", cache.path, "--assets-root", assets.path,
                      "--python", root.appendingPathComponent("macos/.venv/bin/python").path,
                      "--worker", root.appendingPathComponent("core/python/model_worker.py").path,
-                     "--weights", root.appendingPathComponent(".models").path]
+                     "--weights", root.appendingPathComponent(".models").path,
+                     "--ollama", root.appendingPathComponent("macos/.runtime/ollama/ollama").path]
             + (seed.map { ["--seed-root", $0.path] } ?? [])
         logURL = assets.deletingLastPathComponent().appendingPathComponent("native-core.log")
     }

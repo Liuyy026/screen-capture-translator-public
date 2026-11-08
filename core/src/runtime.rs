@@ -14,6 +14,7 @@ pub struct Runtime{
     pub display:display_cache::Store,
     models:Mutex<ImageModels>,
     pages:Mutex<HashMap<PathBuf,Arc<Mutex<()>>>>,
+    pub engine:crate::local_engine::LocalEngine,
 }
 
 pub struct ProcessOptions<'a>{
@@ -22,7 +23,7 @@ pub struct ProcessOptions<'a>{
 }
 
 impl Runtime{
-    pub fn new(cache_root:&Path,assets_root:&Path,seed_root:Option<&Path>,python:&Path,worker:&Path,weights:&Path)->Result<Self>{
+    pub fn new(cache_root:&Path,assets_root:&Path,seed_root:Option<&Path>,python:&Path,worker:&Path,weights:&Path,ollama:Option<PathBuf>)->Result<Self>{
         std::fs::create_dir_all(cache_root)?;std::fs::create_dir_all(assets_root)?;
         let cache_root=cache_root.canonicalize()?;let assets_root=assets_root.canonicalize()?;
         let seed_root=seed_root.map(Path::canonicalize).transpose()?;
@@ -32,7 +33,8 @@ impl Runtime{
         }
         ensure!(!assets_root.starts_with(&cache_root)&&!cache_root.starts_with(&assets_root),"page and display caches must be separate");
         Ok(Self{cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
-            models:Mutex::new(ImageModels::new(python,worker,weights)?),pages:Mutex::new(HashMap::new())})
+            models:Mutex::new(ImageModels::new(python,worker,weights)?),pages:Mutex::new(HashMap::new()),
+            engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
     }
     pub fn cache_for(&self,image:&Path,mode:&str)->Result<PathBuf>{
         ensure!(["text","vision"].contains(&mode),"未知翻译方式");
@@ -143,5 +145,9 @@ impl Runtime{
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
     }
     pub async fn release_ocr(&self)->Result<()>{self.models.lock().await.release_ocr().await}
-    pub async fn close(&self)->Result<()>{self.models.lock().await.stop().await}
+    pub async fn close(&self)->Result<()>{
+        let models=self.models.lock().await.stop().await;
+        let engine=self.engine.release().await;
+        models.and(engine)
+    }
 }

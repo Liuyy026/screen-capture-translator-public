@@ -1,6 +1,6 @@
-# Koma Rust core（重构进行中）
+# Koma Rust core（macOS 候选版）
 
-本目录是独立分支的实验核心，完整显示生成已通过 35 页像素对照，候选应用已完成主要调用接入并编译，真实界面验收尚未完成，暂不能替代稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
+本目录实现独立 macOS 候选版的 Rust 核心，已完成目标职责迁移、35 页效果与显示性能对照及真实窗口流程验收。候选版独立运行，不覆盖稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
 
 ## 本地开发
 
@@ -53,11 +53,11 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
 
-实际 OCR 页面组装、持久显示缓存及常驻任务服务已实现；候选应用主要调用已接入，剩余服务生命周期迁移、真实界面验收和最终对照报告仍未完成。
+实际 OCR 页面组装、持久显示缓存、常驻任务服务和本地引擎生命周期已接入候选应用，验收结果与性能口径见 [验收报告](../docs/rust-core-validation.md)。
 
 ## 常驻应用服务
 
-`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
 
 Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启动的模型进程。取消后销毁并等待受中断的模型进程退出，下一次推理使用新进程和临时目录；标准输入关闭会取消任务并清理子进程。非终态进度事件在客户端过慢时可合并丢弃，终态和每页完成事件可靠发送。调用方必须持续读取输出。
 
@@ -65,13 +65,13 @@ Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启
 
 `verify_runtime.py --manifest <pages.json> --output <new-directory> --display --baseline-results <native-display-01>` 验证真实常驻服务的队列、取消、崩溃恢复、手改保护和整章显示缓存；故障测试使用模拟推理与回环 HTTP，整章显示使用已安装的真实检测/修补模型。`verify_ocr.py` 单独比较旧版与原生流程的真实 OCR 和完整页面装配。
 
-候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。当前本地 Ollama 自动启动/停止仍在 Swift，需迁移后才能认定职责切换完整。
+候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。本地 Ollama 启停由 Rust 的 `local_engine.rs` 管理：仅在调用方允许启动、无密钥且使用既定本地地址时启动指定安装文件；已有服务只查询，不接管。取消未完成的启动或退出时清理自有进程组及 runner。`serve --ollama <executable>` 提供安装文件，默认不启动任何服务。
 
 ## 普通翻译与 OCR 区域分类
 
 `overlay-probe --cache /path/to/page.json --image /path/to/page.webp` 只读输入并返回旧 OCR 区域协议及缓存变化标记；它与最终显示区域生成是不同阶段。
 
-`translate` 从已有 OCR 页面开始，用 Rust 完成翻译请求、响应校验、普通翻译批处理和逐批保存。此命令会向配置的模型发出真实生成请求；`list-models` 仅查询模型元数据。认证读取进程环境变量 `KOMA_TRANSLATION_API_KEY`，不会写入页面缓存或指标，也不会传给 Python 模型进程。应用配置接入仍待完成。
+`translate` 从已有 OCR 页面开始，用 Rust 完成翻译请求、响应校验、普通翻译批处理和逐批保存。此命令会向配置的模型发出真实生成请求；`list-models` 仅查询模型元数据。认证读取进程环境变量 `KOMA_TRANSLATION_API_KEY`，不会写入页面缓存或指标，也不会传给 Python 模型进程。应用从独立本地配置读取连接信息，通过私有管道传递凭据。
 
 ```sh
 core/target/release/koma-core translate \

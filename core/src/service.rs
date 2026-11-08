@@ -81,6 +81,9 @@ pub struct TranslationService {
 }
 
 impl TranslationService {
+    pub fn allows_local_start(&self) -> bool {
+        self.provider == "ollama" && self.base_url == "http://127.0.0.1:11439" && self.api_key.is_empty()
+    }
     pub fn new(provider: &str, base_url: Option<&str>, key: Option<&str>) -> Result<Self> {
         let base_url = normalize_base_url(provider, base_url)?;
         let api_key = key

@@ -665,6 +665,7 @@ dependencies = [
  "base64 0.22.1",
  "cc",
  "clap",
+ "libc",
  "opencv",
  "reqwest",
  "serde",

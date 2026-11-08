@@ -40,7 +40,16 @@ if [[ "$MODE" == --verify ]]; then
   for _ in {1..30}; do
     for pid in $(pgrep -x KomaRustReader || true); do
       if [[ "$(ps -p "$pid" -o comm=)" == "$APP_BINARY" ]]; then
-        echo "Koma 已启动（PID ${pid}）"
+        # Finding a process once can falsely pass an immediate Swift startup
+        # crash. Keep checking the same PID through initial scene creation.
+        for _ in {1..40}; do
+          sleep 0.25
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "候选应用在启动后退出，请检查 DiagnosticReports 中的 KomaRustReader 崩溃报告。" >&2
+            exit 1
+          fi
+        done
+        echo "Koma Rust 候选版已启动并持续运行 10 秒（PID ${pid}）"
         exit 0
       fi
     done

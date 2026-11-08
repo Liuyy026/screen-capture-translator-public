@@ -35,7 +35,8 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
     let r=&job.request;
     match required(r,"op")?{
         "load_page"=>runtime.load_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text")).await,
-        "models"=>Ok(json!({"models":service(r)?.list_models().await?})),
+        "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
+        "release_engine"=>{runtime.engine.release().await?;Ok(json!({"released":true}))},
         "display"=>{
             let _permit=display_gate.acquire().await?;
             runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?)).await

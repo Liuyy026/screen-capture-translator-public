@@ -36,7 +36,6 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     @Published var engineReady = false
     @Published var queueTotal = 0
     @Published var queueDone = 0
-    private var ollama: Process?
     private var task: Task<Void, Never>?
     private var pageTask: Task<Void, Never>?
     private var pageRequest = UUID()
@@ -62,14 +61,26 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
                                  seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil)
     }()
 
+    // The candidate bundle identifier already isolates .standard. Foundation
+    // rejects using the application's own identifier as an explicit suite.
     init(root: URL? = nil, cacheDir: URL? = nil,
-         defaults: UserDefaults = UserDefaults(suiteName: "local.koma.reader.rust")!,
+         defaults: UserDefaults = .standard,
          configurationStore: TranslationLocalConfigStore? = nil) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
         self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
         self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReaderRust/pages")
         self.defaults = defaults
         self.connectionConfigStore = configurationStore ?? TranslationLocalConfigStore(url: self.cacheDir.deletingLastPathComponent().appendingPathComponent("config.json"))
+        if configurationStore == nil, !defaults.bool(forKey: "stableReaderSettingsImported") {
+            // The candidate has its own preferences; only import reading
+            // position/mode once, without updating the stable application's domain.
+            if let stable = UserDefaults(suiteName: "local.koma.reader") {
+                for key in ["folder", "lastPage", "processingMode"] where defaults.object(forKey: key) == nil {
+                    if let value = stable.object(forKey: key) { defaults.set(value, forKey: key) }
+                }
+            }
+            defaults.set(true, forKey: "stableReaderSettingsImported")
+        }
         self.localConfiguration = TranslationLocalConfiguration.migrating(defaults: defaults)
         do {
             if let saved = try self.connectionConfigStore.load() {
@@ -162,8 +173,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
         if config.provider != "omlx", processingMode == "vision" { chooseProcessingMode("text") }
         message = "已连接 " + config.name + " · " + model
         if config.provider != "ollama" || config.baseURL != TranslationConnection.defaultURL("ollama") {
-            if ollama?.isRunning == true { ollama?.terminate() }
-            ollama = nil
+            Task { _ = try? await nativeCore.request("release_engine") }
         }
     }
 
@@ -190,61 +200,24 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
             localOllamaProbes.remove(probe)
             if mayStartLocal && (!completed || Task.isCancelled) { releaseUnusedLocalOllama() }
         }
-        do {
-            let ids = try await nativeModels(config)
-            try Task.checkCancellation()
-            completed = true
-            return ids
-        }
-        catch {
-            try Task.checkCancellation()
-            guard allowLocalStart, config.provider == "ollama", config.apiKey.isEmpty,
-                  config.baseURL == TranslationConnection.defaultURL("ollama") else { throw error }
-            guard !requireCurrentConnection || config == connection else { throw CancellationError() }
-        }
-        let executable = platformRoot.appendingPathComponent(".runtime/ollama/ollama")
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw ConnectionError("本机 Ollama 尚未安装，请运行 macos/安装.command 或配置其他接口。")
-        }
-        if ollama?.isRunning != true {
-            let p = Process()
-            p.executableURL = executable
-            p.arguments = ["serve"]
-            var env = ProcessInfo.processInfo.environment
-            env["OLLAMA_HOST"] = "127.0.0.1:11439"
-            env["OLLAMA_MODELS"] = root.appendingPathComponent(".models/ollama").path
-            env["OLLAMA_NO_CLOUD"] = "1"
-            env["OLLAMA_NUM_PARALLEL"] = "1"
-            env["OLLAMA_MAX_LOADED_MODELS"] = "1"
-            p.environment = env
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do { try p.run(); ollama = p }
-            catch { throw ConnectionError("无法启动本机 Ollama，请检查安装或配置其他接口。") }
-        }
-        for _ in 0..<24 {
-            try await Task.sleep(for: .milliseconds(250))
-            if let ids = try? await nativeModels(config) {
-                try Task.checkCancellation()
-                completed = true
-                return ids
-            }
-            if ollama?.isRunning != true { break }
-        }
-        throw ConnectionError("本机 Ollama 未能连接，请检查端口或接口设置。")
+        guard !requireCurrentConnection || config == connection else { throw CancellationError() }
+        let ids = try await nativeModels(config, allowLocalStart: allowLocalStart)
+        try Task.checkCancellation()
+        guard !requireCurrentConnection || config == connection else { throw CancellationError() }
+        completed = true
+        return ids
     }
 
     func releaseUnusedLocalOllama() {
         guard localOllamaProbes.isEmpty,
               connection.provider != "ollama" || connection.baseURL != TranslationConnection.defaultURL("ollama") else { return }
-        if ollama?.isRunning == true { ollama?.terminate() }
-        ollama = nil
+        Task { _ = try? await nativeCore.request("release_engine") }
     }
 
-    private func nativeModels(_ connection: TranslationConnection) async throws -> [String] {
+    private func nativeModels(_ connection: TranslationConnection, allowLocalStart: Bool = false) async throws -> [String] {
         struct Models: Decodable { var models: [String] }
         let data = try await nativeCore.request("models", values: ["provider": connection.provider,
-            "base_url": connection.baseURL, "key": connection.apiKey])
+            "base_url": connection.baseURL, "key": connection.apiKey, "allow_local_start": allowLocalStart])
         return try JSONDecoder().decode(Models.self, from: data).models
     }
 
@@ -465,7 +438,6 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     func shutdown() {
         pageTask?.cancel(); readingTask?.cancel(); cancel(); modelTimer?.invalidate()
         nativeCore.shutdown()
-        if ollama?.isRunning == true { ollama?.terminate() }
     }
 
 }
@@ -755,7 +727,7 @@ struct BlockEditor: View {
 @main struct KomaReaderApp: App {
     @StateObject private var reader = Reader()
     var body: some Scene {
-        WindowGroup("Koma · 本地漫画翻译") { ContentView(reader: reader).tint(.teal) }
+        WindowGroup("Koma Rust · 本地漫画翻译") { ContentView(reader: reader).tint(.teal) }
             .defaultSize(width: 1280, height: 850)
             .commands {
                 CommandGroup(after: .appSettings) {

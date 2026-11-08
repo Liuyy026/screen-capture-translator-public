@@ -4,6 +4,7 @@ mod display_cache;
 mod geometry;
 mod imaging;
 mod ink;
+mod local_engine;
 mod model_images;
 mod models;
 mod ocr;
@@ -40,6 +41,7 @@ struct Cli {
 enum Operation {
     /// Serve the candidate application over bounded JSONL on stdin/stdout.
     Serve {
+        #[arg(long)] ollama:Option<PathBuf>,
         #[arg(long)] cache_root:PathBuf,
         #[arg(long)] assets_root:PathBuf,
         #[arg(long)] seed_root:Option<PathBuf>,
@@ -231,8 +233,8 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Operation::Serve { cache_root,assets_root,seed_root,python,worker,weights } => {
-            server::serve(runtime::Runtime::new(&cache_root,&assets_root,seed_root.as_deref(),&python,&worker,&weights)?).await?;
+        Operation::Serve { cache_root,assets_root,seed_root,python,worker,weights,ollama } => {
+            server::serve(runtime::Runtime::new(&cache_root,&assets_root,seed_root.as_deref(),&python,&worker,&weights,ollama)?).await?;
         }
         Operation::Recognize { images,output,python,worker,weights,release_between_pages } => {
             // This development batch entrypoint never replaces prior output.
