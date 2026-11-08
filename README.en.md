@@ -57,6 +57,7 @@ For Windows, use the existing [Windows guide](windows/README.en.md); the Rust mi
 
 ## Features
 
+- Optional pre-OCR MetalFX or Real-CUGAN upscaling in the macOS candidate; originals and per-mode caches are preserved. See the [setup and validation notes (Chinese)](docs/macos-super-resolution.md).
 - WebP, PNG, JPG, JPEG, BMP and TIFF, naturally sorted; original images remain read-only.
 - macOS page/folder processing, cancellation, individual retranslation, source/translation editing and manual-edit protection.
 - Separate text and vision caches; proposed OCR corrections require manual confirmation.

@@ -39,6 +39,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     var srSettings: [String: Any] { ["engine": srEngine, "target": srTarget, "axis": srAxis, "preset": srPreset] }
     func changeEnhancement() {
         if srEngine == "metalfx" { srPreset = "standard" }
+        error = nil; srStatus = ""
         operationRequest = UUID()
         cancel(); pageTask?.cancel(); readingTask?.cancel()
         page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil
@@ -50,7 +51,14 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
             do {
                 let data = try await nativeCore.request("sr_capabilities")
                 let backends = try JSONDecoder().decode(Capabilities.self, from: data).backends
-                srStatus = backends.map { $0.engine + ($0.available ? "：可用（" + $0.presets.joined(separator: "、") + "）" : "：尚未准备 · " + $0.reason) }.joined(separator: "\n")
+                let names = ["metalfx": "MetalFX", "realcugan": "Real-CUGAN"]
+                let presets = ["standard": "标准", "conservative": "保守", "denoise": "降噪"]
+                srStatus = backends.map { backend in
+                    let name = names[backend.engine] ?? backend.engine
+                    return name + (backend.available
+                        ? "：可用（" + backend.presets.map { presets[$0] ?? $0 }.joined(separator: "、") + "）"
+                        : "：尚未准备，请检查本地增强组件")
+                }.joined(separator: "\n")
             } catch { srStatus = error.localizedDescription }
         }
     }
@@ -499,7 +507,7 @@ struct ContentView: View {
                     Text(reader.selected?.lastPathComponent ?? "漫画阅读器").font(.headline).lineLimit(1)
                     Spacer()
                     Picker("显示", selection: $reader.displayMode) {
-                        Text("原图").tag(0); Text("文字框").tag(1); Text("中文").tag(2)
+                        Text(reader.srEngine == "off" ? "原图" : "增强原文").tag(0); Text("文字框").tag(1); Text("中文").tag(2)
                     }.pickerStyle(.segmented).frame(width: 210)
                     Button { reader.zoom = max(0.5, reader.zoom - 0.25) } label: { Image(systemName: "minus.magnifyingglass") }
                     Text("\(Int(reader.zoom * 100))% ").monospacedDigit().font(.caption).frame(width: 42)

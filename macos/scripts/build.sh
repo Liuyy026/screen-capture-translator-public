@@ -4,6 +4,7 @@ cd "${0:A:h:h}"
 python3 ../tools/rust_migration/cargo.py build --release
 mkdir -p .build
 xcrun swiftc -O -target arm64-apple-macosx14.0 tools/MetalFXUpscaler.swift -o .build/koma-sr-metalfx -framework Metal -framework MetalFX -framework CoreImage -framework ImageIO
+bash scripts/build_realcugan.sh
 mkdir -p 'dist/Koma Rust 候选版.app/Contents/MacOS'
 xcrun swiftc -O -target arm64-apple-macosx14.0 -parse-as-library Sources/*.swift -o 'dist/Koma Rust 候选版.app/Contents/MacOS/KomaRustReader' -framework SwiftUI -framework AppKit -framework CryptoKit -framework Security
 python3 - <<'PY'
