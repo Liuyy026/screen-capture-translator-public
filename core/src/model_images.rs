@@ -22,6 +22,15 @@ pub struct ImageModels {
 }
 
 impl ImageModels {
+    async fn prepare_request(&mut self)->Result<()>{
+        if self.worker.as_ref().is_some_and(ModelWorker::interrupted){
+            // Reap the old process before reusing GPU memory or deleting files
+            // it may still be accessing after cancellation.
+            if let Some(worker)=self.worker.take(){worker.shutdown().await?;}
+            self.workspace=tempfile::tempdir()?;
+        }
+        Ok(())
+    }
     pub fn new(python: &Path, script: &Path, weights: &Path) -> Result<Self> {
         Ok(Self {
             worker: None,
@@ -119,6 +128,7 @@ impl ImageModels {
     }
 
     pub async fn restore(&mut self, image: &Mat, mask: &Mat) -> Result<Mat> {
+        self.prepare_request().await?;
         ensure!(
             image.size()? == mask.size()? && mask.typ() == CV_8UC1,
             "restoration mask size mismatch"
@@ -148,6 +158,7 @@ impl ImageModels {
     }
 
     pub async fn detect(&mut self, image: &Mat) -> Result<Mat> {
+        self.prepare_request().await?;
         self.serial += 1;
         let prefix = format!("detect-{}", self.serial);
         let image_name = format!("{prefix}-image.bin");
@@ -172,7 +183,29 @@ impl ImageModels {
         Ok(refined)
     }
 
+    pub async fn ocr(&mut self,image:&Path)->Result<Value>{
+        self.prepare_request().await?;
+        self.serial+=1;
+        let extension=image.extension().and_then(|s|s.to_str()).unwrap_or("image");
+        let name=format!("ocr-{}.{}",self.serial,extension);
+        let temporary=self.workspace.path().join(&name);
+        std::fs::copy(image,&temporary).context("copy OCR input into model workspace")?;
+        let result=self.call(json!({"op":"ocr","image_path":name})).await.context("recognize Japanese text model");
+        let _=std::fs::remove_file(temporary);
+        result
+    }
+
+    pub async fn release_ocr(&mut self)->Result<()>{
+        self.prepare_request().await?;
+        if self.worker.is_some(){self.call(json!({"op":"release_ocr"})).await?;}
+        Ok(())
+    }
+
     pub async fn shutdown(mut self) -> Result<()> {
+        self.stop().await
+    }
+
+    pub async fn stop(&mut self)->Result<()>{
         if let Some(worker) = self.worker.take() {
             worker.shutdown().await?;
         }

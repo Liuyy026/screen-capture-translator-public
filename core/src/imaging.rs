@@ -21,7 +21,11 @@ pub fn display_gray(path: &Path) -> Result<Mat> {
 
 fn decode(path: &Path, flags: i32) -> Result<Mat> {
     let bytes = std::fs::read(path).context("read image bytes")?;
-    let encoded = opencv::core::Vector::<u8>::from_slice(&bytes);
+    decode_bytes(&bytes,flags)
+}
+
+pub fn decode_bytes(bytes:&[u8],flags:i32)->Result<Mat>{
+    let encoded = opencv::core::Vector::<u8>::from_slice(bytes);
     let image = imgcodecs::imdecode(&encoded, flags)?;
     if image.empty() {
         bail!("image decoder returned an empty image")

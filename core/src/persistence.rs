@@ -9,13 +9,17 @@ use std::{
 };
 
 pub fn atomic_json(path: &Path, value: &Value) -> Result<()> {
+    atomic_bytes(path,&serde_json::to_vec_pretty(value)?)
+}
+
+pub fn atomic_bytes(path:&Path,bytes:&[u8])->Result<()>{
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(temp.as_file_mut(), value)?;
+    temp.as_file_mut().write_all(bytes)?;
     temp.as_file_mut().flush()?;
     temp.as_file().sync_all()?;
     temp.persist(path)?;

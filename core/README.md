@@ -53,7 +53,17 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_display.py` 比较完整区域与修补像素，`verify_rendered_pages.py` 用现有 Swift 离线渲染器比较整页像素、字形和译文完整性，`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI。
 
-**当前尚无持久显示缓存、跨页任务队列或应用接入；实际 OCR 页面组装和最终性能对比仍未完成。**
+实际 OCR 页面组装、持久显示缓存及常驻任务服务已实现，候选应用接入和最终性能对比仍未完成。
+
+## 常驻应用服务
+
+`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+
+Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启动的模型进程。取消后销毁并等待受中断的模型进程退出，下一次推理使用新进程和临时目录；标准输入关闭会取消任务并清理子进程。非终态进度事件在客户端过慢时可合并丢弃，终态和每页完成事件可靠发送。调用方必须持续读取输出。
+
+候选页面和显示缓存目录不得与只读种子缓存重叠。首次打开按图像哈希复制已有页面，原文、译文和未知元数据保留。编辑支持版本校验，拒绝过期修改及越界写入。显示缓存含代码、输入和模型文件身份以及载荷校验，损坏时重新生成。
+
+`verify_runtime.py --manifest <pages.json> --output <new-directory> --display --baseline-results <native-display-01>` 验证真实常驻服务的队列、取消、崩溃恢复、手改保护和整章显示缓存；故障测试使用模拟推理与回环 HTTP，整章显示使用已安装的真实检测/修补模型。`verify_ocr.py` 单独比较旧版与原生流程的真实 OCR 和完整页面装配。
 
 ## 普通翻译与 OCR 区域分类
 

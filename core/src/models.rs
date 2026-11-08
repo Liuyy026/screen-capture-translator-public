@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
@@ -57,6 +57,7 @@ for line in sys.stdin:
 }
 
 impl ModelWorker {
+    pub fn interrupted(&self)->bool{self.poisoned}
     pub async fn spawn(
         python: &Path,
         script: &Path,
@@ -115,14 +116,8 @@ impl ModelWorker {
         let result = tokio::time::timeout(timeout, async {
             self.input.write_all(&encoded).await?;
             self.input.flush().await?;
-            let mut line = String::new();
-            if self.output.read_line(&mut line).await? == 0 {
-                bail!("model process closed output")
-            }
-            if line.len() > 16 * 1024 * 1024 {
-                bail!("model reply exceeds limit")
-            }
-            let reply: Value = serde_json::from_str(&line).context("invalid model reply")?;
+            let line=crate::protocol::line(&mut self.output,16*1024*1024).await?.context("model process closed output")?;
+            let reply: Value = serde_json::from_slice(&line).context("invalid model reply")?;
             if reply["id"] != serial {
                 bail!("model reply does not match request")
             }
@@ -141,6 +136,11 @@ impl ModelWorker {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
+        if self.poisoned {
+            self.child.start_kill()?;
+            tokio::time::timeout(Duration::from_secs(5),self.child.wait()).await??;
+            return Ok(());
+        }
         self.request(json!({"op": "shutdown"}), Duration::from_secs(5))
             .await?;
         tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await??;

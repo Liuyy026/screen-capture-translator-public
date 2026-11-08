@@ -9,6 +9,7 @@ import contextlib
 import gc
 import json
 import math
+import os
 from pathlib import Path
 import sys
 
@@ -21,6 +22,14 @@ class Models:
         self.workspace = Path(workspace).resolve(strict=True)
         self.weights = Path(weights).resolve(strict=True)
         self.loaded = {}
+        # This child is an installed-weights inference adapter, never a model
+        # downloader. Set before importing transformers/huggingface/torch.
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+        os.environ['HF_HUB_DISABLE_XET'] = '1'
+        os.environ.setdefault('HF_HOME', str(self.weights/'huggingface'))
+        os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
 
     def path(self, value):
         path = (self.workspace / value).resolve()
@@ -52,6 +61,8 @@ class Models:
 
     def detector(self):
         if 'detector' not in self.loaded:
+            if not (self.weights/'comictextdetector.pt').is_file():
+                raise FileNotFoundError('Installed text detector is missing')
             import torch
             from comic_text_detector.inference import TextDetector
             torch.set_num_threads(4)
@@ -61,6 +72,8 @@ class Models:
 
     def ocr(self, request):
         if 'ocr' not in self.loaded:
+            if not (self.weights/'manga-ocr/pytorch_model.bin').is_file():
+                raise FileNotFoundError('Installed Manga OCR model is missing')
             from mokuro.manga_page_ocr import MangaPageOcr
             from manga_ocr import MangaOcr
             # Same model preprocessing and defaults as the frozen Mokuro pipeline.
@@ -120,6 +133,12 @@ class Models:
             if 'torch' in sys.modules and sys.modules['torch'].backends.mps.is_available():
                 sys.modules['torch'].mps.empty_cache()
             return {'loaded': []}
+        if operation == 'release_ocr':
+            self.loaded.pop('ocr', None)
+            gc.collect()
+            if 'torch' in sys.modules and sys.modules['torch'].backends.mps.is_available():
+                sys.modules['torch'].mps.empty_cache()
+            return {'loaded': sorted(self.loaded)}
         if operation == 'detect':
             image = self.read_array(request['image'])
             raw, refined, _ = self.detector()(image, refine_mode=0, keep_undetected_mask=True)

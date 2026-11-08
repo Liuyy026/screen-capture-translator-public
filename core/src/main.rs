@@ -1,15 +1,20 @@
 mod background;
 mod compat;
+mod display_cache;
 mod geometry;
 mod imaging;
 mod ink;
 mod model_images;
 mod models;
+mod ocr;
 mod overlay;
 mod panels;
 mod persistence;
+mod protocol;
 mod raster;
 mod reading;
+mod runtime;
+mod server;
 mod service;
 mod structure;
 mod texture;
@@ -33,6 +38,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Serve the candidate application over bounded JSONL on stdin/stdout.
+    Serve {
+        #[arg(long)] cache_root:PathBuf,
+        #[arg(long)] assets_root:PathBuf,
+        #[arg(long)] seed_root:Option<PathBuf>,
+        #[arg(long)] python:PathBuf,
+        #[arg(long)] worker:PathBuf,
+        #[arg(long)] weights:PathBuf,
+    },
+    /// Recognize pages with a persistent model adapter and native page assembly.
+    Recognize {
+        #[arg(required=true)] images:Vec<PathBuf>,
+        #[arg(long)] output:PathBuf,
+        #[arg(long)] python:PathBuf,
+        #[arg(long)] worker:PathBuf,
+        #[arg(long)] weights:PathBuf,
+        #[arg(long)] release_between_pages:bool,
+    },
     /// Encode exactly the visual-model image input, without sending it.
     VisionImage {
         #[arg(long)]
@@ -107,6 +130,8 @@ enum Operation {
         image: PathBuf,
         #[arg(long)]
         cache: PathBuf,
+        #[arg(long,requires="weights",conflicts_with="text_mask")]
+        assets_dir:Option<PathBuf>,
         #[arg(long)]
         text_mask: Option<PathBuf>,
         #[arg(long,requires_all=["worker","weights"])]
@@ -206,6 +231,25 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::Serve { cache_root,assets_root,seed_root,python,worker,weights } => {
+            server::serve(runtime::Runtime::new(&cache_root,&assets_root,seed_root.as_deref(),&python,&worker,&weights)?).await?;
+        }
+        Operation::Recognize { images,output,python,worker,weights,release_between_pages } => {
+            // This development batch entrypoint never replaces prior output.
+            std::fs::create_dir(&output)?;
+            let mut models=model_images::ImageModels::new(&python,&worker,&weights)?;
+            let mut replies=vec![];
+            for image in images {
+                let started=std::time::Instant::now();
+                let page=ocr::recognize(&image,&mut models).await?;
+                let target=persistence::cache_path(&image,&output)?;
+                persistence::atomic_json(&target,&page)?;
+                replies.push(json!({"image":image,"cache":target,"seconds":started.elapsed().as_secs_f64()}));
+                if release_between_pages {models.release_ocr().await?;}
+            }
+            models.shutdown().await?;
+            println!("{}",serde_json::to_string(&replies)?);
+        }
         Operation::VisionProbe { requests } => {
             let requests: Vec<serde_json::Value> =
                 serde_json::from_slice(&std::fs::read(requests)?)?;
@@ -349,48 +393,33 @@ async fn main() -> Result<()> {
         Operation::Display {
             image,
             cache,
+            assets_dir,
             text_mask,
             python,
             worker,
             weights,
         } => {
-            use opencv::prelude::*;
-            let page: serde_json::Value = serde_json::from_slice(&std::fs::read(cache)?)?;
-            let color = imaging::decode_color(&image)?;
-            let mut gray = opencv::core::Mat::default();
-            opencv::imgproc::cvt_color_def(&color, &mut gray, opencv::imgproc::COLOR_BGR2GRAY)?;
-            let has_color = color
-                .data_bytes()?
-                .chunks_exact(3)
-                .any(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 8);
+            let image_bytes=std::fs::read(&image)?;
+            let cache_bytes=std::fs::read(&cache)?;
+            let page:serde_json::Value=serde_json::from_slice(&cache_bytes)?;
+            let store=assets_dir.map(|root|display_cache::Store{root,weights:weights.as_ref().expect("required model weights").clone()});
+            let key=store.as_ref().map(|store|store.key(&image_bytes,&cache_bytes)).transpose()?;
+            if let Some(reply)=store.as_ref().and_then(|store|store.load(key.as_deref().unwrap())){
+                println!("{}",serde_json::to_string(&reply)?);return Ok(());
+            }
             let mut models =
                 if let (Some(python), Some(worker), Some(weights)) = (python, worker, weights) {
                     Some(model_images::ImageModels::new(&python, &worker, &weights)?)
                 } else {
                     None
                 };
-            let mut source = text_mask.as_deref().map(imaging::decode_gray).transpose()?;
-            if source.is_none()
-                && compat::array(&page["blocks"]).iter().any(ink::ready)
-                && let Some(models) = models.as_mut()
-            {
-                source = Some(models.detect(&color).await?);
-            }
-            let regions = reading::regions(
-                &page,
-                &gray,
-                if has_color { Some(&color) } else { None },
-                source.as_ref(),
-                models.as_mut(),
-            )
-            .await?;
+            let source=text_mask.as_deref().map(imaging::decode_gray).transpose()?;
+            let reply=display_cache::generate(&image_bytes,&page,source,models.as_mut(),store.as_ref()).await?;
+            if let Some(store)=&store{store.save(key.as_deref().unwrap(),&reply)?;}
             if let Some(models) = models {
                 models.shutdown().await?;
             }
-            println!(
-                "{}",
-                json!({"version":3,"regions":regions,"preserved":ink::preserved_markers(&page)})
-            );
+            println!("{}",serde_json::to_string(&reply)?);
         }
         Operation::BackgroundRender {
             image,
