@@ -29,6 +29,43 @@
 
 默认候选数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`，增强 OCR/译文在 `pages/enhanced-v1/<identity>/`，视觉模式另有 `vision-v1/` 子目录。缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份；命中时检查输出内容哈希及尺寸。程序中断留下的临时文件不会作为有效结果使用。
 
+## 缓存容量与自动清理
+
+默认策略已在 Mac Rust 候选版启用，无需额外开关：
+
+- **合计上限 5 GB**（5,000,000,000 字节），不是每个超分后端各 5 GB。达到上限不清理；超过时按最近使用时间淘汰，清到 4.5 GB 或以下，避免频繁在上限附近反复生成、删除。
+- **30 天未使用自动过期**，按最后使用时间计算，而非单看创建日期。读取命中的增强图、显示缓存和蒙版会续期；旧版本没有访问记录时，从现有文件修改时间开始计算。
+- 先删除过期内容；仍超限才淘汰未过期的最久未使用内容。
+- 范围只包含 `super-resolution-v1/<identity>/` 中完整、可识别的增强图片条目，以及 `reading-native-v1/pages/`、`reading-native-v1/masks/` 中按内容键命名的可重建缓存。
+- **不清理**原图、`pages/` 下的 OCR/译文/人工修改、模型、连接配置、独立实验副本、构建结果或本轮测试报告。这里的 5 GB 不是整个项目或应用数据目录的总大小上限。
+- 后台启动时、逐页处理及请求完成后检查；后台保持运行时，每 60 秒再检查一次。应用关闭期间不运行清理，下一次启动再检查。
+- 正在读写缓存的任务会阻止清理；当前查看的增强图单独保护。进程间文件锁同时保护共享这两个缓存目录的其他新版候选进程。取消请求或进程结束后，系统释放相应锁。
+- 5 GB 是持久缓存的管理目标，**不是文件系统硬配额**：任务进行中的写入、当前查看的条目或清理失败可能暂时超过限制；释放占用后自动重试，不删除译文来凑容量。旧版、不遵守缓存锁的后台不应与新版共用目录运行。
+- 为保护用户数据，符号链接、含未知文件的目录和未完成的 `inference-*` 目录跳过自动删除。正常失败/取消仍由原有任务清理临时目录；本策略不把异常退出留下的未知内容强行纳入递归清理。
+
+删除图片缓存后，再次打开会重新生成图片，已保存的译文和手改内容仍保留。本轮已验证 MetalFX 的重建输出内容一致，能继续命中原有手改缓存。后端或模型升级导致输出身份改变时，新旧译文继续隔离，旧手改内容不会被删除。
+
+本轮测得增强图约 2 MB/页、显示结果约数 MB/页，因此 5 GB 适合作为首版默认值；实际可容纳页数受彩色素材、页面纹理和保存的增强版本数影响，不能按固定页数承诺。
+
+实现：`core/src/cache_policy.rs`，统一策略在服务端执行；`cache_status` 返回限额、过期天数和最近一次清理的占用、淘汰数、受保护条目数及失败情况。这个接口用于诊断，不会清理原图或译文。
+
+验收输出位于 `.runtime/super-resolution/cache-policy-review/`：
+
+- `unit-tests.log`：18 项单元测试通过，包含 6 项策略测试，覆盖过期/续期、合计容量与淘汰顺序、当前页保护、乱序请求、外部活动锁、未知文件/符号链接保护及边界时间。
+- `policy-runtime-final/report.json`：真实后台 5.4 GB 逻辑容量测试（稀疏文件，不实际分配 5.4 GB）、跨进程锁、启动与空闲清理、分段请求完整性、真实 GPU 重建和手改缓存复用。
+- `runtime-regression/report.json`：35 页缓存复用、队列、编辑、取消、异常恢复、退出回归。
+- `front-flow/report.json`：关闭、MetalFX、Real-CUGAN 三条真实超分/OCR/显示链路通过；译文使用本地固定回复，不用于评估翻译质量。
+- `window/report.json`：真实 SwiftUI 三状态验证，界面已显示缓存规则。
+
+复现新增资源管理验证：
+
+```sh
+python3 tools/rust_migration/cargo.py test --quiet
+PYTHONDONTWRITEBYTECODE=1 macos/.venv/bin/python tools/super_resolution/verify_cache_policy.py \
+  --root "$PWD" --input /absolute/low-resolution-page.png \
+  --output /absolute/new-policy-review --lock /absolute/gpu-test.lock
+```
+
 ## 整合验收
 
 实际环境：Apple M5 Max，macOS 27.0.1 (26A434)。两个独立交付提交为 `69affc4`（MetalFX 与公共接入）和 `addcbe3`（Real-CUGAN）；主候选版分别整合为 `69134d0` 和 `4ee3531`，随后补充双后端构建与联合验证。

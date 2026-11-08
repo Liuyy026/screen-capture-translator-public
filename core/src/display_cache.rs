@@ -34,6 +34,7 @@ impl Store{
         if reply["version"]!=3||!reply["regions"].is_array()||!reply["preserved"].is_object(){return None;}
         let hash=format!("{:x}",Sha256::digest(serde_json::to_vec(reply).ok()?));
         if wrapper["payload_sha256"]!=hash{return None;}
+        let _=crate::cache_policy::touch(&self.page_path(key));
         Some(reply.clone())
     }
     pub fn save(&self,key:&str,reply:&Value)->Result<()>{
@@ -48,8 +49,11 @@ impl Store{
         Ok(self.root.join("masks").join(format!("{:x}.png",digest.finalize())))
     }
     pub fn mask(&self,image:&[u8],width:i32,height:i32)->Option<Mat>{
-        let mask=imaging::decode_gray(&self.mask_path(image).ok()?).ok()?;
-        (mask.cols()==width&&mask.rows()==height).then_some(mask)
+        let path=self.mask_path(image).ok()?;
+        let mask=imaging::decode_gray(&path).ok()?;
+        if mask.cols()!=width||mask.rows()!=height{return None;}
+        let _=crate::cache_policy::touch(&path);
+        Some(mask)
     }
     pub fn save_mask(&self,image:&[u8],mask:&Mat)->Result<()>{
         let path=self.mask_path(image)?;

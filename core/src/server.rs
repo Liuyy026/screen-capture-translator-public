@@ -35,16 +35,21 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
     let r=&job.request;
     match required(r,"op")?{
         "sr_capabilities"=>Ok(json!({"backends":[runtime.sr.capabilities("metalfx").await,runtime.sr.capabilities("realcugan").await]})),
+        "cache_status"=>{runtime.maintain_cache().await;Ok(runtime.cache_policy.status())},
         "load_page"=>{
+            let ticket=runtime.cache_policy.view_ticket();
+            let _activity=runtime.cache_policy.activity().await?;
             let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
             let effective=runtime.sr.prepare(Path::new(required(r,"image")?),&settings).await?;
             let mut reply=runtime.load_page(&effective,r["mode"].as_str().unwrap_or("text")).await?;
+            runtime.cache_policy.pin_view(ticket,&effective)?;
             reply["effective_image"]=json!(effective);reply["original_image"]=r["image"].clone();Ok(reply)
         },
         "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
         "release_engine"=>{runtime.engine.release().await?;Ok(json!({"released":true}))},
         "display"=>{
             let _permit=display_gate.acquire().await?;
+            let _activity=runtime.cache_policy.activity().await?;
             runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?)).await
         },
         "edit"=>runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str()).await,
@@ -60,11 +65,13 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                 let image=image.as_str().context("invalid image path")?;
                 let _=output.send(json!({"id":job.id,"event":"page_started","image":image,"index":index,"total":images.len()})).await;
                 let page_result=async{
+                    let _activity=runtime.cache_policy.activity().await?;
                     let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
                     let effective=runtime.sr.prepare(Path::new(image),&settings).await?;
                     let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(&effective,options.mode)?,output:output.clone()};
                     runtime.process_page(&effective,&options,&service,&mut events).await
                 }.await;
+                runtime.maintain_cache().await;
                 let result=match page_result{
                     Ok(value)=>json!({"image":image,"ok":true,"result":value}),
                     Err(error)=>json!({"image":image,"ok":false,"error":service.safe_error(error)}),
@@ -99,12 +106,14 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
     // Release owned OCR allocations before another translation job; a cancelled
     // model call also discards its poisoned channel and private array workspace.
     if job.request["op"]=="process"{let _=runtime.release_ocr().await;}
+    runtime.maintain_cache().await;
     registry.lock().await.remove(&job.id);
     let _=output.send(reply).await;
 }
 
 pub async fn serve(runtime:Runtime)->Result<()>{
     let runtime=Arc::new(runtime);
+    runtime.maintain_cache().await;
     let registry:Registry=Arc::new(Mutex::new(HashMap::new()));
     let display_gate=Arc::new(Semaphore::new(1));
     let (output,mut replies)=mpsc::channel::<Value>(32);
@@ -120,9 +129,17 @@ pub async fn serve(runtime:Runtime)->Result<()>{
         tokio::spawn(async move{while let Some(job)=pending.recv().await{run(runtime.clone(),job,output.clone(),registry.clone(),display_gate.clone()).await;}})};
     let mut tasks=JoinSet::new();
     let mut input=BufReader::new(tokio::io::stdin());
+    let mut maintenance=tokio::time::interval(std::time::Duration::from_secs(60));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop{
         while tasks.try_join_next().is_some(){}
-        let bytes=match protocol::line(&mut input,1024*1024).await{
+        let read=protocol::line(&mut input,1024*1024);
+        tokio::pin!(read);
+        let next=loop {tokio::select! {
+            result=&mut read=>break result,
+            _=maintenance.tick()=>{while tasks.try_join_next().is_some(){} let runtime=runtime.clone();tasks.spawn(async move {runtime.maintain_cache().await;});},
+        }};
+        let bytes=match next{
             Ok(Some(bytes))=>bytes,Ok(None)=>break,Err(error)=>{let _=output.send(json!({"id":null,"event":"error","error":error.to_string()})).await;break;}
         };
         let request:Value=match serde_json::from_slice(&bytes){Ok(value)=>value,Err(_)=>{

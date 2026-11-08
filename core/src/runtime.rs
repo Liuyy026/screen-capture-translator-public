@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 pub struct Runtime{
     pub cache_root:PathBuf,
     pub sr:crate::super_resolution::Store,
+    pub cache_policy:Arc<crate::cache_policy::Manager>,
     pub seed_root:Option<PathBuf>,
     pub display:display_cache::Store,
     models:Mutex<ImageModels>,
@@ -37,7 +38,10 @@ impl Runtime{
         let project=worker_absolute.ancestors().nth(3).context("worker path has no project root")?;
         let sr=crate::super_resolution::Store{root:cache_root.parent().context("cache root has no parent")?.join("super-resolution-v1"),gate:Mutex::new(()),helpers:project.join("macos/.build")};
         std::fs::create_dir_all(&sr.root)?;
-        Ok(Self{sr,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
+        ensure!(!sr.root.starts_with(&cache_root)&&!cache_root.starts_with(&sr.root),"增强缓存与译文目录不能重叠");
+        if let Some(seed)=&seed_root {ensure!(!sr.root.starts_with(seed)&&!seed.starts_with(&sr.root),"增强缓存与稳定版缓存不能重叠");}
+        let cache_policy=crate::cache_policy::Manager::new(&sr.root,&assets_root)?;
+        Ok(Self{sr,cache_policy,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
             models:Mutex::new(ImageModels::new(python,worker,weights)?),pages:Mutex::new(HashMap::new()),
             engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
     }
@@ -149,6 +153,9 @@ impl Runtime{
         }
         persistence::atomic_json(&cache,&page)?;
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
+    }
+    pub async fn maintain_cache(&self) {
+        if let Err(error)=self.cache_policy.maintain().await { eprintln!("缓存清理未完成：{error}"); }
     }
     pub async fn release_ocr(&self)->Result<()>{self.models.lock().await.release_ocr().await}
     pub async fn close(&self)->Result<()>{

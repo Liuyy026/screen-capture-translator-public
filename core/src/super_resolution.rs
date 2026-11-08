@@ -64,7 +64,7 @@ impl Store{
                 let check=crate::imaging::decode_color(&target)?;
                 Ok(metadata["identity"]==identity&&metadata["output_sha256"]==hash&&check.cols()==w as i32&&check.rows()==h as i32)
             })().unwrap_or(false);
-            if valid{return Ok(target)}
+            if valid{let _=crate::cache_policy::touch_sr(&directory);return Ok(target)}
         }
         let temp=tempfile::Builder::new().prefix("inference-").tempdir_in(&directory)?;
         let output=temp.path().join("output.png");
@@ -73,7 +73,7 @@ impl Store{
         ensure!(identity["source_sha256"]==format!("{:x}",Sha256::digest(std::fs::read(input)?)),"增强期间原文件发生变化，请重试");
         let check=crate::imaging::decode_color(&output)?;ensure!(check.cols()==w as i32&&check.rows()==h as i32,"增强输出尺寸不匹配");
         crate::persistence::atomic_json(&directory.join("identity.json"),&json!({"identity":identity,"result":result,"output_sha256":format!("{:x}",Sha256::digest(std::fs::read(&output)?))}))?;
-        std::fs::rename(output,&target)?;Ok(target)
+        std::fs::rename(output,&target)?;let _=crate::cache_policy::touch_sr(&directory);Ok(target)
     }
 }
 #[cfg(test)]mod tests{

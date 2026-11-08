@@ -682,6 +682,8 @@ struct ContentView: View {
                     }.onChange(of: reader.srPreset) { _, _ in reader.changeEnhancement() }
                     Text("已达目标默认跳过。原图保留；增强后的识别与译文单独保存，不迁移原图手改内容。")
                         .font(.caption2).foregroundStyle(.secondary)
+                    Text("图片缓存合计上限 5 GB，30 天未使用自动清理；原图、译文和手改内容保留。")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 if !reader.srStatus.isEmpty { Text(reader.srStatus).font(.caption2).foregroundStyle(.secondary) }
             }.disabled(reader.busy)
