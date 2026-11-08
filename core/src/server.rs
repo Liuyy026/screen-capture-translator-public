@@ -34,7 +34,13 @@ fn service(request:&Value)->Result<TranslationService>{
 async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_gate:&Semaphore)->Result<Value>{
     let r=&job.request;
     match required(r,"op")?{
-        "load_page"=>runtime.load_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text")).await,
+        "sr_capabilities"=>Ok(json!({"backends":[runtime.sr.capabilities("metalfx").await,runtime.sr.capabilities("realcugan").await]})),
+        "load_page"=>{
+            let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
+            let effective=runtime.sr.prepare(Path::new(required(r,"image")?),&settings).await?;
+            let mut reply=runtime.load_page(&effective,r["mode"].as_str().unwrap_or("text")).await?;
+            reply["effective_image"]=json!(effective);reply["original_image"]=r["image"].clone();Ok(reply)
+        },
         "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
         "release_engine"=>{runtime.engine.release().await?;Ok(json!({"released":true}))},
         "display"=>{
@@ -54,8 +60,10 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                 let image=image.as_str().context("invalid image path")?;
                 let _=output.send(json!({"id":job.id,"event":"page_started","image":image,"index":index,"total":images.len()})).await;
                 let page_result=async{
-                    let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(Path::new(image),options.mode)?,output:output.clone()};
-                    runtime.process_page(Path::new(image),&options,&service,&mut events).await
+                    let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
+                    let effective=runtime.sr.prepare(Path::new(image),&settings).await?;
+                    let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(&effective,options.mode)?,output:output.clone()};
+                    runtime.process_page(&effective,&options,&service,&mut events).await
                 }.await;
                 let result=match page_result{
                     Ok(value)=>json!({"image":image,"ok":true,"result":value}),

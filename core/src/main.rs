@@ -16,6 +16,7 @@ mod raster;
 mod reading;
 mod runtime;
 mod server;
+mod super_resolution;
 mod service;
 mod structure;
 mod texture;

@@ -6,7 +6,7 @@ import CryptoKit
 // Command Line Tools do not ship the SwiftUI macro plugin.
 private typealias EditorState<Value> = SwiftUI.State<Value>
 
-private struct NativeLoadedPage: Decodable { var cache: String; var page: PageResult?; var revision: String? }
+private struct NativeLoadedPage: Decodable { var cache: String; var page: PageResult?; var revision: String?; var effective_image: String? }
 
 @MainActor final class Reader: ObservableObject {
     @Published var files: [URL] = []
@@ -22,6 +22,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     @Published var image: NSImage?
     @Published var folderName = "本地漫画"
     @Published var busy = false
+    @Published var preparingImage = false
     @Published var message = "打开漫画文件夹，开始阅读"
     @Published var error: String?
     @Published var selectedBlock: String?
@@ -29,6 +30,30 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     @Published var zoom = 1.0
     @Published var model = "qwen3:4b"
     @Published var processingMode = "text"
+    @Published var srEngine = "off"
+    @Published var srTarget = 1440
+    @Published var srAxis = "long_edge"
+    @Published var srPreset = "standard"
+    @Published var srStatus = ""
+    private var effectiveImage: URL?
+    var srSettings: [String: Any] { ["engine": srEngine, "target": srTarget, "axis": srAxis, "preset": srPreset] }
+    func changeEnhancement() {
+        if srEngine == "metalfx" { srPreset = "standard" }
+        operationRequest = UUID()
+        cancel(); pageTask?.cancel(); readingTask?.cancel()
+        page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil
+        image = selected.flatMap { NSImage(contentsOf: $0) }
+        reloadPage(updateMessage: true)
+        Task {
+            struct Backend: Decodable { var engine: String; var available: Bool; var presets: [String]; var reason: String }
+            struct Capabilities: Decodable { var backends: [Backend] }
+            do {
+                let data = try await nativeCore.request("sr_capabilities")
+                let backends = try JSONDecoder().decode(Capabilities.self, from: data).backends
+                srStatus = backends.map { $0.engine + ($0.available ? "：可用（" + $0.presets.joined(separator: "、") + "）" : "：尚未准备 · " + $0.reason) }.joined(separator: "\n")
+            } catch { srStatus = error.localizedDescription }
+        }
+    }
     @Published var availableModels: [String] = ["qwen3:4b"]
     @Published var connection = TranslationConnection(provider: "ollama", baseURL: TranslationConnection.defaultURL("ollama"), apiKey: "")
     @Published var showConnectionSettings = false
@@ -39,6 +64,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     private var task: Task<Void, Never>?
     private var pageTask: Task<Void, Never>?
     private var pageRequest = UUID()
+    private var operationRequest = UUID()
     private var pageRevision: String?
     private var modelTimer: Timer?
     private var cacheURL: URL?
@@ -68,7 +94,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
          configurationStore: TranslationLocalConfigStore? = nil) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
         self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
-        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReaderRust/pages")
+        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/" + ((Bundle.main.object(forInfoDictionaryKey: "CacheNamespace") as? String) ?? "KomaReaderRust") + "/pages")
         self.defaults = defaults
         self.connectionConfigStore = configurationStore ?? TranslationLocalConfigStore(url: self.cacheDir.deletingLastPathComponent().appendingPathComponent("config.json"))
         if configurationStore == nil, !defaults.bool(forKey: "stableReaderSettingsImported") {
@@ -295,6 +321,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     }
 
     func select(_ url: URL) {
+        effectiveImage = nil
         selected = url; selectedBlock = nil; error = nil
         image = NSImage(contentsOf: url)
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
@@ -309,12 +336,17 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
         readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
         guard let selected else { page = nil; return }
         let request = pageRequest, mode = processingMode
+        let enhancement = srSettings
+        preparingImage = srEngine != "off"
         pageTask = Task { [weak self] in
             guard let self else { return }
+            defer { if request == pageRequest { preparingImage = false } }
             do {
-                let data = try await nativeCore.request("load_page", values: ["image": selected.path, "mode": mode])
+                let data = try await nativeCore.request("load_page", values: ["image": selected.path, "mode": mode, "super_resolution": enhancement])
                 let result = try JSONDecoder().decode(NativeLoadedPage.self, from: data)
                 guard !Task.isCancelled, request == pageRequest, self.selected == selected, processingMode == mode else { return }
+                effectiveImage = URL(fileURLWithPath: result.effective_image ?? selected.path)
+                image = effectiveImage.flatMap { NSImage(contentsOf: $0) }
                 cacheURL = URL(fileURLWithPath: result.cache); pageRevision = result.revision
                 page = result.page
                 if page != nil { prepareReadingRegions(cache: cacheURL!) }
@@ -341,7 +373,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     }
 
     private func prepareReadingRegions(cache: URL) {
-        guard let selected, let data = try? Data(contentsOf: cache) else { return }
+        guard let selected = effectiveImage ?? selected, let data = try? Data(contentsOf: cache) else { return }
         let key = selected.path + ":" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         if let saved = readingCache[key] { readingRegions = saved.regions; readingPreserved = saved.preserved ?? [:]; return }
         let request = readingRequest
@@ -398,16 +430,22 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
         let urls = batch ? files : [selected]
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
         let jobConnection = connection, jobModel = model, jobMode = processingMode
+        let jobEnhancement = srSettings
+        let request = UUID(); operationRequest = request
         defaults.set(jobModel, forKey: "translationModel." + jobConnection.identity)
         task = Task { [self] in
-            defer { busy = false; task = nil; reloadPage() }
+            defer {
+                // No newer processing task can start while this one owns busy.
+                busy = false; task = nil
+                if request == operationRequest { reloadPage() }
+            }
             do {
                 var values: [String: Any] = ["images": urls.map(\.path), "operation": operation,
-                    "mode": jobMode, "model": jobModel, "provider": jobConnection.provider,
+                    "super_resolution": jobEnhancement, "mode": jobMode, "model": jobModel, "provider": jobConnection.provider,
                     "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
                 if let blockID { values["block_id"] = blockID; values["retry"] = true }
                 let data = try await nativeCore.request("process", values: values) { [weak self] event in
-                    guard let self else { return }
+                    guard let self, request == operationRequest, !Task.isCancelled else { return }
                     switch event["event"] as? String {
                     case "progress": if let text = event["message"] as? String { message = text }
                     case "page_started":
@@ -422,6 +460,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
                     }
                 }
                 try Task.checkCancellation()
+                guard request == operationRequest else { return }
                 let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 let pages = result?["pages"] as? [[String: Any]] ?? []
                 let failures = pages.reduce(0) { total, page in
@@ -429,12 +468,18 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
                 }
                 queueDone = pages.count
                 message = failures > 0 ? "处理结束，有 \(failures) 处问题；请查看提示后重试" : "处理完成 · \(queueDone) 页 · 结果已保存到本机"
-            } catch is CancellationError { message = "已停止；已完成的结果已保存" }
-            catch { self.error = error.localizedDescription; message = "处理未完成；已保存的结果保留，可重试" }
+            } catch is CancellationError { if request == operationRequest { message = "已停止；已完成的结果已保存" } }
+            catch { if request == operationRequest { self.error = error.localizedDescription; message = "处理未完成；已保存的结果保留，可重试" } }
         }
     }
 
-    func cancel() { task?.cancel() }
+    func cancel() {
+        if busy { message = "已停止；已完成的结果已保存" }
+        else if preparingImage { message = "已停止前置增强；原图保留" }
+        operationRequest = UUID()
+        task?.cancel(); pageTask?.cancel(); readingTask?.cancel()
+        pageRequest = UUID(); readingRequest = UUID(); preparingImage = false
+    }
     func shutdown() {
         pageTask?.cancel(); readingTask?.cancel(); cancel(); modelTimer?.invalidate()
         nativeCore.shutdown()
@@ -507,7 +552,7 @@ struct ContentView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 10) {
-                if reader.busy { ProgressView().controlSize(.small) }
+                if reader.busy || reader.preparingImage { ProgressView().controlSize(.small) }
                 else { Image(systemName: "internaldrive").foregroundStyle(.secondary) }
                 Text(reader.message).lineLimit(2).font(.caption)
                 Spacer()
@@ -521,7 +566,7 @@ struct ContentView: View {
                 Button { reader.chooseFolder() } label: { Label("打开文件夹", systemImage: "folder") }.disabled(reader.busy)
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                if reader.busy {
+                if reader.busy || reader.preparingImage {
                     Button("停止", systemImage: "stop.fill") { reader.cancel() }
                 } else {
                     Menu {
@@ -608,6 +653,30 @@ struct ContentView: View {
                 Text("有 \(reader.readingPreserved.count) 处疑似页码，已保留原图，请核对右侧原文。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Group {
+                Picker("前置增强", selection: $reader.srEngine) {
+                    Text("关闭（原图）").tag("off")
+                    Text("MetalFX 空间超分").tag("metalfx")
+                    Text("Real-CUGAN").tag("realcugan")
+                }.onChange(of: reader.srEngine) { _, _ in reader.changeEnhancement() }
+                if reader.srEngine != "off" {
+                    Picker("目标尺寸", selection: $reader.srTarget) {
+                        Text("1440").tag(1440); Text("2160").tag(2160)
+                    }.onChange(of: reader.srTarget) { _, _ in reader.changeEnhancement() }
+                    Picker("按", selection: $reader.srAxis) {
+                        Text("长边").tag("long_edge"); Text("高度").tag("height")
+                    }.onChange(of: reader.srAxis) { _, _ in reader.changeEnhancement() }
+                    Picker("增强预设", selection: $reader.srPreset) {
+                        Text("标准").tag("standard")
+                        if reader.srEngine == "realcugan" {
+                            Text("保守").tag("conservative"); Text("降噪").tag("denoise")
+                        }
+                    }.onChange(of: reader.srPreset) { _, _ in reader.changeEnhancement() }
+                    Text("已达目标默认跳过。原图保留；增强后的识别与译文单独保存，不迁移原图手改内容。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                if !reader.srStatus.isEmpty { Text(reader.srStatus).font(.caption2).foregroundStyle(.secondary) }
+            }.disabled(reader.busy)
             Picker("翻译方式", selection: Binding(get: { reader.processingMode }, set: { reader.chooseProcessingMode($0) })) {
                 Text("普通翻译").tag("text")
                 Text("视觉辅助").tag("vision")

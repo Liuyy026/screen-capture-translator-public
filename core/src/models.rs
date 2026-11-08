@@ -74,6 +74,7 @@ impl ModelWorker {
             ])
             .env_remove("KOMA_TRANSLATION_API_KEY")
             .env("PYTHONUNBUFFERED", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

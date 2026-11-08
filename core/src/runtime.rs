@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 pub struct Runtime{
     pub cache_root:PathBuf,
+    pub sr:crate::super_resolution::Store,
     pub seed_root:Option<PathBuf>,
     pub display:display_cache::Store,
     models:Mutex<ImageModels>,
@@ -32,13 +33,18 @@ impl Runtime{
             ensure!(!assets_root.starts_with(seed)&&!seed.starts_with(&assets_root),"display assets cannot overwrite stable caches");
         }
         ensure!(!assets_root.starts_with(&cache_root)&&!cache_root.starts_with(&assets_root),"page and display caches must be separate");
-        Ok(Self{cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
+        let worker_absolute=worker.canonicalize()?;
+        let project=worker_absolute.ancestors().nth(3).context("worker path has no project root")?;
+        let sr=crate::super_resolution::Store{root:cache_root.parent().context("cache root has no parent")?.join("super-resolution-v1"),gate:Mutex::new(()),helpers:project.join("macos/.build")};
+        std::fs::create_dir_all(&sr.root)?;
+        Ok(Self{sr,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
             models:Mutex::new(ImageModels::new(python,worker,weights)?),pages:Mutex::new(HashMap::new()),
             engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
     }
     pub fn cache_for(&self,image:&Path,mode:&str)->Result<PathBuf>{
         ensure!(["text","vision"].contains(&mode),"未知翻译方式");
-        persistence::cache_path(image,&if mode=="vision"{self.cache_root.join("vision-v1")}else{self.cache_root.clone()})
+        let namespace=if image.starts_with(&self.sr.root){self.cache_root.join("enhanced-v1").join(image.parent().unwrap().file_name().unwrap())}else{self.cache_root.clone()};
+        persistence::cache_path(image,&if mode=="vision"{namespace.join("vision-v1")}else{namespace})
     }
     async fn page_lock(&self,path:&Path)->Arc<Mutex<()>>{
         let mut pages=self.pages.lock().await;
@@ -48,7 +54,7 @@ impl Runtime{
     }
     fn seed_page(&self,image:&Path,mode:&str,target:&Path)->Result<Option<Value>>{
         if target.exists(){return Ok(Some(serde_json::from_slice(&std::fs::read(target)?)?));}
-        if let Some(seed)=&self.seed_root{
+        if let Some(seed)=self.seed_root.as_ref().filter(|_|!image.starts_with(&self.sr.root)){
             let source=seed.join(if mode=="vision"{"vision-v1"}else{""}).join(target.file_name().unwrap());
             if source.is_file(){
                 let bytes=std::fs::read(source)?;let page=serde_json::from_slice(&bytes)?;
@@ -56,8 +62,8 @@ impl Runtime{
             }
         }
         if mode=="vision"{
-            let mut page=vision_pipeline::prepare(image,target,&self.cache_root)?;
-            if page.is_none()&&let Some(seed)=&self.seed_root{page=vision_pipeline::prepare(image,target,seed)?;}
+            let mut page=vision_pipeline::prepare(image,target,if image.starts_with(&self.sr.root){target.parent().unwrap().parent().unwrap()}else{&self.cache_root})?;
+            if page.is_none()&&!image.starts_with(&self.sr.root)&&let Some(seed)=&self.seed_root{page=vision_pipeline::prepare(image,target,seed)?;}
             if let Some(page)=&page{persistence::atomic_json(target,page)?;}
             return Ok(page);
         }
