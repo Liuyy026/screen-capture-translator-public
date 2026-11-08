@@ -37,6 +37,8 @@ python3 tools/rust_migration/cargo.py build
 
 `ink-probe` 核对显示框、页码保留和独立长划线补全后的蒙版哈希。它使用已有检测蒙版，不加载模型；完整清字、背景合成和显示协议仍在迁移。
 
+`geometry-probe` 核对气泡/旁白轮廓、排版矩形、擦除多边形及旧缓存边界。`background-probe` 接收一组局部修补请求，核对清字计划及蒙版，不运行修补模型。两者的差分验证脚本分别是 `verify_geometry.py` 和 `verify_background_plan.py`；原始图片及缓存保持只读。
+
 差分检查使用稳定版本作为测试参照，生产核心不调用参照程序：
 
 ```sh

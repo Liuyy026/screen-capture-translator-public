@@ -1,8 +1,11 @@
+mod background;
 mod compat;
+mod geometry;
 mod imaging;
 mod ink;
 mod models;
 mod panels;
+mod raster;
 mod structure;
 
 use anyhow::Result;
@@ -19,6 +22,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Inspect local restoration masks without running an image model.
+    BackgroundProbe {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        requests: PathBuf,
+        #[arg(long)]
+        mask: Option<PathBuf>,
+    },
+    /// Inspect native balloon contours and source-bounded erasure geometry.
+    GeometryProbe {
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        mask: Option<PathBuf>,
+    },
     /// Inspect native display boxes and completed detached-stroke masks.
     InkProbe {
         #[arg(long)]
@@ -76,6 +97,73 @@ enum Operation {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Operation::BackgroundProbe {
+            image,
+            requests,
+            mask,
+        } => {
+            let gray = imaging::display_gray(&image)?;
+            let source = mask.as_deref().map(imaging::decode_gray).transpose()?;
+            let requests: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(requests)?)?;
+            let mut replies = vec![];
+            for request in requests {
+                let boxes: Vec<ink::Box4> = serde_json::from_value(request["boxes"].clone())?;
+                let clip = request["clip_path"]
+                    .as_str()
+                    .map(|path| imaging::decode_gray(std::path::Path::new(path)))
+                    .transpose()?;
+                let origin: [i32; 2] = serde_json::from_value(
+                    request.get("clip_origin").cloned().unwrap_or(json!([0, 0])),
+                )?;
+                replies.push(
+                    background::prepare(
+                        &gray,
+                        &boxes,
+                        clip.as_ref().map(|m| (m, origin)),
+                        compat::truth(&request["textured"]),
+                        source.as_ref(),
+                    )?
+                    .snapshot()?,
+                );
+            }
+            println!("{}", serde_json::to_string(&replies)?);
+        }
+        Operation::GeometryProbe { image, cache, mask } => {
+            let page: serde_json::Value = serde_json::from_slice(&std::fs::read(cache)?)?;
+            let gray = imaging::display_gray(&image)?;
+            let source = mask.as_deref().map(imaging::decode_gray).transpose()?;
+            use opencv::prelude::*;
+            let blocks = compat::array(&page["blocks"]);
+            let preserved = ink::preserved_markers(&page);
+            let boxes: Vec<_> = blocks
+                .iter()
+                .map(|b| {
+                    if preserved.get(compat::text(&b["id"])).is_some() {
+                        None
+                    } else {
+                        ink::clipped_box(b, gray.cols(), gray.rows())
+                    }
+                })
+                .collect();
+            let (boxes, _) =
+                ink::complete_vertical_strokes(&gray, &boxes, blocks, source.as_ref())?;
+            let bubbles = geometry::bubbles(&gray, &boxes)?;
+            let narrations = geometry::narration_groups(&gray, blocks, &boxes, &bubbles)?;
+            let results: Result<Vec<_>> = bubbles.iter().map(|c| c.snapshot(&boxes)).collect();
+            let narration_results: Result<Vec<_>> =
+                narrations.iter().map(|c| c.snapshot(&boxes)).collect();
+            let cached: Result<Vec<_>> = compat::array(&page["overlay_regions"]).iter().map(|r| {
+                let candidate = geometry::cached_shape(r, gray.cols(), gray.rows())?;
+                use sha2::{Digest, Sha256};
+                candidate.map(|c| Ok(json!({"origin": c.origin, "area": c.area,
+                    "mask_shape": [c.mask.rows(), c.mask.cols()], "mask_sha256": format!("{:x}", Sha256::digest(c.mask.data_bytes()?))}))).transpose()
+            }).collect();
+            println!(
+                "{}",
+                json!({"bubbles": results?, "narrations": narration_results?, "cached": cached?})
+            );
+        }
         Operation::InkProbe { image, cache, mask } => {
             let page = serde_json::from_slice(&std::fs::read(cache)?)?;
             let gray = imaging::display_gray(&image)?;
