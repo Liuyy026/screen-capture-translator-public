@@ -29,8 +29,22 @@ def install_file(source, destination):
 
 def write_notices(native, destination, cargo):
     opencv = destination / "OpenCV"
+    source = native / "opencv-4.11.0"
     shutil.copytree(native / "install/share/licenses/opencv4", opencv)
-    install_file(native / "opencv-4.11.0/LICENSE", opencv / "LICENSE")
+    for name in ("LICENSE", "doc/LICENSE_BSD.txt", "doc/LICENSE_CHANGE_NOTICE.txt",
+                 "3rdparty/libwebp/COPYING"):
+        path = source / name
+        filename = "libwebp-COPYING" if path.name == "COPYING" else path.name
+        install_file(path, opencv / filename)
+    carotene = set()
+    for path in (source / "3rdparty/carotene").rglob("*"):
+        if path.suffix in (".cpp", ".hpp"):
+            notice, end, _ = path.read_text(encoding="utf-8").partition("*/")
+            if end and "Redistribution and use" in notice:
+                carotene.add(notice + end)
+    if not carotene:
+        raise ValueError("Missing Carotene license notices")
+    (opencv / "carotene-LICENSE.txt").write_text("\n\n".join(sorted(carotene)) + "\n")
     install_file(ROOT / "core/THIRD_PARTY.md", destination / "Koma-native-notices.md")
     install_file(ROOT / "core/LICENSES/Pillow.txt", destination / "Pillow.txt")
 
@@ -122,8 +136,11 @@ def package(version, native, destination):
             "macos/scripts/realcugan_manifest.py", "docs/licenses/RealCUGAN-model-MIT.txt",
         ):
             install_file(ROOT / path, runtime / path)
-        for folder in ("backend", "samples"):
-            shutil.copytree(ROOT / folder, runtime / folder, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        bundled_sources = subprocess.check_output(
+            ["git", "ls-files", "-z", "--", "backend", "samples"], cwd=ROOT,
+        ).decode().split("\0")
+        for path in filter(None, bundled_sources):
+            install_file(ROOT / path, runtime / path)
 
         install_file(MACOS / "release/准备组件.command", payload / "准备组件.command")
         (payload / "准备组件.command").chmod(0o755)
