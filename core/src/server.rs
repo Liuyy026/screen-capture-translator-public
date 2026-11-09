@@ -59,10 +59,20 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
         "process"=>{
             let images=r["images"].as_array().context("missing images")?;
             ensure!(!images.is_empty()&&images.len()<=4096,"invalid page queue size");
-            let service=service(r)?;
-            let options=ProcessOptions{operation:r["operation"].as_str().unwrap_or("both"),mode:r["mode"].as_str().unwrap_or("text"),
-                model:required(r,"model")?,block_id:r["block_id"].as_str(),unit:r["unit"].as_str().unwrap_or("blocks"),
-                batch_size:r["batch_size"].as_u64().unwrap_or(8) as usize,retry:r["retry"].as_bool().unwrap_or(false)};
+            let operation = r["operation"].as_str().unwrap_or("both");
+            let processing = if operation == "enhance" {
+                None
+            } else {
+                let service = service(r)?;
+                let options = ProcessOptions {
+                    operation, mode: r["mode"].as_str().unwrap_or("text"),
+                    model: required(r, "model")?, block_id: r["block_id"].as_str(),
+                    unit: r["unit"].as_str().unwrap_or("blocks"),
+                    batch_size: r["batch_size"].as_u64().unwrap_or(8) as usize,
+                    retry: r["retry"].as_bool().unwrap_or(false),
+                };
+                Some((options, service))
+            };
             let mut results=vec![];
             for (index,image) in images.iter().enumerate(){
                 let image=image.as_str().context("invalid image path")?;
@@ -70,14 +80,26 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                 let page_result=async{
                     let _activity=runtime.cache_policy.activity().await?;
                     let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
-                    let effective=runtime.sr.prepare(Path::new(image),&settings).await?;
-                    let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(&effective,options.mode)?,output:output.clone()};
-                    runtime.process_page(&effective,&options,&service,&mut events).await
+                    ensure!(processing.is_some() || settings.engine != "off", "请选择超分引擎");
+                    let source = Path::new(image);
+                    let effective = runtime.sr.prepare(source, &settings).await?;
+                    if let Some((options, service)) = &processing {
+                        let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(&effective,options.mode)?,output:output.clone()};
+                        runtime.process_page(&effective, options, service, &mut events).await
+                    } else {
+                        Ok(json!({"skipped":effective == source}))
+                    }
                 }.await;
                 runtime.maintain_cache().await;
                 let result=match page_result{
                     Ok(value)=>json!({"image":image,"ok":true,"result":value}),
-                    Err(error)=>json!({"image":image,"ok":false,"error":service.safe_error(error)}),
+                    Err(error) => {
+                        let message = match &processing {
+                            Some((_, service)) => service.safe_error(error),
+                            None => error.to_string(),
+                        };
+                        json!({"image":image,"ok":false,"error":message})
+                    }
                 };
                 let _=output.send(json!({"id":job.id,"event":"page_finished","done":index+1,"total":images.len(),"page":result})).await;
                 results.push(result);
@@ -108,7 +130,9 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
     };
     // Release owned OCR allocations before another translation job; a cancelled
     // model call also discards its poisoned channel and private array workspace.
-    if job.request["op"]=="process"{let _=runtime.release_ocr().await;}
+    if job.request["op"] == "process" && job.request["operation"] != "enhance" {
+        let _ = runtime.release_ocr().await;
+    }
     runtime.maintain_cache().await;
     registry.lock().await.remove(&job.id);
     let _=output.send(reply).await;

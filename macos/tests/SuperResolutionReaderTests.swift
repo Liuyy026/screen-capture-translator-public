@@ -17,12 +17,14 @@ import SwiftUI
                             configurationStore: TranslationLocalConfigStore(url: output.appendingPathComponent("config.json")))
         defer { reader.shutdown(); defaults.removePersistentDomain(forName: suite) }
         func require(_ value: Bool, _ reason: String) throws { if !value { throw Failure(message: reason) } }
-        func settled() async throws {
+        func settled(includingQueue: Bool = false) async throws {
             for _ in 0..<1500 {
-                if !reader.preparingImage { try await Task.sleep(for: .milliseconds(50)); return }
+                if !reader.preparingImage && (!includingQueue || !reader.busy) {
+                    try await Task.sleep(for: .milliseconds(50)); return
+                }
                 try await Task.sleep(for: .milliseconds(20))
             }
-            throw Failure(message: "prepare timed out")
+            throw Failure(message: "reader did not settle")
         }
         func height() -> Int { (reader.image?.representations.first?.pixelsHigh) ?? 0 }
         reader.files = [first, second]
@@ -44,7 +46,20 @@ import SwiftUI
         reader.srEngine = "off"; reader.error = nil; reader.changeEnhancement()
         try await Task.sleep(for: .milliseconds(200))
         try require(reader.error == nil && height() == 720, "recovery after unavailable backend")
-        let report: [String: Any] = ["passed":true, "checks":["preparation cancellation state", "rapid source and target switch rejects old result", "source list remains original", "disable restores original pixels", "missing backend fails visibly", "off recovers"]]
+
+        let invalid = output.appendingPathComponent("损坏页.png")
+        try Data("invalid image".utf8).write(to: invalid)
+        let chapter = [second, invalid, first]
+        reader.files = chapter
+        try require(reader.canEnhanceChapter && !reader.engineReady, "chapter enhancement must be available offline")
+        reader.enhanceChapter()
+        try require(reader.busy && reader.queueTotal == 3 && reader.srEngine == "metalfx", "one click should enable MetalFX and queue the chapter")
+        try await settled(includingQueue: true)
+        try require(reader.queueDone == 3 && reader.message.contains("2 页增强就绪") && reader.message.contains("1 页失败"),
+                    "the queue must continue after a bad page and count its failure")
+        try require(reader.error?.contains(invalid.lastPathComponent) == true, "failed page name should be visible")
+        try require(reader.files == chapter && reader.selected == second && height() == 1440, "chapter enhancement must keep the source list and refresh the selected page")
+        let report: [String: Any] = ["passed":true, "checks":["preparation cancellation state", "rapid source and target switch rejects old result", "source list remains original", "disable restores original pixels", "missing backend fails visibly", "off recovers", "offline chapter enhancement and per-page failure recovery"]]
         try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output.appendingPathComponent("reader-report.json"))
         print("passed")
     }

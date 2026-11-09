@@ -37,13 +37,17 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     @Published var srStatus = ""
     private var effectiveImage: URL?
     var srSettings: [String: Any] { ["engine": srEngine, "target": srTarget, "axis": srAxis, "preset": srPreset] }
+    private func resetPageForEnhancement() {
+        cancel()
+        page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil
+        readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
+        image = selected.flatMap { NSImage(contentsOf: $0) }
+    }
+
     func changeEnhancement() {
         if srEngine == "metalfx" { srPreset = "standard" }
         error = nil; srStatus = ""
-        operationRequest = UUID()
-        cancel(); pageTask?.cancel(); readingTask?.cancel()
-        page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil
-        image = selected.flatMap { NSImage(contentsOf: $0) }
+        resetPageForEnhancement()
         reloadPage(updateMessage: true)
         Task {
             struct Backend: Decodable { var engine: String; var available: Bool; var presets: [String]; var reason: String }
@@ -77,7 +81,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     private var modelTimer: Timer?
     private var cacheURL: URL?
     private var started = false
-    private var folderRequest = UUID()
+    @Published private var folderRequest: UUID?
     private var connectionRequest = UUID()
     private var sessionKeys: [String: String] = [:]
     private let connectionConfigStore: TranslationLocalConfigStore
@@ -302,22 +306,25 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
         folderRequest = request
         message = "正在读取漫画文件夹…"
         Task {
-        do {
-            let images = try await Task.detached(priority: .userInitiated) {
-                let extensions: Set<String> = ["webp", "png", "jpg", "jpeg", "bmp", "tiff"]
-                let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
-                return contents.filter { extensions.contains($0.pathExtension.lowercased()) &&
-                    ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true) }
-                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            }.value
-            guard request == folderRequest else { return }
-            guard !images.isEmpty else { self.error = "这个文件夹里没有 WebP、PNG 或 JPG 图片。请选择直接包含漫画图片的文件夹。"; return }
-            files = images; folderName = url.lastPathComponent
-            defaults.set(url.path, forKey: "folder")
-            let last = defaults.string(forKey: "lastPage")
-            let initial = restore ? (images.first { $0.path == last } ?? images[0]) : images[0]
-            select(initial)
-        } catch { self.error = "无法打开文件夹：\(error.localizedDescription)" }
+            defer { if request == folderRequest { folderRequest = nil } }
+            do {
+                let images = try await Task.detached(priority: .userInitiated) {
+                    let extensions: Set<String> = ["webp", "png", "jpg", "jpeg", "bmp", "tiff"]
+                    let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+                    return contents.filter { extensions.contains($0.pathExtension.lowercased()) &&
+                        ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true) }
+                        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                }.value
+                guard request == folderRequest else { return }
+                guard !images.isEmpty else { self.error = "这个文件夹里没有 WebP、PNG 或 JPG 图片。请选择直接包含漫画图片的文件夹。"; return }
+                files = images; folderName = url.lastPathComponent
+                defaults.set(url.path, forKey: "folder")
+                let last = defaults.string(forKey: "lastPage")
+                let initial = restore ? (images.first { $0.path == last } ?? images[0]) : images[0]
+                select(initial)
+            } catch {
+                if request == folderRequest { self.error = "无法打开文件夹：\(error.localizedDescription)" }
+            }
         }
     }
 
@@ -334,7 +341,7 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
         image = NSImage(contentsOf: url)
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
         page = nil; cacheURL = nil; pageRevision = nil
-        reloadPage(updateMessage: true)
+        reloadPage(updateMessage: !busy)
         defaults.set(url.path, forKey: "lastPage")
     }
 
@@ -435,34 +442,60 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
 
     func run(operation: String = "both", batch: Bool = false, blockID: String? = nil) {
         guard !busy, let selected else { return }
-        let urls = batch ? files : [selected]
+        let jobConnection = connection
+        var options: [String: Any] = ["mode": processingMode, "model": model, "provider": jobConnection.provider,
+            "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
+        if let blockID { options["block_id"] = blockID; options["retry"] = true }
+        defaults.set(model, forKey: "translationModel." + jobConnection.identity)
+        runQueue(batch ? files : [selected], operation: operation, options: options)
+    }
+
+    var canEnhanceChapter: Bool {
+        !busy && !preparingImage && folderRequest == nil && selected != nil && !files.isEmpty
+    }
+
+    func enhanceChapter() {
+        guard canEnhanceChapter else { return }
+        if srEngine == "off" {
+            srEngine = "metalfx"
+            srPreset = "standard"
+            srStatus = ""
+            resetPageForEnhancement()
+        }
+        runQueue(files, operation: "enhance")
+    }
+
+    private func runQueue(_ urls: [URL], operation: String, options: [String: Any] = [:]) {
+        let enhancing = operation == "enhance"
+        var values = options
+        values["images"] = urls.map(\.path)
+        values["operation"] = operation
+        values["super_resolution"] = srSettings
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
-        let jobConnection = connection, jobModel = model, jobMode = processingMode
-        let jobEnhancement = srSettings
+        if enhancing { message = "正在准备整章超分…" }
         let request = UUID(); operationRequest = request
-        defaults.set(jobModel, forKey: "translationModel." + jobConnection.identity)
         task = Task { [self] in
             defer {
                 // No newer processing task can start while this one owns busy.
                 busy = false; task = nil
-                if request == operationRequest { reloadPage() }
+                if !enhancing, request == operationRequest { reloadPage() }
             }
             do {
-                var values: [String: Any] = ["images": urls.map(\.path), "operation": operation,
-                    "super_resolution": jobEnhancement, "mode": jobMode, "model": jobModel, "provider": jobConnection.provider,
-                    "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
-                if let blockID { values["block_id"] = blockID; values["retry"] = true }
                 let data = try await nativeCore.request("process", values: values) { [weak self] event in
                     guard let self, request == operationRequest, !Task.isCancelled else { return }
                     switch event["event"] as? String {
                     case "progress": if let text = event["message"] as? String { message = text }
                     case "page_started":
-                        if let path = event["image"] as? String { message = "正在处理 \(URL(fileURLWithPath: path).lastPathComponent)…" }
+                        if let path = event["image"] as? String {
+                            let action = enhancing ? "超分" : "处理"
+                            message = "正在\(action) \(URL(fileURLWithPath: path).lastPathComponent)…"
+                        }
                     case "page_finished":
                         queueDone = event["done"] as? Int ?? queueDone
                         if let result = event["page"] as? [String: Any] {
-                            if let text = result["error"] as? String { self.error = text }
-                            if result["image"] as? String == self.selected?.path { reloadPage() }
+                            if !enhancing, let text = result["error"] as? String { self.error = text }
+                            if result["image"] as? String == self.selected?.path,
+                               !enhancing || result["ok"] as? Bool == true { reloadPage() }
                         }
                     default: break
                     }
@@ -470,12 +503,25 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
                 try Task.checkCancellation()
                 guard request == operationRequest else { return }
                 let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                let pages = result?["pages"] as? [[String: Any]] ?? []
-                let failures = pages.reduce(0) { total, page in
-                    total + ((page["ok"] as? Bool == true) ? ((page["result"] as? [String: Any])?["issues"] as? Int ?? 0) : 1)
+                guard let pages = result?["pages"] as? [[String: Any]] else {
+                    throw NativeCoreService.Failure(message: "处理服务返回了无效的页面结果。")
                 }
                 queueDone = pages.count
-                message = failures > 0 ? "处理结束，有 \(failures) 处问题；请查看提示后重试" : "处理完成 · \(queueDone) 页 · 结果已保存到本机"
+                if enhancing {
+                    let failures = pages.filter { $0["ok"] as? Bool != true }
+                    let skipped = pages.filter { ($0["result"] as? [String: Any])?["skipped"] as? Bool == true }.count
+                    let enhanced = pages.count - failures.count - skipped
+                    let summary = "\(enhanced) 页增强就绪 · \(skipped) 页已达目标"
+                    if let first = failures.first, let path = first["image"] as? String, let detail = first["error"] as? String {
+                        self.error = "「\(URL(fileURLWithPath: path).lastPathComponent)」超分失败 · \(detail)"
+                    }
+                    message = failures.isEmpty ? "整章超分完成 · \(summary)" : "整章超分结束 · \(summary) · \(failures.count) 页失败"
+                } else {
+                    let failures = pages.reduce(0) { total, page in
+                        total + ((page["ok"] as? Bool == true) ? ((page["result"] as? [String: Any])?["issues"] as? Int ?? 0) : 1)
+                    }
+                    message = failures > 0 ? "处理结束，有 \(failures) 处问题；请查看提示后重试" : "处理完成 · \(queueDone) 页 · 结果已保存到本机"
+                }
             } catch is CancellationError { if request == operationRequest { message = "已停止；已完成的结果已保存" } }
             catch { if request == operationRequest { self.error = error.localizedDescription; message = "处理未完成；已保存的结果保留，可重试" } }
         }
@@ -582,6 +628,11 @@ struct ContentView: View {
                         Button("翻译整个文件夹（可随时停止）") { reader.run(batch: true) }
                             .disabled(!reader.engineReady)
                     } label: { Image(systemName: "ellipsis.circle") }.disabled(reader.selected == nil)
+                    Button { reader.enhanceChapter() } label: {
+                        Label("整章超分", systemImage: "sparkles").labelStyle(.titleAndIcon)
+                    }
+                    .help("按右侧设置超分当前文件夹。前置增强关闭时使用 MetalFX。")
+                    .disabled(!reader.canEnhanceChapter)
                     Button { reader.run() } label: { Label("识别并翻译", systemImage: "character.bubble") }
                         .buttonStyle(.borderedProminent).tint(.teal)
                         .disabled(reader.selected == nil || !reader.engineReady)
@@ -662,11 +713,14 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Group {
-                Picker("前置增强", selection: $reader.srEngine) {
+                Picker("前置增强", selection: Binding(get: { reader.srEngine }, set: { engine in
+                    reader.srEngine = engine
+                    reader.changeEnhancement()
+                })) {
                     Text("关闭（原图）").tag("off")
                     Text("MetalFX 空间超分").tag("metalfx")
                     Text("Real-CUGAN").tag("realcugan")
-                }.onChange(of: reader.srEngine) { _, _ in reader.changeEnhancement() }
+                }
                 if reader.srEngine != "off" {
                     Picker("目标尺寸", selection: $reader.srTarget) {
                         Text("1440").tag(1440); Text("2160").tag(2160)
