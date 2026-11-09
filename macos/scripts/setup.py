@@ -80,4 +80,4 @@ finally:
     if server:
         server.terminate()
         server.wait(timeout=10)
-print('安装完成。双击「启动.command」即可打开。')
+print('安装完成。双击仓库根目录「启动 Rust 候选版.command」或 macos/启动.command 打开候选版。')

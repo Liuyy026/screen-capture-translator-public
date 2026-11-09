@@ -3,55 +3,6 @@ import Foundation
 
 private typealias FormState<Value> = SwiftUI.State<Value>
 
-private final class NoServiceRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
-    }
-}
-
-enum TranslationModels {
-    static func fetch(_ raw: TranslationConnection) async throws -> [String] {
-        let connection = try raw.normalized()
-        let suffix = connection.provider == "omlx" ? "/models" : "/api/tags"
-        guard let url = URL(string: connection.baseURL + suffix) else {
-            throw ConnectionError("接口地址无效。")
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 8
-        if !connection.apiKey.isEmpty {
-            request.setValue("Bearer " + connection.apiKey, forHTTPHeaderField: "Authorization")
-        }
-        let config = URLSessionConfiguration.ephemeral
-        config.connectionProxyDictionary = [:]
-        let session = URLSession(configuration: config, delegate: NoServiceRedirect(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
-        catch { throw ConnectionError("无法连接服务，请检查接口地址和服务是否已启动。") }
-        guard let http = response as? HTTPURLResponse else { throw ConnectionError("服务返回了无效响应。") }
-        if http.statusCode == 401 || http.statusCode == 403 {
-            throw ConnectionError("认证失败，请检查 API Key。")
-        }
-        guard http.statusCode == 200 else {
-            throw ConnectionError("获取模型失败（HTTP \(http.statusCode)），请检查接口地址。")
-        }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ConnectionError("服务返回的模型列表不是有效 JSON。")
-        }
-        let rows = object[connection.provider == "omlx" ? "data" : "models"] as? [[String: Any]]
-        guard let rows else { throw ConnectionError("服务返回的模型列表格式不正确。") }
-        let ids = rows.filter {
-            connection.provider == "omlx" || ($0["remote_host"] == nil && $0["remote_model"] == nil)
-        }.compactMap { $0[connection.provider == "omlx" ? "id" : "name"] as? String }
-            .filter { !$0.isEmpty && $0.count < 1024 && (connection.provider == "omlx" || !$0.lowercased().contains("cloud")) }
-        return Array(Set(ids)).sorted()
-    }
-}
-
 struct TranslationSettingsView: View {
     @ObservedObject var reader: Reader
     @FormState private var provider: String
