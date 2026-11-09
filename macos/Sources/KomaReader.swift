@@ -90,13 +90,15 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     private(set) var configurationLoadError: String?
     private var localOllamaProbes: Set<UUID> = []
     let root: URL
+    private let runtimeRoot: URL?
     var platformRoot: URL { root.appendingPathComponent("macos") }
     let cacheDir: URL
     private lazy var nativeCore: NativeCoreService = {
         let seed = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
         return NativeCoreService(root: root, cache: cacheDir,
                                  assets: cacheDir.deletingLastPathComponent().appendingPathComponent("reading-native-v1"),
-                                 seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil)
+                                 seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil,
+                                 runtimeRoot: runtimeRoot)
     }()
 
     // The candidate bundle identifier already isolates .standard. Foundation
@@ -105,8 +107,13 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
          defaults: UserDefaults = .standard,
          configurationStore: TranslationLocalConfigStore? = nil) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
-        self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
-        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/" + ((Bundle.main.object(forInfoDictionaryKey: "CacheNamespace") as? String) ?? "KomaReaderRust") + "/pages")
+        let resourceFolder = Bundle.main.object(forInfoDictionaryKey: "KomaRuntimeFolder") as? String
+        let bundled = resourceFolder.flatMap { Bundle.main.resourceURL?.appendingPathComponent($0, isDirectory: true) }
+        let namespace = (Bundle.main.object(forInfoDictionaryKey: "CacheNamespace") as? String) ?? "KomaReaderRust"
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/" + namespace)
+        self.root = root ?? bundled ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
+        self.cacheDir = cacheDir ?? support.appendingPathComponent("pages")
+        self.runtimeRoot = root == nil && bundled != nil ? support.appendingPathComponent("runtime") : nil
         self.defaults = defaults
         self.connectionConfigStore = configurationStore ?? TranslationLocalConfigStore(url: self.cacheDir.deletingLastPathComponent().appendingPathComponent("config.json"))
         if configurationStore == nil, !defaults.bool(forKey: "stableReaderSettingsImported") {

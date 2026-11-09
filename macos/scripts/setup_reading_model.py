@@ -8,7 +8,8 @@ import urllib.request
 URL = "https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt"
 # Published by IOPaint's AnimeLaMa adapter, not calculated from an untrusted download.
 MD5 = "29f284f36a0a510bcacf39ecf4c4d54f"
-TARGET = Path(__file__).resolve().parents[2] / ".models/anime-manga-big-lama.pt"
+MODEL_DIR = Path(os.environ.get("KOMA_MODEL_DIR", Path(__file__).resolve().parents[2] / ".models"))
+TARGET = MODEL_DIR / "anime-manga-big-lama.pt"
 
 
 def checksum(path):

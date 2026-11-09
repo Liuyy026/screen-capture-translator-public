@@ -2,7 +2,7 @@
 # Downloads only into this checkout. Python is setup-only, never a helper dependency.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DEST="$ROOT/.runtime/super-resolution/realcugan"
+DEST="${KOMA_COMPONENT_ROOT:-$ROOT}/.runtime/super-resolution/realcugan"
 mkdir -p "$DEST"
 URL=https://github.com/nihui/realcugan-ncnn-vulkan/releases/download/20220728/realcugan-ncnn-vulkan-20220728-macos.zip
 if [[ ! -f "$DEST/release.zip" ]]; then
@@ -16,4 +16,4 @@ ACTUAL=$(shasum -a 256 "$DEST/release.zip" | cut -d ' ' -f 1)
 unzip -oq "$DEST/release.zip" -d "$DEST"
 file "$DEST/realcugan-ncnn-vulkan-20220728-macos/realcugan-ncnn-vulkan"
 cp "$ROOT/docs/licenses/RealCUGAN-model-MIT.txt" "$DEST/LICENSE-model-MIT.txt"
-python3 "$ROOT/macos/scripts/realcugan_manifest.py" "$DEST" "$URL"
+"${KOMA_SETUP_PYTHON:-python3}" "$ROOT/macos/scripts/realcugan_manifest.py" "$DEST" "$URL"
