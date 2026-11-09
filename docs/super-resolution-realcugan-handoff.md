@@ -2,6 +2,8 @@
 
 完成日期：2026-11-08（Asia/Shanghai）。独立副本基线 d24a9325699d8b9102c354b46025ed42dce22996。
 
+> 2026-11-09 维护说明：本文记录当时的验收过程。三个 Real-CUGAN 阶段性脚本已从当前主分支移除，源码保留在 [52ca8ae 的 macOS 测试目录](https://github.com/Liuyy026/screen-capture-translator-public/tree/52ca8ae15c94f89a2e118db392fde9b303aac8a1/macos/tests)。下方旧命令仅用于历史追溯，需使用当时源码及素材；结果不代表当前版本已重新实测。当前检查入口见 [开发说明](development.md)。
+
 ## 交付范围与整合入口
 
 已实现并实测 `macos/.build/koma-sr-realcugan`。Swift/Core Image 负责格式及 EXIF 方向归一、调用原生 arm64 ncnn/Vulkan 神经网络推理、Lanczos 精确收尾到调用方指定尺寸。运行不依赖 Python、PyTorch、venv 或服务。没有修改主项目、共享模型链接、稳定应用、UI、Rust 共用管线、主构建脚本或 README。未启动或停止 oMLX/Ollama。
@@ -11,7 +13,7 @@
 - `macos/tools/RealCUGANUpscaler.swift`
 - `macos/scripts/build_realcugan.sh`
 - `macos/scripts/prepare_realcugan.sh`、`realcugan_manifest.py`（Python 仅用于准备阶段的来源清单）
-- `macos/tests/realcugan_review.py`、`realcugan_protocol_review.py`、`realcugan_cancel_review.py`
+- 历史验收脚本：`realcugan_review.py`、`realcugan_protocol_review.py`、`realcugan_cancel_review.py`（已移除，源码见页首固定版本链接）
 - `docs/licenses/RealCUGAN-model-MIT.txt`
 
 整合者 cherry-pick 本交付提交即可取得源码。**还必须复制独立运行资产**（Git 不含权重和引擎）：
@@ -72,7 +74,7 @@ Swift 使用 posix_spawn，不设置新进程组，因此 ncnn 与调用方创�
 
 实际系统报告：Mac Studio / Mac17,14，Apple M5 Max，18 CPU 核，40 GPU 核，64 GB RAM，macOS 27.0.1 (26A434)，Swift 6.4。硬件仅按本机报告记录。性能测试使用 fcntl.flock 独占上一级 `gpu-test.lock`；不能排除其他系统 GPU 负载。
 
-在本副本根目录执行并通过：
+历史验收时在独立副本根目录执行并通过（需使用当时源码和本地素材）：
 
 ```sh
 macos/scripts/prepare_realcugan.sh

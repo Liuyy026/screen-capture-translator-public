@@ -15,7 +15,9 @@ Two shared regression tests require local fixed-set assets at these default path
 - `.runtime/test-assets/images/00008.webp`: the original image matching the SHA-256 in `tests/fixtures/page8-panels.json`.
 - `.runtime/test-assets/images/00012.webp` and `.runtime/test-assets/cache/e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json`: the corresponding original image and OCR cache.
 
-Set `KOMA_TEST_IMAGE_DIR` and `KOMA_TEST_CACHE_DIR` to use existing asset directories without copying or uploading originals. The macOS Real-CUGAN protocol review reads `.runtime/rust-migration/pages.json` from the current checkout and requires review assets previously generated under `.runtime/super-resolution/realcugan/review/`. Skipped local-asset tests do not count as validated behavior.
+Set `KOMA_TEST_IMAGE_DIR` and `KOMA_TEST_CACHE_DIR` to use existing asset directories without copying or uploading originals. Skipped local-asset tests do not count as validated behavior.
+
+Three historical Real-CUGAN acceptance scripts tied to old asset directories have been removed from the current source. Their source snapshot and results remain available in the [Real-CUGAN handoff record](super-resolution-realcugan-handoff.md). Current integration checks remain in `tools/super_resolution/verify_integrated_helpers.py`, with cancellation checks in `tools/rust_migration/verify_sr_cancellation.py`; these do not reproduce every GPU check from the historical scripts.
 
 ## Ollama and models
 

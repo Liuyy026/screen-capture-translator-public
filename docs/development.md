@@ -15,7 +15,9 @@
 - `.runtime/test-assets/images/00008.webp`：与 `tests/fixtures/page8-panels.json` 中 SHA-256 一致的原图。
 - `.runtime/test-assets/images/00012.webp` 及 `.runtime/test-assets/cache/e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json`：对应原图及 OCR 缓存。
 
-可通过 `KOMA_TEST_IMAGE_DIR`、`KOMA_TEST_CACHE_DIR` 指定已有素材目录，无需复制或上传原图。macOS 的 Real-CUGAN 协议复核读取当前仓库的 `.runtime/rust-migration/pages.json`，并依赖先前在 `.runtime/super-resolution/realcugan/review/` 生成的复核素材。跳过本地素材测试不代表这些项目已验证。
+可通过 `KOMA_TEST_IMAGE_DIR`、`KOMA_TEST_CACHE_DIR` 指定已有素材目录，无需复制或上传原图。跳过本地素材测试不代表这些项目已验证。
+
+三个依赖旧素材目录的 Real-CUGAN 阶段性验收脚本已从当前源码移除，历史源码与结果见 [Real-CUGAN 交接记录](super-resolution-realcugan-handoff.md)。当前双引擎集成检查保留在 `tools/super_resolution/verify_integrated_helpers.py`，取消流程检查保留在 `tools/rust_migration/verify_sr_cancellation.py`；这些检查不等同于旧脚本的全部 GPU 实测。
 
 ## Ollama 与模型
 
