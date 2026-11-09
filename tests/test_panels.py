@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import unittest
 
@@ -95,10 +96,11 @@ class PanelTests(unittest.TestCase):
 
     def test_real_page8_panel_order_matches_visual_annotation(self):
         root = Path(__file__).parents[1]
-        image = Path('C:/Users/18910/Downloads/1471793/00008.webp')
+        image_dir = Path(os.environ.get('KOMA_TEST_IMAGE_DIR', root/'.runtime/test-assets/images')).expanduser()
+        image = image_dir/'00008.webp'
         annotation = json.loads((root/'tests/fixtures/page8-panels.json').read_text(encoding='utf-8'))
         if not image.exists():
-            self.skipTest('Local fixed-set image is not installed')
+            self.skipTest('Local fixed-set image is not installed; see docs/development.md')
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(), annotation['image_sha256'])
         page = {'blocks': annotation['blocks']}
         ensure_dialogues(page, image=image)

@@ -4,6 +4,19 @@
 
 以下命令均在仓库根目录运行，使用所选平台的 Python 环境。`backend/`、`scripts/`、`tests/`、`samples/` 为共用内容；Windows 界面测试单独放在 `windows/tests/`。
 
+## 测试文件与 GitHub 提交范围
+
+`tests/`、`macos/tests/`、`windows/tests/` 和 `core/python/test_model_worker.py` 中的测试代码随源码提交，用于检查翻译、排版、缓存和界面行为。`tests/fixtures/` 保留结构标注和测试占位文字；`samples/` 是项目生成的示例图。
+
+本地漫画原图、OCR/译文缓存、模型、测试输出和覆盖率报告不提交。评测输入与输出应放在已忽略的 `.runtime/` 中；`.gitignore` 也排除了常见测试缓存和报告。应用发行包只应包含运行所需文件，测试代码无需随应用分发。
+
+两项依赖本地固定样本的共用回归测试默认读取以下位置，缺少素材时会显示为跳过：
+
+- `.runtime/test-assets/images/00008.webp`：与 `tests/fixtures/page8-panels.json` 中 SHA-256 一致的原图。
+- `.runtime/test-assets/images/00012.webp` 及 `.runtime/test-assets/cache/e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json`：对应原图及 OCR 缓存。
+
+可通过 `KOMA_TEST_IMAGE_DIR`、`KOMA_TEST_CACHE_DIR` 指定已有素材目录，无需复制或上传原图。macOS 的 Real-CUGAN 协议复核读取当前仓库的 `.runtime/rust-migration/pages.json`，并依赖先前在 `.runtime/super-resolution/realcugan/review/` 生成的复核素材。跳过本地素材测试不代表这些项目已验证。
+
 ## Ollama 与模型
 
 ### 对白单元与 A/B 验证

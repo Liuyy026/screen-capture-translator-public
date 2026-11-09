@@ -4,6 +4,19 @@
 
 Run all commands from the repository root using the chosen platform environment. Shared components: `backend/`, `scripts/`, `tests/`, `samples/`. Windows UI tests are in `windows/tests/`.
 
+## Test files and GitHub scope
+
+Test source in `tests/`, `macos/tests/`, `windows/tests/`, and `core/python/test_model_worker.py` is committed with the application source to check translation, layout, cache, and UI behavior. `tests/fixtures/` contains structure annotations with placeholder text; `samples/` contains images generated for this project.
+
+Keep local manga originals, OCR/translation caches, models, test outputs, and coverage reports out of Git. Store evaluation inputs and outputs under the ignored `.runtime/` directory. `.gitignore` also excludes common test caches and reports. Application release packages should contain only runtime files; test source does not need to ship with the app.
+
+Two shared regression tests require local fixed-set assets at these default paths and are reported as skipped when assets are unavailable:
+
+- `.runtime/test-assets/images/00008.webp`: the original image matching the SHA-256 in `tests/fixtures/page8-panels.json`.
+- `.runtime/test-assets/images/00012.webp` and `.runtime/test-assets/cache/e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json`: the corresponding original image and OCR cache.
+
+Set `KOMA_TEST_IMAGE_DIR` and `KOMA_TEST_CACHE_DIR` to use existing asset directories without copying or uploading originals. The macOS Real-CUGAN protocol review reads `.runtime/rust-migration/pages.json` from the current checkout and requires review assets previously generated under `.runtime/super-resolution/realcugan/review/`. Skipped local-asset tests do not count as validated behavior.
+
 ## Ollama and models
 
 ### Dialogue units and A/B evaluation

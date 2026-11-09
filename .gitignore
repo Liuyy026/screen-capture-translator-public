@@ -9,3 +9,12 @@ __pycache__/
 .DS_Store
 macos/.venv
 core/target/
+
+# Generated test caches and reports; keep reusable test source and fixtures.
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+test-results/

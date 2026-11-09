@@ -1,6 +1,7 @@
 import unittest
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,10 +29,13 @@ class OverlayTests(unittest.TestCase):
         self.assertLessEqual(height, (box[3] - box[1]) * 2.6)
 
     def test_real_page_00012_regions_are_separated_and_safe(self):
-        image = Path(r"C:\Users\18910\Downloads\1471793\00012.webp")
-        cache = Path(r"C:\Users\18910\AppData\Local\KomaReader\pages\e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json")
+        root = Path(__file__).parents[1]
+        image_dir = Path(os.environ.get('KOMA_TEST_IMAGE_DIR', root/'.runtime/test-assets/images')).expanduser()
+        cache_dir = Path(os.environ.get('KOMA_TEST_CACHE_DIR', root/'.runtime/test-assets/cache')).expanduser()
+        image = image_dir/'00012.webp'
+        cache = cache_dir/'e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json'
         if not image.exists() or not cache.exists():
-            self.skipTest("real-page regression assets are unavailable")
+            self.skipTest("real-page regression assets are unavailable; see docs/development.md")
         page = json.loads(cache.read_text(encoding="utf-8"))
         page.pop("overlay_signature", None)
         ensure_page_overlays(page, image=image)

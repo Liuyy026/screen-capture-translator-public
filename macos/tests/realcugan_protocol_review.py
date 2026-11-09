@@ -3,7 +3,7 @@
 import fcntl,json,os,pathlib,signal,subprocess,time
 from PIL import Image,ImageDraw
 root=pathlib.Path(__file__).resolve().parents[2]; out=root/'.runtime/super-resolution/realcugan/review'; helper=root/'macos/.build/koma-sr-realcugan'
-manifest=pathlib.Path('/Users/lyy-studio/Desktop/project111/本地ai翻译/screen-capture-translator-rust/.runtime/rust-migration/pages.json')
+manifest=root/'.runtime/rust-migration/pages.json'
 records=[]
 def infer(inp,dest,w,h,preset):
     dest.unlink(missing_ok=True); start=time.monotonic()
