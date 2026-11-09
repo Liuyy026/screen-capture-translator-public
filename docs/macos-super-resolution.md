@@ -29,6 +29,15 @@
 
 默认候选数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`，增强 OCR/译文在 `pages/enhanced-v1/<identity>/`，视觉模式另有 `vision-v1/` 子目录。缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份；命中时检查输出内容哈希及尺寸。程序中断留下的临时文件不会作为有效结果使用。
 
+## Real-CUGAN 无损 PNG 加速
+
+2026-11-09 已将源码版快速 PNG 编码同步到本仓库的 Mac Rust 候选版。它把中间 PNG 的行滤波固定为 0，继续使用无损 DEFLATE。helper 优先读取 `.runtime/super-resolution/realcugan/fast-png/` 中的引擎和 models-se；未准备快速引擎的 checkout 使用 20220728 发行包。设置 `KOMA_REALCUGAN_ROOT` 可以明确指定包含引擎和 models-se 的目录（例如原发行包目录）。发行包和模型留在原路径。
+
+- 源码开关见 [上游补丁](../macos/patches/realcugan-fast-png.patch)，[构建脚本](../macos/scripts/build_realcugan_source.sh)分别编译基线与优化版。复现此次结果使用 Vulkan SDK 1.2.162.0、静态 OpenMP 11 和 macOS 11 部署目标。本机已将静态库与头文件放入 `.runtime/super-resolution/realcugan/source-build/`。
+- 完成本地验证后，把构建输出的 `fast/realcugan-ncnn-vulkan` 放入运行资源的 `fast-png/`，并让其中的 `models-se` 指向原发行包的模型目录。运行 `macos/scripts/build_realcugan.sh` 构建 helper 并检查当前选中的引擎 SHA256。本机已完成该步骤，运行资源的 `fast-png/manifest.json` 记录编译来源和校验值。
+- 独立副本的七组 `standard`、128 分块对照中，纯编码耗时减少 5.9%–11.9%，整页耗时减少 1.9%–8.2%。七组输出与原发行版逐像素一致，最终 PNG 文件哈希也一致。主项目本地同步验收与独立计时报告见 `.runtime/super-resolution/realcugan/fast-png-sync-review/`。
+- 引擎和 helper 身份参与缓存键。首次用新版处理时会建立新的增强结果和对应页面缓存，既有缓存及手改记录保留。增强过程中切换运行资源时，该次请求会要求重试。
+
 ## 缓存容量与自动清理
 
 默认策略已在 Mac Rust 候选版启用，无需额外开关：

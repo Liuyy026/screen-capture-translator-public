@@ -19,7 +19,12 @@ let start = Date()
 let fm = FileManager.default
 let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
 let root = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-let assets = ProcessInfo.processInfo.environment["KOMA_REALCUGAN_ROOT"].map { URL(fileURLWithPath:$0) } ?? root.appendingPathComponent(".runtime/super-resolution/realcugan/realcugan-ncnn-vulkan-20220728-macos")
+let runtimeAssets = root.appendingPathComponent(".runtime/super-resolution/realcugan")
+let releaseAssets = runtimeAssets.appendingPathComponent("realcugan-ncnn-vulkan-20220728-macos")
+let fastPNGAssets = runtimeAssets.appendingPathComponent("fast-png")
+let fastPNGAvailable = fm.isExecutableFile(atPath: fastPNGAssets.appendingPathComponent("realcugan-ncnn-vulkan").path)
+let assets = ProcessInfo.processInfo.environment["KOMA_REALCUGAN_ROOT"].map { URL(fileURLWithPath:$0) }
+    ?? (fastPNGAvailable ? fastPNGAssets : releaseAssets)
 let engine = assets.appendingPathComponent("realcugan-ncnn-vulkan")
 let models = assets.appendingPathComponent("models-se")
 let version = "koma-realcugan-1"

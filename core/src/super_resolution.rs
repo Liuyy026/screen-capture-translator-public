@@ -70,6 +70,14 @@ impl Store{
         let output=temp.path().join("output.png");
         let result=invoke(&exe,&["--input".into(),input.canonicalize()?.to_string_lossy().into(),"--output".into(),output.to_string_lossy().into(),"--width".into(),w.to_string(),"--height".into(),h.to_string(),"--preset".into(),s.preset.clone()]).await?;
         ensure!(result["engine"]==s.engine&&result["width"]==w&&result["height"]==h&&result["elapsed_ms"].is_number(),"增强响应与请求不匹配");
+        if s.engine == "realcugan" {
+            for field in ["engine_sha256", "model_sha256"] {
+                ensure!(
+                    result[field].as_str().is_some() && result[field] == identity["capability"][field],
+                    "Real-CUGAN 运行资源在增强期间发生变化，请重试"
+                );
+            }
+        }
         ensure!(identity["source_sha256"]==format!("{:x}",Sha256::digest(std::fs::read(input)?)),"增强期间原文件发生变化，请重试");
         let check=crate::imaging::decode_color(&output)?;ensure!(check.cols()==w as i32&&check.rows()==h as i32,"增强输出尺寸不匹配");
         crate::persistence::atomic_json(&directory.join("identity.json"),&json!({"identity":identity,"result":result,"output_sha256":format!("{:x}",Sha256::digest(std::fs::read(&output)?))}))?;
