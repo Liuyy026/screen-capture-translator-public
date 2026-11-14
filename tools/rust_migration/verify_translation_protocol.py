@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Compare native translation protocols against the frozen Python workers.
+"""Compare native translation protocols against the current Python workers.
 
-Uses saved page copies and a loopback fake HTTP server only. No live inference,
+Uses generated page fixtures and a loopback fake HTTP server only. No live inference,
 real credentials, original cache writes, or model lifecycle requests.
 """
 import argparse
+from fixtures import make_pages, core_binary
 import copy
 import hashlib
 import importlib.util
@@ -26,15 +27,13 @@ def load(name, path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-root', type=Path, required=True)
-    parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    baseline = args.baseline_root.resolve()
+    baseline = Path(__file__).resolve().parents[2]
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    binary = root / 'core/target/release/koma-core'
+    binary = core_binary(root)
     sys.path.insert(0, str(baseline))
     from backend import worker as old
     from backend.translation_service import TranslationService, TranslationServiceError, normalize_base_url
@@ -42,7 +41,7 @@ def main():
     service_tests = load('baseline_service_tests', baseline / 'tests/test_translation_service.py')
     # Never inherit a user's real secret into test fixtures or native processes.
     os.environ['KOMA_TRANSLATION_API_KEY'] = ''
-    manifest = json.loads(args.manifest.read_text())
+    manifest = make_pages(output/'fixtures')
     def hashes():
         for entry in manifest:
             for field, expected in [('image', 'image_hash'), ('cache', 'cache_hash'), ('original_cache', 'cache_hash')]:
@@ -211,7 +210,7 @@ def main():
     report = {'pages': len(pages), 'protocol_comparisons': protocol_count, 'service_payload_comparisons': payload_count,
               'http_behavior_tests': result.testsRun, 'http_failures': len(result.failures), 'http_errors': len(result.errors),
               'skipped': len(result.skipped), 'native_calls': calls, 'passed': result.wasSuccessful(),
-              'scope': 'protocol, exact prompt strings and loopback HTTP only; orchestration/image encoding not yet migrated',
+              'scope': 'protocol, exact prompt strings and loopback HTTP only; orchestration/image encoding checked separately',
               'input_hashes_unchanged': True}
     (output / 'report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report))

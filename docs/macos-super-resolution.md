@@ -1,5 +1,7 @@
 # macOS 前置可选超分
 
+> 历史记录：本文涉及的阶段性测试/评测脚本已于 2026-11-14 精简。旧命令请使用 [精简前源码](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f)；当前回归入口为 `scripts/check_regressions.py`。本文结果不代表本轮重新验证。
+
 2026-11-08，Rust 候选版。两套本地后端已接入同一流程：
 
 `原图 → 可选 MetalFX / Real-CUGAN → OCR → 翻译 → 清字修补 → Swift 中文绘制`

@@ -5,6 +5,7 @@ Compares requests, page state, every checkpoint, progress and sanitized metrics.
 Model output is deterministic test data; original pages/caches remain read-only.
 """
 import argparse
+from fixtures import make_pages, core_binary
 import copy
 import hashlib
 import json
@@ -89,18 +90,16 @@ class Server:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-root',type=Path,required=True)
-    parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    baseline,output=args.baseline_root.resolve(),args.output.resolve()
+    baseline,output=Path(__file__).resolve().parents[2],args.output.resolve()
     output.mkdir(parents=True,exist_ok=False)
     root=Path(__file__).resolve().parents[2]
-    binary=root/'core/target/release/koma-core'
+    binary=core_binary(root)
     sys.path.insert(0,str(baseline))
     from backend import worker as old
     os.environ['KOMA_TRANSLATION_API_KEY']='fake-secret'
-    manifest=json.loads(args.manifest.read_text())
+    manifest=make_pages(output/'fixtures')
     def hashes():
         for entry in manifest:
             for field,key in [('image','image_hash'),('cache','cache_hash'),('original_cache','cache_hash')]:

@@ -1,8 +1,4 @@
 import copy
-import hashlib
-import json
-import os
-from pathlib import Path
 import unittest
 
 import numpy as np
@@ -93,20 +89,3 @@ class PanelTests(unittest.TestCase):
         ensure_panels(page, image='missing-panel-image.png')
         self.assertNotIn('panels', page)
         self.assertIn('panel_error', page)
-
-    def test_real_page8_panel_order_matches_visual_annotation(self):
-        root = Path(__file__).parents[1]
-        image_dir = Path(os.environ.get('KOMA_TEST_IMAGE_DIR', root/'.runtime/test-assets/images')).expanduser()
-        image = image_dir/'00008.webp'
-        annotation = json.loads((root/'tests/fixtures/page8-panels.json').read_text(encoding='utf-8'))
-        if not image.exists():
-            self.skipTest('Local fixed-set image is not installed; see docs/development.md')
-        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(), annotation['image_sha256'])
-        page = {'blocks': annotation['blocks']}
-        ensure_dialogues(page, image=image)
-        self.assertEqual([set(p['block_ids']) for p in page['panels']],
-                         [set(ids) for ids in annotation['panel_order']])
-        ordered = [b['id'] for b in sorted(page['blocks'], key=lambda b: b['reading_order'])]
-        position = {bid: i for i, bid in enumerate(ordered)}
-        for first, second in zip(annotation['panel_order'], annotation['panel_order'][1:]):
-            self.assertLess(max(position[bid] for bid in first), min(position[bid] for bid in second))

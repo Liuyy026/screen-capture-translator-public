@@ -86,6 +86,6 @@ macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
 
 Completed validation covers 35 real OCR pages, pixel-identical final rendering of 244 existing translations, simulated translation pipelines, controller and real-window flows, restart cache reuse and actual application startup. See the [root results](../README.en.md), [full report](../docs/rust-core-validation.md) and [core tools](../core/README.md).
 
-Private images, translation caches and `.runtime/rust-migration/pages.json` are not in Git. The complete corpus suite requires a local manifest and baselines; cloning alone does not provide these fixtures. `verify_display.py`, `verify_rendered_pages.py` and `run_reader_flow.py` exercise the Rust candidate. Legacy `macos/tools/review_chapter.py` targets the Python reference and stable cache paths; it is not proof of candidate behavior. Test renderers do not constitute an in-app translated-image export feature.
+Run current offline core regressions with `scripts/check_regressions.py --native --swift`; see the [development guide](../docs/development.en.md). Historical corpus, model and screenshot acceptance scripts have been removed; their results remain historical evidence.
 
 The original [November 7 vision report](../docs/macos-vision-1209806-2026-11-07.md) describes the historical Python/Keychain/white-overlay implementation. Current branch behavior is documented here and in the Rust validation report. Windows migration, independent packaging and broader quality evaluation remain pending.

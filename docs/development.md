@@ -4,47 +4,41 @@
 
 以下命令均在仓库根目录运行，使用所选平台的 Python 环境。`backend/`、`scripts/`、`tests/`、`samples/` 为共用内容；Windows 界面测试单独放在 `windows/tests/`。
 
-## 测试文件与 GitHub 提交范围
+## 核心回归测试
 
-`tests/`、`macos/tests/`、`windows/tests/` 和 `core/python/test_model_worker.py` 中的测试代码随源码提交，用于检查翻译、排版、缓存和界面行为。`tests/fixtures/` 保留结构标注和测试占位文字；`samples/` 是项目生成的示例图。
+测试保留翻译协议与失败恢复、手改保护、分镜/对白、清字与排版、缓存边界、任务取消和两端界面行为。测试素材自动生成；不需要私人漫画、历史 manifest 或真实模型服务。
 
-本地漫画原图、OCR/译文缓存、模型、测试输出和覆盖率报告不提交。评测输入与输出应放在已忽略的 `.runtime/` 中；`.gitignore` 也排除了常见测试缓存和报告。应用发行包只应包含运行所需文件，测试代码无需随应用分发。
+| 范围 | 入口 |
+| --- | --- |
+| 共用后端 | `tests/test_worker.py`、`test_translation_service.py`、`test_panels.py`、`test_structure.py`、`test_overlay.py` |
+| macOS 显示与视觉输入 | `macos/tests/test_*.py` |
+| 模型进程协议与数组边界 | `core/python/test_model_worker.py` |
+| Rust 协议、普通/视觉翻译、显示、队列与取消 | `tools/rust_migration/verify_*.py`，复用当前 Python 行为断言和合成素材 |
+| Rust 缓存与原生底层 | `core/src/` 内的单元测试 |
+| Swift 配置、拖动、排版与进程通信 | `macos/tests/*Tests.swift` |
+| Windows Qt 界面与服务选择 | `windows/tests/` |
 
-两项依赖本地固定样本的共用回归测试默认读取以下位置，缺少素材时会显示为跳过：
+使用已安装项目依赖的 Python，在仓库根目录运行：
 
-- `.runtime/test-assets/images/00008.webp`：与 `tests/fixtures/page8-panels.json` 中 SHA-256 一致的原图。
-- `.runtime/test-assets/images/00012.webp` 及 `.runtime/test-assets/cache/e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json`：对应原图及 OCR 缓存。
-
-可通过 `KOMA_TEST_IMAGE_DIR`、`KOMA_TEST_CACHE_DIR` 指定已有素材目录，无需复制或上传原图。跳过本地素材测试不代表这些项目已验证。
-
-三个依赖旧素材目录的 Real-CUGAN 阶段性验收脚本已从当前源码移除，历史源码与结果见 [Real-CUGAN 交接记录](super-resolution-realcugan-handoff.md)。当前双引擎集成检查保留在 `tools/super_resolution/verify_integrated_helpers.py`，取消流程检查保留在 `tools/rust_migration/verify_sr_cancellation.py`；这些检查不等同于旧脚本的全部 GPU 实测。
-
-## Ollama 与模型
-
-### 对白单元与 A/B 验证
-
-后端缓存会保存 `dialogues`、成员块编号、阅读顺序和 `diagnostics`。翻译时可选择按文字块或完整对白单元组织请求：
-
-```powershell
-python backend\worker.py --image page.webp --operation translate --translation-unit dialogues --status status.json
+```sh
+python scripts/check_regressions.py
 ```
 
-固定测试集可分别用 `--translation-unit blocks` 与 `--translation-unit dialogues` 运行，再用 `scripts\compare_translation_units.py` 比较块级和对白级成功率。已有缓存可用 `scripts\migrate_structure.py` 补齐结构字段。
+原生依赖准备好后构建并运行 Rust 测试，再启用 Rust/Swift 回归：
 
-结构评估可用 `python scripts/evaluate_structure.py <缓存目录> --output structure-report.json`。该命令只在内存中迁移旧结构，保留原始缓存，报告每页 OCR 指纹、成员归属、阅读顺序连续性和需复核候选。连续性是结构完整性检查，不等同于人工阅读顺序正确率。
+```sh
+python3 tools/rust_migration/cargo.py test -- --test-threads=1
+python3 tools/rust_migration/cargo.py build
+python scripts/check_regressions.py --native --swift
+```
 
-完整 A/B 可使用 `python scripts/run_translation_ab.py <原始缓存目录> <图片目录> <新的输出目录>`。脚本清空副本中的机器译文，固定 OCR、记录图片和模型摘要，逐页交替运行 blocks/dialogues，并保存每次请求耗时。输出目录必须是新目录，防止历史缓存冒充新推理。之后运行 `python scripts/render_translation_ab.py <输出目录>` 检查两组全部页面的布局和轮廓约束。此检查不能代替人工判断气泡是否误检或画面是否被误伤。
+`--native` 默认使用 `core/target/debug/koma-core`，可用 `KOMA_TEST_CORE` 指向另一个与当前源码一致的已构建程序；`--swift` 需要 macOS/Xcode 命令行工具。安装 PySide6 后可添加 `--windows` 运行 Qt 测试。请求的测试缺少依赖时会报错，不会伪装成跳过后通过。临时输出在 `.runtime/` 中并在统一入口退出时清理；单独运行验证器可指定新的 `--output` 目录以保留报告。
 
-对白模式以 `dN` 为翻译目标，缓存 `full_translation`、`mapping_status` 及每个成员的结果。只有一个源块时可直接映射；多行一一对应时标为 `lines_unreviewed`；无法确认拆分时标为 `whole_only`，成员译文留空，整句仅在成员完全匹配的可信区域显示。暂不对无明确拆分的整句按字数硬切，逐块模式保留为回退。页面文字、拟声词和标点只标候选类型，不因短语或拉丁字母启发式直接丢弃。
+测试源码随 Git 提交；模型、运行缓存、覆盖率报告与本地图片不提交。`.gitignore` 保留相应排除规则。实际模型质量、真实 GPU 推理和完整窗口人工体验不属于这套离线核心回归。
 
-固定 62 页的 v5 结果与局限见 [结构与翻译评估记录](structure-evaluation-2026-09-14.md)。v5 A/B 中对白模式自动完整率为 589/604（97.5%），逐块模式为 543/604（89.9%）；默认仍为逐块模式，因为自动完整率不等于语义准确率。
+## 历史验收与评测
 
-分镜 v5 的快速回归可用 `python scripts/run_translation_ab.py <原始缓存目录> <图片目录> <新的输出目录> --limit 3`，再运行 `python scripts/render_translation_ab.py <输出目录>`。历史 3 页回归中对白单元自动完成率为 16/17，逐块为 15/17；两组均无轮廓外绘制像素。该数字只用于协议和排版回归。
-
-人工结构标注可先运行 `python scripts/annotate_structure.py <缓存页.json> <标注.json> --init`，在模板中填写 `expected_dialogues`、`expected_panel_order` 或按块填写 `expected_block_attributes`（`vertical`/`text_kind`），再用 `--score` 计算严格精确匹配率、顺序无关的最佳 Jaccard 覆盖率和属性字段准确率。已有标注文件默认不会被 `--init` 覆盖，确需重建时显式加 `--force`。未填写的模板不会生成虚假的准确率；两类指标分别保留，不能互相替代。
-
-批量汇总使用 `python scripts/score_structure_annotations.py <标注目录> --output annotation-score.json`。未完成标注的页面会单独计数，不参与平均值；未知块编号、重复归属和空单元会作为 `label_warnings` 报告，避免标签错误被误当成模型准确率。
-
+2026-11-14 精简了旧模型/A-B/标注评测工具、35 页迁移对照、截图验收以及依赖历史素材的专项脚本。相关历史源码可从 [精简前版本](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f) 恢复，结果记录仍保留在 `docs/` 和 `进度汇总/`；旧报告中的命令只适用于对应历史版本，不能视为当前测试入口或本轮验证结果。
 
 ## 本地模型服务
 

@@ -1,5 +1,7 @@
 # 前置可选超分：MetalFX 与公共集成交接
 
+> 历史记录：本文涉及的阶段性测试/评测脚本已于 2026-11-14 精简。旧命令请使用 [精简前源码](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f)；当前回归入口为 `scripts/check_regressions.py`。本文结果不代表本轮重新验证。
+
 日期：2026-11-08。独占副本：`/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/metalfx`。
 基线：`d24a9325699d8b9102c354b46025ed42dce22996`。交付提交为包含本文件的本副本 Git HEAD；交接时可 `git rev-parse HEAD` 获取。
 

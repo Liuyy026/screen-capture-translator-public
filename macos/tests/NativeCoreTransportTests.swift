@@ -2,7 +2,7 @@ import Foundation
 
 @main struct NativeCoreTransportTests {
     @MainActor static func main() async throws {
-        let root = URL(fileURLWithPath: CommandLine.arguments[1])
+        let python = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let fake = output.appendingPathComponent("peer.py")
@@ -33,7 +33,7 @@ for line in sys.stdin:
         threading.Thread(target=run,args=(r,),daemon=True).start()
 Path(__file__).with_suffix('.closed').write_text('closed')
 """#.write(to: fake, atomically: true, encoding: .utf8)
-        let service = NativeCoreService(executable: root.appendingPathComponent("macos/.venv/bin/python"),
+        let service = NativeCoreService(executable: python,
                                         arguments: [fake.path], logURL: output.appendingPathComponent("transport.log"))
         func object(_ data: Data) throws -> [String: Any] { try JSONSerialization.jsonObject(with: data) as! [String: Any] }
         // Concurrent responses must match their request IDs, even while a large
@@ -63,23 +63,6 @@ Path(__file__).with_suffix('.closed').write_text('closed')
         }
         precondition(FileManager.default.fileExists(atPath: closed.path))
 
-        let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(".runtime/rust-migration/pages.json"))) as! [[String: Any]]
-        let seed = URL(fileURLWithPath: manifest[0]["cache"] as! String).deletingLastPathComponent().deletingLastPathComponent()
-        let native = NativeCoreService(root: root, cache: output.appendingPathComponent("pages"),
-                                       assets: output.appendingPathComponent("assets"), seed: seed)
-        let health = try object(await native.request("health"))
-        precondition(health["protocol"] as? Int == 1)
-        for page in manifest {
-            let loaded = try object(await native.request("load_page", values: ["image":page["image"]!, "mode":"vision"]))
-            let copy = try Data(contentsOf: URL(fileURLWithPath: loaded["cache"] as! String))
-            let original = try Data(contentsOf: URL(fileURLWithPath: page["cache"] as! String))
-            precondition(copy == original)
-        }
-        let result = try object(await native.request("process", values: ["images":manifest.map {$0["image"]!},
-            "mode":"vision", "operation":"ocr", "model":"unused"]))
-        let pages = result["pages"] as! [[String: Any]]
-        precondition(pages.count == 35 && pages.allSatisfy {$0["ok"] as? Bool == true})
-        native.shutdown()
-        print("Native Swift transport passed: multiplexing, large reply, cancellation, error recovery, EOF, 35-page real Rust queue.")
+        print("Native Swift transport passed: multiplexing, large reply, cancellation, error recovery and EOF.")
     }
 }

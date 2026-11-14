@@ -164,8 +164,8 @@ python3 macos/scripts/setup_reading_model.py
 
 旧缓存中的白色矩形不会直接作为回退覆盖；打开页面时重新检查背景和文字范围。译文不完整、排版空间不足或背景不可靠时保留原图，右侧明确提示“已有译文暂未覆盖”，并显示完整译文。此项改善显示，不自动修正 OCR 或翻译语义，也不保证手写字、复杂背景、漏检文字和所有异形气泡都能覆盖。
 
-候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。`macos/backend/reading_overlay.py` 和 `macos/tools/review_chapter.py` 保留作 Python 参照工具，其默认缓存路径仍属于稳定版，不能用它们证明 Rust 候选流程通过。
+候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。`macos/backend/reading_overlay.py` 保留作行为参照；原生回归通过实际 Rust CLI 复用其合成输入断言。
 
-Rust 对照工具位于 `tools/rust_migration/`：`verify_display.py` 检查完整显示输出，`verify_rendered_pages.py` 检查最终 Swift 像素，`run_reader_flow.py` 检查独立窗口流程。它们需要本地准备的 manifest、基线和已安装模型；运行会生成独立测试结果，不提供产品界面的汉化导出功能。
+离线核心回归通过 `scripts/check_regressions.py --native --swift` 运行，参见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
 
 模型复用会保留内存；退出候选应用时清理所属推理进程。Rust 只管理自己启动的、无密钥且位于既定 `127.0.0.1:11439` 地址的本地 Ollama；已有 Ollama/oMLX 服务不被接管。

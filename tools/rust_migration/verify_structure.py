@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Differential checks against frozen Python, never touching original caches.
+"""Differential checks against current Python, never touching original caches.
 
-Runs all 35 pages through cold reconstruction, cached reuse and no-image reuse;
+Runs synthetic pages through cold reconstruction, cached reuse and no-image reuse;
 then executes baseline behavior tests through the native implementation. Python
 is the test oracle only, not part of the native processing path.
 """
 import argparse
+from fixtures import make_pages, core_binary
 import copy
 import hashlib
 import importlib.util
@@ -18,12 +19,10 @@ import unittest
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-root', type=Path, required=True)
-    parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    baseline = args.baseline_root.resolve()
+    baseline = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     sys.path.insert(0, str(baseline))
@@ -49,7 +48,7 @@ def main():
             result = fn(expected, **kwargs)
         cache = prefix.with_suffix('.input.json')
         cache.write_text(json.dumps(page, ensure_ascii=False))
-        command = [str(root/'core/target/debug/koma-core'),
+        command = [str(core_binary(root)),
                    'panel-probe' if panel_only else 'structure-probe', '--cache', str(cache)]
         if not panel_only:
             command += ['--mode', mode]
@@ -68,7 +67,7 @@ def main():
         if mode != 'sync':
             return page.get('dialogues', [])
 
-    pages = json.loads(args.manifest.read_text())
+    pages = make_pages(output/'fixtures')
     for item in pages:
         page = json.loads(Path(item['cache']).read_text())
         # Force both implementations to calculate, not trust an old signature.

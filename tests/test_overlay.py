@@ -1,7 +1,5 @@
 import unittest
 import importlib.util
-import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -27,42 +25,6 @@ class OverlayTests(unittest.TestCase):
         height = points[:, 1].max() - points[:, 1].min()
         self.assertLessEqual(width, (box[2] - box[0]) * 2.6)
         self.assertLessEqual(height, (box[3] - box[1]) * 2.6)
-
-    def test_real_page_00012_regions_are_separated_and_safe(self):
-        root = Path(__file__).parents[1]
-        image_dir = Path(os.environ.get('KOMA_TEST_IMAGE_DIR', root/'.runtime/test-assets/images')).expanduser()
-        cache_dir = Path(os.environ.get('KOMA_TEST_CACHE_DIR', root/'.runtime/test-assets/cache')).expanduser()
-        image = image_dir/'00012.webp'
-        cache = cache_dir/'e63072ae9b114c2ae42bab145bec866236632e8c61b1ddde6f31d897aff71bb1.json'
-        if not image.exists() or not cache.exists():
-            self.skipTest("real-page regression assets are unavailable; see docs/development.md")
-        page = json.loads(cache.read_text(encoding="utf-8"))
-        page.pop("overlay_signature", None)
-        ensure_page_overlays(page, image=image)
-        blocks = {str(b["id"]): b for b in page["blocks"]}
-        self.assertEqual(blocks["3"]["overlay"], "balloon")
-        self.assertEqual(blocks["4"]["overlay"], "balloon")
-        self.assertEqual(blocks["7"]["overlay"], "balloon")
-        self.assertEqual(len({blocks[str(i)]["overlay_region_id"] for i in (3, 4, 7)}), 3)
-        self.assertEqual(blocks["5"]["overlay_region_id"], blocks["6"]["overlay_region_id"])
-        self.assertIsNotNone(blocks["5"]["overlay_region_id"])
-        self.assertEqual(blocks["5"]["overlay"], "balloon")
-        joint = next(region for region in page["overlay_regions"]
-                     if region["id"] == blocks["5"]["overlay_region_id"])
-        self.assertEqual(set(joint["block_ids"]), {"5", "6"})
-        self.assertEqual(blocks["2"]["overlay"], "uncertain")
-        self.assertEqual(blocks["9"]["overlay"], "uncertain")
-        for region in page["overlay_regions"]:
-            points = np.asarray(region.get("points") or [], dtype=float)
-            if points.size == 0:
-                continue
-            region_width = points[:, 0].max() - points[:, 0].min()
-            region_height = points[:, 1].max() - points[:, 1].min()
-            member_boxes = np.asarray([blocks[i]["box"] for i in region["block_ids"]])
-            union_width = member_boxes[:, 2].max() - member_boxes[:, 0].min()
-            union_height = member_boxes[:, 3].max() - member_boxes[:, 1].min()
-            self.assertLessEqual(region_width, union_width * 2.6 + 1)
-            self.assertLessEqual(region_height, union_height * 2.6 + 1)
 
     def test_plain_background_is_uncertain(self):
         page = {"blocks": [{"id": "1", "box": [170, 125, 230, 175], "source": "これは文"}]}

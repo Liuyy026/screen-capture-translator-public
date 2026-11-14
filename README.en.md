@@ -102,8 +102,8 @@ core/                   Rust core, native bridge and Python model adapter
 macos/                  Swift UI, candidate build and model environment
 windows/                Original Python Windows reader
 backend/                Original backend retained for stable/reference use
-tools/rust_migration/    Build, differential validation and benchmark tools
-scripts/ tests/          Original model preparation, evaluation and tests
+tools/rust_migration/    Build tools and offline core regressions
+scripts/ tests/          Model preparation, cache migration and core tests
 docs/                   Architecture, migration and validation
 进度汇总/                Current progress and dated historical records
 ```

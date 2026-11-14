@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare complete native visual translation using fixed loopback responses."""
 import argparse
+from fixtures import make_pages, core_binary
 import copy
 import hashlib
 import importlib.util
@@ -72,20 +73,18 @@ def comparable(value):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-root',type=Path,required=True)
-    parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    root=Path(__file__).resolve().parents[2];baseline=args.baseline_root.resolve()
+    root=Path(__file__).resolve().parents[2];baseline=Path(__file__).resolve().parents[2]
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
     sys.path.insert(0,str(baseline))
     spec=importlib.util.spec_from_file_location('baseline_visual_worker',baseline/'macos/backend/vision_worker.py')
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
     from backend.translation_service import TranslationService
     from PIL import Image
-    binary=root/'core/target/release/koma-core'
+    binary=core_binary(root)
     os.environ['KOMA_TRANSLATION_API_KEY']='fake-secret'
-    manifest=json.loads(args.manifest.read_text())
+    manifest=make_pages(output/'fixtures')
     def hashes():
         for entry in manifest:
             for field,key in [('image','image_hash'),('cache','cache_hash'),('original_cache','cache_hash')]:

@@ -5,6 +5,7 @@ Only test transport uses Python; the old reading_regions function is replaced
 by Rust calls, including the old CLI test. No model weights are loaded.
 """
 import argparse
+from fixtures import core_binary
 import importlib.util
 import json
 from pathlib import Path
@@ -15,17 +16,16 @@ import unittest
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-root',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    baseline = args.baseline_root.resolve()
+    baseline = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True,exist_ok=False)
     sys.path.insert(0,str(baseline))
     import cv2
     import numpy as np
-    binary = root/'core/target/release/koma-core'
+    binary = core_binary(root)
     spec = importlib.util.spec_from_file_location('native_reader_assertions',baseline/'macos/tests/test_reading_overlay.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

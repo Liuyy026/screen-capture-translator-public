@@ -1,5 +1,7 @@
 # 1209806 整章中文填充检查与修复
 
+> 历史记录：本文涉及的阶段性测试/评测脚本已于 2026-11-14 精简。旧命令请使用 [精简前源码](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f)；当前回归入口为 `scripts/check_regressions.py`。本文结果不代表本轮重新验证。
+
 检查对象：35 张图片及已有视觉翻译缓存。基线为 Git `a550502`。本轮不重译、不修改漫画原图或已有日文/中文缓存；显示结果单独重建。
 
 ## 方法与边界

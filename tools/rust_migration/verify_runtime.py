@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Exercise the real JSONL daemon, queue, cancellation and isolated caches.
 
-Fake inference and loopback HTTP cover failure/lifecycle cases. --display also
-runs all corpus pages with installed detector/LaMa weights and compares frozen
-display replies. It never contacts a shared translation server.
+Synthetic pages, fake inference and loopback HTTP cover failure/lifecycle
+cases. No private corpus, model weights or shared translation server is used.
 """
 import argparse
-import base64
+from fixtures import make_pages, core_binary
 import hashlib
 import json
 import os
@@ -24,7 +23,7 @@ class Client:
     def __init__(self, root, directory, weights, worker, seed=None):
         directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
-        command = [str(root/'core/target/release/koma-core'), 'serve',
+        command = [str(core_binary(root)), 'serve',
                    '--cache-root', str(directory/'pages'), '--assets-root', str(directory/'assets'),
                    '--python', sys.executable, '--worker', str(worker), '--weights', str(weights)]
         if seed: command += ['--seed-root', str(seed)]
@@ -125,15 +124,12 @@ def dead(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--display', action='store_true')
-    parser.add_argument('--baseline-results', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    pages = json.loads(args.manifest.read_text())
+    pages = make_pages(output/'fixtures')
     def hashes():
         for p in pages:
             for field, key in [('image','image_hash'),('cache','cache_hash'),('original_cache','cache_hash')]:
@@ -157,12 +153,12 @@ def main():
             assert Path(result['cache']).read_bytes() == Path(p['cache']).read_bytes()
             assert Path(result['cache']).stat().st_mode & 0o777 == 0o600
         assert not (weights/'calls.jsonl').exists()
-        passed('35 stable caches copied byte-for-byte, private and lazy', pages=len(loaded))
+        passed('Synthetic caches copied byte-for-byte, private and lazy', pages=len(loaded))
         job = client.send('process', images=[p['image'] for p in pages], operation='ocr', mode='vision', model='unused')
         reply = client.wait(job)['result']
-        assert len(reply['pages']) == 35 and all(p['ok'] for p in reply['pages'])
+        assert len(reply['pages']) == len(pages) and all(p['ok'] for p in reply['pages'])
         assert not (weights/'calls.jsonl').exists()
-        passed('35-page Rust queue reuses OCR without inference')
+        passed('Synthetic Rust queue reuses OCR without inference')
         first = client.call('load_page', image=pages[0]['image'], mode='vision')
         original = first['page']
         block_id = original['blocks'][0]['id']
@@ -260,36 +256,9 @@ def main():
     assert dead(pid)
     (weights/'hang').unlink()
     passed('stdin EOF cancels running inference and exits cleanly')
-    if args.display:
-        assert args.baseline_results
-        import cv2
-        import numpy as np
-        real = Client(root, output/'real-display', root/'.models', root/'core/python/model_worker.py', seed)
-        try:
-            for p in pages:
-                cache = real.call('load_page', image=p['image'], mode='vision')['cache']
-                request = dict(image=p['image'], cache=cache)
-                actual = real.wait(real.send('display', **request), timeout=180)['result']
-                assert not actual['cache_hit']
-                expected = json.loads((args.baseline_results/'regions'/f"{p['page']:05}.json").read_text())
-                reply = actual['reply']
-                (real.directory/f"{p['page']:05}.json").write_text(json.dumps(reply))
-                a_png = [r.pop('background_png') for r in reply['regions']]
-                b_png = [r.pop('background_png') for r in expected['regions']]
-                assert reply == expected
-                for a,b in zip(a_png,b_png):
-                    decode = lambda s:cv2.imdecode(np.frombuffer(base64.b64decode(s),np.uint8),cv2.IMREAD_UNCHANGED)
-                    assert np.array_equal(decode(a),decode(b))
-                for _ in range(3):
-                    warm = real.call('display', **request)
-                    assert warm['cache_hit']
-                    assert warm['reply'] == json.loads((real.directory/f"{p['page']:05}.json").read_text())
-                passed('real daemon display cold/warm parity', page=p['page'], regions=len(a_png))
-        finally:
-            real.close()
     hashes()
     report = dict(passed=True, records=records, original_inputs_unchanged=True,
-                  scope='Rust daemon lifecycle, queue, private edits and cache; real display only with --display')
+                  scope='Rust daemon lifecycle, queue, private edits and cache; synthetic fixtures and simulated inference only')
     (output/'report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({k:v for k,v in report.items() if k!='records'}))
 
