@@ -13,8 +13,14 @@ struct TextBlock: Codable, Identifiable {
     var edited: Bool
     var vision_source: String?
     var quality_warnings: [String]?
+    var keep_original: Bool?
+    var overlay: String?
+    var text_kind: String?
+
+    var keepsOriginal: Bool { keep_original == true }
 
     var needsReadingOverlay: Bool {
+        guard !keepsOriginal else { return false }
         let original = source.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         let translated = translation.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         return !translated.isEmpty && error.isEmpty && original != translated
@@ -79,7 +85,7 @@ enum ReadingLayout {
                   region.rectangle != nil else { return nil }
             let members = region.block_ids.compactMap { id in page.blocks.first { $0.id == id } }
             guard members.count == region.block_ids.count,
-                  members.allSatisfy({ !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.error.isEmpty }) else { return nil }
+                  members.allSatisfy({ !$0.keepsOriginal && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.error.isEmpty }) else { return nil }
             if let encoded = region.background_png {
                 guard let box = region.background_box, box.count == 4, box.allSatisfy(\.isFinite),
                       box[2] > box[0], box[3] > box[1], let imageData = Data(base64Encoded: encoded),

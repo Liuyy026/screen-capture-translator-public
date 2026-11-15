@@ -27,13 +27,18 @@ let assets = ProcessInfo.processInfo.environment["KOMA_REALCUGAN_ROOT"].map { UR
     ?? (fastPNGAvailable ? fastPNGAssets : releaseAssets)
 let engine = assets.appendingPathComponent("realcugan-ncnn-vulkan")
 let models = assets.appendingPathComponent("models-se")
-let version = "koma-realcugan-1"
+// SE layers depend on page-wide feature averages. The upstream default (3)
+// estimates all four averages from sparse 32px tiles; on dense screentones it
+// can wash out detail or turn a monochrome page green/yellow. Mode 1 computes
+// and synchronizes each SE stage over every tile before the next stage.
+let syncgap = 1
+let version = "koma-realcugan-2"
 let presets = ["conservative", "standard", "denoise"]
 let required = ["up2x-no-denoise", "up2x-conservative", "up2x-denoise3x", "up3x-no-denoise", "up3x-conservative", "up3x-denoise3x", "up4x-no-denoise", "up4x-conservative", "up4x-denoise3x"]
 let available = fm.isExecutableFile(atPath:engine.path) && required.allSatisfy { name in ["bin", "param"].allSatisfy { fm.fileExists(atPath:models.appendingPathComponent("\(name).\($0)").path) } }
 let modelHashes = required.flatMap { name in ["bin", "param"].map { hash(models.appendingPathComponent("\(name).\($0)")) } }.joined()
 let identity = SHA256.hash(data:Data(modelHashes.utf8)).map { String(format:"%02x", $0) }.joined()
-if CommandLine.arguments.dropFirst() == ["--capabilities"] { json(["engine":"realcugan", "available":available, "presets":available ? presets : [], "reason":available ? "" : "Run macos/scripts/prepare_realcugan.sh", "backend_version":version, "engine_sha256":hash(engine), "model_manifest_sha256":identity,"model_sha256":identity, "models":"models-se/20220728", "scales":[2,3,4]]); exit(0) }
+if CommandLine.arguments.dropFirst() == ["--capabilities"] { json(["engine":"realcugan", "available":available, "presets":available ? presets : [], "reason":available ? "" : "Run macos/scripts/prepare_realcugan.sh", "backend_version":version, "engine_sha256":hash(engine), "model_manifest_sha256":identity,"model_sha256":identity, "models":"models-se/20220728", "scales":[2,3,4], "syncgap":syncgap]); exit(0) }
 let args = Array(CommandLine.arguments.dropFirst())
 var opts = [String:String]()
 guard args.count == 10 else { fail("Expected --input ABS --output ABS --width W --height H --preset conservative|standard|denoise") }
@@ -55,7 +60,7 @@ cleanupDirectory = tmp
 let normalized = tmp.appendingPathComponent("input.png"), enlarged = tmp.appendingPathComponent("inferred.png")
 let color = CGColorSpace(name:CGColorSpace.sRGB)!
 do { try context.writePNGRepresentation(of:source, to:normalized, format:.RGBA8, colorSpace:color) } catch { fail(error.localizedDescription) }
-let engineArguments = [engine.path,"-i",normalized.path,"-o",enlarged.path,"-m",models.path,"-s",String(scale),"-n",String(noise),"-t","128","-j","1:1:1","-g","0"]
+let engineArguments = [engine.path,"-i",normalized.path,"-o",enlarged.path,"-m",models.path,"-s",String(scale),"-n",String(noise),"-c",String(syncgap),"-t","128","-j","1:1:1","-g","0"]
 // Foundation Process creates a separate process group on macOS. Use posix_spawn
 // without SETPGROUP so the engine inherits Rust's per-job group even for SIGKILL.
 var actions: posix_spawn_file_actions_t?
@@ -102,4 +107,4 @@ do {
     try fm.copyItem(at:finalPNG, to:outputURL)
 } catch { fail(error.localizedDescription) }
 if cancelled != 0 { try? fm.removeItem(at:outputURL); exit(128 + cancelled) }
-json(["engine":"realcugan","width":width,"height":height,"elapsed_ms":Date().timeIntervalSince(start)*1000,"preset":preset,"scale":scale,"backend_version":version,"model_manifest_sha256":identity,"model_sha256":identity,"engine_sha256":hash(engine)])
+json(["engine":"realcugan","width":width,"height":height,"elapsed_ms":Date().timeIntervalSince(start)*1000,"preset":preset,"scale":scale,"backend_version":version,"model_manifest_sha256":identity,"model_sha256":identity,"engine_sha256":hash(engine),"syncgap":syncgap])

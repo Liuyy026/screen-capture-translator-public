@@ -2,19 +2,19 @@
 
 > 历史记录：本文涉及的阶段性测试/评测脚本已于 2026-11-14 精简。旧命令请使用 [精简前源码](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f)；当前回归入口为 `scripts/check_regressions.py`。本文结果不代表本轮重新验证。
 
-2026-11-08，Rust 候选版。两套本地后端已接入同一流程：
-
-`原图 → 可选 MetalFX / Real-CUGAN → OCR → 翻译 → 清字修补 → Swift 中文绘制`
+macOS 阅读器可用 MetalFX 或 Real-CUGAN 生成增强图。首次识别可使用增强图，已有识别和译文随原图复用，中文按当前底图的像素尺寸绘制。
 
 ## 使用
 
-退出已运行的 Rust 候选版后，用仓库根目录的 `启动 Rust 候选版.command` 重新打开。右侧「前置增强」可选关闭、MetalFX 空间超分、Real-CUGAN。目标为 1440 或 2160 像素，可按长边或高度计算；等比例放大，已达目标默认跳过。
+顶部「处理设置」中的「前置增强」可选关闭、MetalFX 或 Real-CUGAN。目标为 2560 或 3840 像素，默认 2560。默认按长边等比例放大，也可按高度设置目标。已达目标时使用原图。
 
 - MetalFX 只提供标准预设，使用真实 spatial scaler，无需权重下载。
 - Real-CUGAN 提供保守、标准、降噪，使用 models-se 对应模型和 2/3/4 倍推理，必要时 Lanczos 缩小到指定尺寸。超出最大 4 倍的请求明确失败。
 - 初始关闭。增强选项为当前会话设置，重开应用后需重新选择。
-- 开启后「增强原文」显示增强后的原文页面，「中文」显示基于该图识别与翻译的结果。
-- 切换后端、尺寸或预设时使用各自的识别和译文缓存。首次选择新的处理方式，需要重新执行识别/翻译；原图的人工修改不会自动迁移到新结果，也不会被覆盖。
+- 「增强原文」显示增强后的页面。「中文」按当前底图尺寸绘制这页已有的译文。
+- 切换后端、尺寸或预设会复用同一原图在当前翻译方式下的识别、译文、手改和保留原框设置。首次识别仍可使用当时的增强图。
+- 底部「本页诊断」显示当前图像的宽 × 高（px），以及超分、识别、翻译和回填的状态。点击有问题的对白可定位右侧编辑框。
+- 「整章超分」按当前设置生成整章增强图片。前置增强关闭时，整章超分和「导出漫画」均使用 MetalFX。导出使用已有译文，并保留指定页面的章节页码。参见[导出操作](../macos/README.md#导出漫画)。
 - 停止按钮覆盖页面增强及处理队列。失败时保留原图并说明错误，不静默切换后端。
 
 此版本不提供后置增强，不把两次超分串联使用。原图文件始终只读。
@@ -25,11 +25,13 @@
 - `macos/tools/RealCUGANUpscaler.swift` → `macos/.build/koma-sr-realcugan`，调用原生 arm64 ncnn/MoltenVK 程序。
 - `core/src/super_resolution.rs` 管理统一协议、尺寸、缓存、输出校验、超时与取消；Rust 在 OCR 前选择有效图。
 - `macos/scripts/build.sh` 构建两套 helper 和候选应用。Real-CUGAN 资源缺失不影响编译，但能力检查会显示不可用。
-- 初次准备 Real-CUGAN：`bash macos/scripts/prepare_realcugan.sh`。发行包 SHA256 固定，资源仅写入本 checkout 的 `.runtime/super-resolution/realcugan/`。本机已从独立验证副本复制已校验的引擎、模型和来源清单，无需再次下载。
+- 首次准备 Real-CUGAN 可运行 `bash macos/scripts/prepare_realcugan.sh`。脚本校验发行包的 SHA256，并把引擎和模型放在当前仓库的 `.runtime/super-resolution/realcugan/`。
 - 超分运行不依赖 Python；现有 OCR、背景修补仍使用其原有 Python 模型适配器。准备脚本和测试脚本可以使用 Python。
-- 仍是依赖项目目录的本地候选版，并非可独立分发的安装包；没有修改稳定版或 Windows。
+- 当前说明适用于 `main` 中的 macOS 源码构建，应用依赖仓库目录和本机运行环境。
 
-默认候选数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`，增强 OCR/译文在 `pages/enhanced-v1/<identity>/`，视觉模式另有 `vision-v1/` 子目录。缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份；命中时检查输出内容哈希及尺寸。程序中断留下的临时文件不会作为有效结果使用。
+默认候选数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`。识别和译文按原图内容保存到 `pages/` 或 `pages/vision-v1/`。缺少对应记录时，可从 `pages/enhanced-v1/` 中根据增强元数据核对并导入一份旧结果，保留旧记录及原坐标。图片缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份，命中时检查输出内容哈希及尺寸。
+
+Real-CUGAN 分块使用精确的全图特征同步（`-c 1`），减少粗略同步在密集网点漫画上引起的偏色与模糊。更新 helper 后会重建对应的增强图，已保存的 OCR、译文和手改可继续复用。参数定义见[上游 Real-CUGAN 说明](https://github.com/nihui/realcugan-ncnn-vulkan#full-usages)。
 
 ## Real-CUGAN 无损 PNG 加速
 
@@ -38,18 +40,16 @@
 - 源码开关见 [上游补丁](../macos/patches/realcugan-fast-png.patch)，[构建脚本](../macos/scripts/build_realcugan_source.sh)分别编译基线与优化版。复现此次结果使用 Vulkan SDK 1.2.162.0、静态 OpenMP 11 和 macOS 11 部署目标。本机已将静态库与头文件放入 `.runtime/super-resolution/realcugan/source-build/`。
 - 完成本地验证后，把构建输出的 `fast/realcugan-ncnn-vulkan` 放入运行资源的 `fast-png/`，并让其中的 `models-se` 指向原发行包的模型目录。运行 `macos/scripts/build_realcugan.sh` 构建 helper 并检查当前选中的引擎 SHA256。本机已完成该步骤，运行资源的 `fast-png/manifest.json` 记录编译来源和校验值。
 - 独立副本的七组 `standard`、128 分块对照中，纯编码耗时减少 5.9%–11.9%，整页耗时减少 1.9%–8.2%。七组输出与原发行版逐像素一致，最终 PNG 文件哈希也一致。主项目本地同步验收与独立计时报告见 `.runtime/super-resolution/realcugan/fast-png-sync-review/`。
-- 引擎和 helper 身份参与缓存键。首次用新版处理时会建立新的增强结果和对应页面缓存，既有缓存及手改记录保留。增强过程中切换运行资源时，该次请求会要求重试。
+- 引擎和 helper 身份参与图片缓存键，新版会生成对应的增强图片。增强过程中切换运行资源时，该次请求会要求重试。
 
 ## 缓存容量与自动清理
 
-默认策略已在 Mac Rust 候选版启用，无需额外开关：
-
-两套额度独立计算，互不占用：
+macOS 阅读器默认分别计算以下两项缓存额度。
 
 | 缓存 | 上限 | 超限后清到 | 范围 |
 | --- | ---: | ---: | --- |
 | 图片 | 5 GB | 4.5 GB | MetalFX、Real-CUGAN、清字蒙版与显示结果合计 |
-| 识别与译文 | 500 MB | 450 MB | 普通、视觉辅助、增强后各版本的整页 OCR/译文 JSON 合计 |
+| 识别与译文 | 500 MB | 450 MB | 普通、视觉辅助和旧版增强结果的整页 OCR/译文 JSON 合计 |
 
 GB/MB 使用十进制字节。达到上限不清理；超过时按最近使用时间淘汰，保留约 10% 空间，避免频繁在上限附近反复生成、删除。
 - **30 天未使用自动过期**，按最后使用时间计算，而非单看创建日期。读取命中的增强图、显示缓存、蒙版和识别/译文记录会续期；旧版本没有访问记录时，从现有文件修改时间开始计算。
@@ -57,14 +57,14 @@ GB/MB 使用十进制字节。达到上限不清理；超过时按最近使用�
 - 图片范围：`super-resolution-v1/<identity>/` 中完整、可识别的增强图片条目，以及 `reading-native-v1/pages/`、`reading-native-v1/masks/` 中按内容键命名的可重建缓存。
 - 识别/译文范围：`pages/<hash>.json`、`pages/vision-v1/<hash>.json`、`pages/enhanced-v1/<identity>/<hash>.json` 及其 `vision-v1/` 子目录。仅自动生成且具有明确来源标记的页面允许自动淘汰；清除后需要重新识别和翻译（若存在稳定版种子缓存，原有复用逻辑仍适用）。
 - **不清理**原图、手改页面、来源无法确认的旧记录、模型、连接配置、独立实验副本、构建结果或测试报告。两项限额不是整个项目或应用数据目录的总大小上限。
-- 新识别页面带 `cache_retention={version:1,kind:automatic}`；修改日文原文或译文后，整页改为 `kind:manual`，即使块级 `edited=false`（例如只修正原文）也保留。任一块有手改标记同样保护整页；重新翻译不会撤销整页手改保护。
+- 新识别页面带 `cache_retention={version:1,kind:automatic}`。修改日文原文、译文或「保留原框」状态会将整页标为 `kind:manual`。任一块有手改标记同样保护整页，重新翻译后保护仍生效。
 - 旧版没有可靠标记来区分自动 OCR 与人工修正原文，所以不从“edited=false”推断旧记录可删。未标记旧记录、损坏记录、不支持的格式和大于 16 MiB 的异常记录保守保留，不自动补写 automatic 标记。
 - 后台启动时、逐页处理及请求完成后检查；后台保持运行时，每 60 秒再检查一次。应用关闭期间不运行清理，下一次启动再检查。
 - 正在读写缓存的任务会阻止清理；当前查看的增强图及译文记录单独保护。译文使用独立锁文件，原子保存手改内容时仍保持保护。进程间文件锁同时保护共享这些缓存目录的其他新版候选进程。取消请求或进程结束后，系统释放相应锁。
 - 两项限额都是持久缓存的管理目标，**不是文件系统硬配额**：任务写入、当前查看、手改/旧版保留记录或清理失败可能使实际占用超过限制；释放活动占用后自动重试。手改和旧版保留记录计入译文占用统计，但不会为凑容量而删除，所以保护内容较多时可能持续超限。旧版、不遵守缓存锁的后台不应与新版共用目录运行。
 - 为保护用户数据，符号链接、含未知文件的目录和未完成的 `inference-*` 目录跳过自动删除。正常失败/取消仍由原有任务清理临时目录；本策略不把异常退出留下的未知内容强行纳入递归清理。
 
-删除图片缓存不会顺带删除译文。再次打开会重新生成图片，并复用仍在译文缓存中的记录；译文只由自己的 500 MB/30 天策略管理，手改内容始终保护。本轮已验证 MetalFX 的重建输出内容一致，能继续命中原有手改缓存。后端或模型升级导致输出身份改变时，新旧译文继续隔离，旧手改内容不会被删除。
+删除图片缓存后会重新生成增强图。识别和译文复用独立记录及其 500 MB/30 天策略，手改内容始终保护。依赖旧增强元数据的历史结果在成功导入后也能独立复用。
 
 本轮测得增强图约 2 MB/页、显示结果约数 MB/页，因此 5 GB 适合作为首版默认值；实际可容纳页数受彩色素材、页面纹理和保存的增强版本数影响，不能按固定页数承诺。
 
@@ -72,7 +72,7 @@ GB/MB 使用十进制字节。达到上限不清理；超过时按最近使用�
 
 实现：`core/src/cache_policy.rs` 协调统一锁和调度，`core/src/translation_cache.rs` 负责独立的识别/译文额度。`cache_status` 顶层仍返回图片额度与清理报告，`translations` 返回译文额度、过期天数、保护规则与独立清理报告；原图和手改不参与删除。
 
-验收输出位于 `.runtime/super-resolution/cache-policy-review/`：
+历史缓存策略验收输出曾保存在 `.runtime/super-resolution/cache-policy-review/`：
 
 - `unit-tests.log`：18 项单元测试通过，包含 6 项策略测试，覆盖过期/续期、合计容量与淘汰顺序、当前页保护、乱序请求、外部活动锁、未知文件/符号链接保护及边界时间。
 - `policy-runtime-final/report.json`：真实后台 5.4 GB 逻辑容量测试（稀疏文件，不实际分配 5.4 GB）、跨进程锁、启动与空闲清理、分段请求完整性、真实 GPU 重建和手改缓存复用。
@@ -102,7 +102,7 @@ PYTHONDONTWRITEBYTECODE=1 macos/.venv/bin/python tools/super_resolution/verify_t
   --root "$PWD" --input /absolute/low-resolution-page.png --output /absolute/new-translation-policy-review
 ```
 
-## 整合验收
+## 历史整合验收
 
 实际环境：Apple M5 Max，macOS 27.0.1 (26A434)。两个独立交付提交为 `69affc4`（MetalFX 与公共接入）和 `addcbe3`（Real-CUGAN）；主候选版分别整合为 `69134d0` 和 `4ee3531`，随后补充双后端构建与联合验证。
 
@@ -124,7 +124,7 @@ PYTHONDONTWRITEBYTECODE=1 macos/.venv/bin/python tools/super_resolution/verify_t
 
 独立交付还验证了原有 35 页流程、请求取消与进程树回收、快速切页、缓存损坏修复、方向处理、资源缺失等，详情见 [MetalFX 交接](super-resolution-metalfx-handoff.md) 与 [Real-CUGAN 交接](super-resolution-realcugan-handoff.md)。
 
-## 本轮效果与耗时
+## 早期效果与耗时
 
 联合测试使用第 20 页人工缩小到高 540/720/1080，再输出高 1440/2160。四个样例/后端的进程墙钟（包含初始化、解码、模型执行与 PNG 写出）：
 
@@ -141,7 +141,7 @@ PYTHONDONTWRITEBYTECODE=1 macos/.venv/bin/python tools/super_resolution/verify_t
 
 两种增强在联合样本中都识别到 19 块，与低清原图数量一致；数量相同不等于文字正确率相同。本轮没有人工字符级标注，也没有证明 OCR 准确率提升。人工降采样只用于配对观察，不能代替真实低清下载素材的验收。
 
-## 复现联合验证
+## 复现早期联合验证
 
 在仓库根目录执行，输出目录应选新的独立目录：
 

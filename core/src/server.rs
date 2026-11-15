@@ -40,21 +40,36 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let ticket=runtime.cache_policy.view_ticket();
             let _activity=runtime.cache_policy.activity().await?;
             let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
-            let effective=runtime.sr.prepare(Path::new(required(r,"image")?),&settings).await?;
-            let mut reply=runtime.load_page(&effective,r["mode"].as_str().unwrap_or("text")).await?;
-            runtime.cache_policy.pin_view(ticket,&effective,Some(Path::new(reply["cache"].as_str().context("missing cache path")?)))?;
-            reply["effective_image"]=json!(effective);reply["original_image"]=r["image"].clone();Ok(reply)
+            let source = Path::new(required(r, "image")?);
+            let (effective, warning) = match runtime.sr.prepare(source, &settings).await {
+                Ok(image) => (image, None),
+                Err(error) => (source.to_owned(), Some(error.to_string())),
+            };
+            let mut reply = runtime.load_page(source, &effective, r["mode"].as_str().unwrap_or("text")).await?;
+            runtime.cache_policy.pin_view(ticket, &effective, Some(Path::new(reply["cache"].as_str().context("missing cache path")?)))?;
+            reply["effective_image"] = json!(effective);
+            reply["original_image"] = r["image"].clone();
+            if let Some(warning) = warning { reply["enhancement_warning"] = json!(warning); }
+            Ok(reply)
         },
         "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
         "release_engine"=>{runtime.engine.release().await?;Ok(json!({"released":true}))},
         "display"=>{
             let _permit=display_gate.acquire().await?;
             let _activity=runtime.cache_policy.activity().await?;
-            runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?)).await
+            runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?),r["revision"].as_str()).await
+        },
+        "chapter_export_page"=>{
+            let _permit=display_gate.acquire().await?;
+            let _activity=runtime.cache_policy.activity().await?;
+            let settings:crate::super_resolution::Settings=serde_json::from_value(r["super_resolution"].clone())?;
+            ensure!(settings.engine != "off", "请选择超分引擎");
+            runtime.chapter_export_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text"),
+                &settings).await
         },
         "edit"=>{
             let _activity=runtime.cache_policy.activity().await?;
-            runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str()).await
+            runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str(),r["image"].as_str().map(Path::new)).await
         },
         "process"=>{
             let images=r["images"].as_array().context("missing images")?;
@@ -82,12 +97,23 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                     let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
                     ensure!(processing.is_some() || settings.engine != "off", "请选择超分引擎");
                     let source = Path::new(image);
-                    let effective = runtime.sr.prepare(source, &settings).await?;
+                    let enhanced = runtime.sr.prepare(source, &settings).await;
                     if let Some((options, service)) = &processing {
-                        let mut events=Events{id:job.id.clone(),image:image.into(),cache:runtime.cache_for(&effective,options.mode)?,output:output.clone()};
-                        runtime.process_page(&effective, options, service, &mut events).await
+                        let cache = runtime.cache_for(source, options.mode)?;
+                        let mut events = Events { id: job.id.clone(), image: image.into(), cache: cache.clone(), output: output.clone() };
+                        let (effective, warning) = match enhanced {
+                            Ok(path) => (path, None),
+                            Err(error) => {
+                                let warning = service.safe_error(error);
+                                events.progress(&format!("超分失败，使用原图继续处理：{warning}"))?;
+                                (source.to_owned(), Some(warning))
+                            },
+                        };
+                        let mut result = runtime.process_page(source, &effective, &cache, options, service, &mut events).await?;
+                        if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
+                        Ok(result)
                     } else {
-                        Ok(json!({"skipped":effective == source}))
+                        Ok(json!({"skipped":enhanced? == source}))
                     }
                 }.await;
                 runtime.maintain_cache().await;

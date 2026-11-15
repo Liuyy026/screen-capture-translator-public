@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | English | [Project home](../README.en.md)
 
-This guide applies to `refactor/rust-core`, not the stable `main` application. Run all commands from the repository root. The candidate requires Apple Silicon, macOS 14+, Swift build tools (`xcrun swiftc`), Rust/Cargo, Python 3 and uv. It depends on the checkout, native OpenCV, a Python model environment and installed weights; it is not a standalone app package.
+This guide covers the macOS reader built from `main`. Run all commands from the repository root. The source build requires Apple Silicon, macOS 14+, Swift build tools (`xcrun swiftc`), Rust/Cargo, Python 3 and uv. It runs with the checkout, native OpenCV, a Python model environment and installed weights.
 
 ## First-time setup
 
@@ -43,9 +43,25 @@ zsh macos/scripts/build.sh
 open 'macos/dist/Koma Rust 候选版.app'
 ```
 
-The bundle identifier is `local.koma.reader.rust`. Both double-click entry points target this candidate. Development mode `--verify` rebuilds and restarts it; daily `--open` does not. The candidate build does not replace the stable app. Rebuild after moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when requested. The survival check alone is not a full UI or translation test.
+The source build is named `Koma Rust 候选版.app` and uses the bundle identifier `local.koma.reader.rust`. Use `--verify` to rebuild and restart after updating the source or moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when prompted. The 10-second check verifies startup.
 
-Open an image folder, configure the provider/endpoint/key/model, then process a page or folder. Use the original, text-box and Chinese modes to inspect results. Source and translation text are editable; save before retranslating a single entry. Manually saved translations are protected during batch processing. Drag the image to pan; zoom and normal scrolling remain available.
+Open an image folder, configure the provider, endpoint, optional key and model, then process a page or folder. Use the bottom bar to switch between original or enhanced image, text boxes and Chinese rendering. The zoom menu can fit the whole page, and clicking the page number opens chapter thumbnails. The dialogue pane is collapsible. Unsaved drafts survive dialogue and page switches during the current session. Save edits before retranslating an entry. Batch processing protects saved manual translations.
+
+Use **Processing settings** (`处理设置`) in the top toolbar to choose enhancement, translation mode, provider and model. **Enhance chapter** applies the current settings to the folder and uses MetalFX when pre-enhancement is off. Changing enhancement settings reuses OCR, translations and manual edits within the selected translation mode. See the [upscaling guide in Chinese](../docs/macos-super-resolution.md).
+
+Open **Page diagnostics** (`本页诊断`) at the bottom to see the image's pixel dimensions and the upscaling, OCR, translation and layout status. Click a flagged dialogue to jump to its editor. The panel can also reveal the local log in Finder.
+
+### Keep the original bubble
+
+Select a dialogue and choose **Keep original bubble** (`保留原框`) in the editor. All blocks grouped in the detected bubble are kept together. Later processing skips translation, cleanup and typesetting for that bubble. If the outline cannot be determined, the app preserves the selected OCR box. Choose **Translate this bubble** (`翻译此框`) to resume processing. The selection is saved locally for the current translation mode, and any existing translation remains available.
+
+### Export manga
+
+1. Process the pages to export in the current translation mode. Click **Export manga** (`导出漫画`) in the toolbar.
+2. Choose the whole chapter or enter selected pages. Use the page numbers shown in the reader. You can mix single pages and ranges, such as `1, 3, 5–8`.
+3. Set the folder name and destination, then start the export. A new installation defaults to your Documents folder. The app remembers the destination locally after a successful export.
+
+The app composites existing Chinese layouts onto the enhanced images and saves local PNGs with the original chapter numbers, such as `001.png`, `003.png` and `005.png`. It uses the current enhancement settings, with MetalFX when pre-enhancement is off. Preserved bubbles and areas without usable translations retain the original text. If the folder name is taken, the app adds a number. After export, reveal the folder in Finder from the status bar.
 
 ## Connections and isolated data
 
@@ -73,7 +89,7 @@ Visual assistance sends the full page (JPEG, maximum long edge 1775 pixels), exi
 
 Chinese is laid out left-to-right and top-to-bottom, measuring glyph widths against each line's contour. Connected bubbles, irregular shapes and narration receive bounded layouts. Pixel masks limit cleanup and local restoration; broad white strips are no longer used. Installed LaMa supports complex backgrounds; native fallback restoration is weaker. Reconstructed texture may contain artifacts and is not exact recovery of the original drawing.
 
-Display assets are separate from translation caches, so existing translations can be reformatted without translation requests. Incomplete or unsafe layouts retain the image and report the reason in the sidebar. Pure punctuation and unchanged numbers can remain as originally drawn. These rules do not correct OCR omissions or semantic mistakes.
+Display assets are separate from translation caches, so existing translations can be reformatted without translation requests. Incomplete or unsafe layouts retain the image and report the reason in the bottom status area, with the full translation available in the dialogue pane. Pure punctuation and unchanged numbers can remain as originally drawn. These rules do not correct OCR omissions or semantic mistakes.
 
 ## Validation
 
@@ -84,8 +100,8 @@ python3 tools/rust_migration/cargo.py test
 macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
 ```
 
-Completed validation covers 35 real OCR pages, pixel-identical final rendering of 244 existing translations, simulated translation pipelines, controller and real-window flows, restart cache reuse and actual application startup. See the [root results](../README.en.md), [full report](../docs/rust-core-validation.md) and [core tools](../core/README.md).
+The November 8, 2026 migration validation covered 35 real OCR pages, pixel-identical rendering of 244 existing translations, simulated translation, controller and window flows, restart cache reuse and application startup. See the [root results](../README.en.md), [full report](../docs/rust-core-validation.md) and [core tools](../core/README.md).
 
 Run current offline core regressions with `scripts/check_regressions.py --native --swift`; see the [development guide](../docs/development.en.md). Historical corpus, model and screenshot acceptance scripts have been removed; their results remain historical evidence.
 
-The original [November 7 vision report](../docs/macos-vision-1209806-2026-11-07.md) describes the historical Python/Keychain/white-overlay implementation. Current branch behavior is documented here and in the Rust validation report. Windows migration, independent packaging and broader quality evaluation remain pending.
+The [November 7 vision report](../docs/macos-vision-1209806-2026-11-07.md) covers the older Python implementation with Keychain and white overlays.

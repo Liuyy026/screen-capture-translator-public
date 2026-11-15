@@ -1,6 +1,6 @@
 //! Image-grounded translation; original OCR and ordinary caches stay intact.
 use crate::{
-    compat::{array, text, truth},
+    compat::{array, keeps_original, text, truth},
     overlay, persistence,
     service::TranslationService,
     structure,
@@ -23,7 +23,11 @@ pub fn prepare(image: &Path, destination: &Path, ordinary_root: &Path) -> Result
     if !ordinary.exists() {
         return Ok(None);
     }
-    let mut page: Value = serde_json::from_slice(&std::fs::read(ordinary)?)?;
+    let page = serde_json::from_slice(&std::fs::read(ordinary)?)?;
+    Ok(Some(from_text(page)))
+}
+
+pub fn from_text(mut page: Value) -> Value {
     if let Some(blocks) = page["blocks"].as_array_mut() {
         for b in blocks {
             if !truth(&b["edited"]) {
@@ -47,12 +51,13 @@ pub fn prepare(image: &Path, destination: &Path, ordinary_root: &Path) -> Result
     }
     remove(&mut page, &["translation_config"]);
     page["model"] = json!("");
-    Ok(Some(page))
+    page
 }
 
 pub async fn translate(
     page: &mut Value,
     image: &Path,
+    layout_image: Option<&Path>,
     model: &str,
     service: &TranslationService,
     block_id: Option<&str>,
@@ -66,13 +71,13 @@ pub async fn translate(
         return Ok(());
     }
     translation::audit_cache(page);
-    structure::ensure(page, Some(image))?;
+    structure::ensure(page, layout_image)?;
     let config = json!({"mode":"vision","version":1,"prompt_revision":2,"model":model,
         "image_edge":vision_image::IMAGE_EDGE,"batch_size":8,"ocr":structure::ocr_signature(page),
         "provider":service.provider,"base_url":service.base_url});
     if page["translation_config"] != config {
         for b in page["blocks"].as_array_mut().unwrap() {
-            if !truth(&b["edited"]) {
+            if !truth(&b["edited"]) && !keeps_original(b) {
                 b["translation"] = json!("");
                 b["error"] = json!("");
                 remove(b, &["vision_source"]);
@@ -99,6 +104,7 @@ pub async fn translate(
         .filter(|&i| {
             let b = &page["blocks"][i];
             !truth(&b["edited"])
+                && !keeps_original(b)
                 && b["overlay"] != "skip"
                 && b["text_kind"] != "noise"
                 && block_id.is_none_or(|id| text(&b["id"]) == id)
@@ -268,6 +274,7 @@ pub async fn probe(request: &Value) -> Result<Value> {
     let result = translate(
         &mut page,
         image,
+        Some(image),
         request["model"].as_str().unwrap_or("same-model"),
         &service,
         request["block_id"].as_str(),

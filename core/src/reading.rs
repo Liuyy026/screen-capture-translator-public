@@ -1,10 +1,11 @@
 //! Final display regions. OCR and translation caches are immutable inputs.
 use crate::{
     background,
-    compat::{array, text, truth},
+    compat::{array, keeps_original, text, truth},
     geometry::{self, Candidate},
     ink::{self, Box4},
     model_images::ImageModels,
+    preserved_bubbles,
     raster::*,
 };
 use anyhow::{Result, ensure};
@@ -30,6 +31,29 @@ fn union(boxes: &[Box4]) -> Box4 {
         boxes.iter().map(|b| b[2]).max().unwrap(),
         boxes.iter().map(|b| b[3]).max().unwrap(),
     ]
+}
+
+fn intersects([a, b, c, d]: Box4, [x, y, r, s]: Box4) -> bool {
+    a < r && x < c && b < s && y < d
+}
+
+fn padded([x, y, r, b]: Box4, pad: i32, width: i32, height: i32) -> Box4 {
+    [(x - pad).max(0), (y - pad).max(0), (r + pad).min(width), (b + pad).min(height)]
+}
+
+fn trim_around_originals(mut area: Box4, text: Box4, originals: &[Box4]) -> Option<Box4> {
+    for &[left, top, right, bottom] in originals {
+        if !intersects(area, [left, top, right, bottom]) {
+            continue;
+        }
+        let [x, y, r, b] = area;
+        // Keep the translated text's ink bounds outside the preserved frame.
+        area = [[x, y, left, b], [right, y, r, b], [x, y, r, top], [x, bottom, r, b]]
+            .into_iter()
+            .filter(|[a, b, c, d]| *a <= text[0] && *b <= text[1] && *c >= text[2] && *d >= text[3])
+            .max_by_key(|[a, b, c, d]| i64::from(c - a) * i64::from(d - b))?;
+    }
+    Some(area)
 }
 
 pub async fn regions(
@@ -71,15 +95,19 @@ pub async fn regions(
     let boxes: Vec<_> = blocks
         .iter()
         .map(|b| {
-            if preserved.get(text(&b["id"])).is_some() {
+            if keeps_original(b) || preserved.get(text(&b["id"])).is_some() {
                 None
             } else {
                 ink::clipped_box(b, width, height)
             }
         })
         .collect();
+    if boxes.iter().all(Option::is_none) {
+        return Ok(vec![]);
+    }
     let (boxes, supplemented) = ink::complete_vertical_strokes(gray, &boxes, blocks, source)?;
     let source = supplemented.as_ref();
+    let originals = preserved_bubbles::protected_bounds(page, width, height);
     let bubbles = geometry::bubbles(gray, &boxes)?;
     let narrations = geometry::narration_groups(gray, blocks, &boxes, &bubbles)?;
     let mut regions = vec![];
@@ -89,6 +117,9 @@ pub async fn regions(
     ordered.sort_by_key(|c| c.members.iter().min().copied());
     for candidate in ordered {
         let indexes = &candidate.members;
+        if preserved_bubbles::touches(candidate, &originals)? {
+            continue;
+        }
         claimed.extend(indexes.iter().map(|&i| ids[i].clone()));
         if !indexes.iter().all(|&i| ink::ready(&blocks[i])) {
             continue;
@@ -118,6 +149,9 @@ pub async fn regions(
         accepted.push(candidate.clone());
     }
     for candidate in &narrations {
+        if preserved_bubbles::touches(candidate, &originals)? {
+            continue;
+        }
         let mut indexes = candidate.members.clone();
         indexes.sort_by(|&a, &b| {
             blocks[a]["reading_order"]
@@ -169,6 +203,9 @@ pub async fn regions(
         let Some(shape) = geometry::cached_shape(old, width, height)? else {
             continue;
         };
+        if preserved_bubbles::touches(&shape, &originals)? {
+            continue;
+        }
         let mut overlaps = false;
         for other in bubbles.iter().chain(&narrations).chain(&accepted) {
             if geometry::overlap(&shape, other)? > 0.0 {
@@ -186,7 +223,7 @@ pub async fn regions(
         let h = shape.mask.rows().min(height - y);
         let textured =
             w > 0 && h > 0 && fraction(crop(gray, x, y, w, h)?.data_bytes()?, |v| v < 210) > 0.18;
-        let clip = (old["overlay"] == "balloon").then_some((&shape.mask, shape.origin));
+        let clip = (old["overlay"] == "balloon" || !originals.is_empty()).then_some((&shape.mask, shape.origin));
         let plan = background::prepare(gray, &member_boxes, clip, textured, source)?;
         merge(
             &mut region,
@@ -218,6 +255,9 @@ pub async fn regions(
         }
         let member_boxes: Vec<_> = indexes.iter().map(|&i| boxes[i].unwrap()).collect();
         let [a, b, c, d] = union(&member_boxes);
+        if originals.iter().any(|&bounds| intersects([a, b, c, d], bounds)) {
+            continue;
+        }
         let source_area: i32 = member_boxes
             .iter()
             .map(|b| (b[2] - b[0]) * (b[3] - b[1]))
@@ -258,13 +298,11 @@ pub async fn regions(
             continue;
         }
         let member_boxes: Vec<_> = indexes.iter().map(|&i| boxes[i].unwrap()).collect();
-        let [a, b, c, d] = union(&member_boxes);
-        let [x, y, r, end] = [
-            (a - 8).max(0),
-            (b - 8).max(0),
-            (c + 8).min(width),
-            (d + 8).min(height),
-        ];
+        let bounds = union(&member_boxes);
+        let expanded = padded(bounds, 8, width, height);
+        let Some([x, y, r, end]) = trim_around_originals(expanded, bounds, &originals) else {
+            continue;
+        };
         let mut mask = blank(r - x, end - y, 1)?;
         for other in &accepted {
             let [ox, oy] = other.origin;
@@ -326,4 +364,54 @@ pub async fn regions(
         accepted.push(shape);
     }
     Ok(regions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencv::{core::{Point, Rect, Scalar, Size, Vector}, imgcodecs, imgproc};
+
+    #[tokio::test]
+    async fn preserves_all_members_of_one_bubble_and_renders_a_separate_bubble() -> Result<()> {
+        let mut gray = blank(480, 640, 25)?;
+        for centre in [180, 355] {
+            imgproc::ellipse(&mut gray, Point::new(centre, 220), Size::new(64, 80), 0.0, 0.0, 360.0,
+                             Scalar::all(255.0), imgproc::FILLED, imgproc::LINE_8, 0)?;
+        }
+        for x in [154, 197, 347] {
+            for y in (180..250).step_by(15) {
+                imgproc::rectangle(&mut gray, Rect::new(x, y, 12, 8), Scalar::all(30.0),
+                                   imgproc::FILLED, imgproc::LINE_8, 0)?;
+            }
+        }
+        let mut page = json!({"width": 480, "height": 640, "blocks": [
+            {"id": "1", "box": [151, 172, 172, 260], "source": "こんにちは", "translation": "你好", "vertical": true},
+            {"id": "2", "box": [195, 172, 213, 260], "source": "おはよう", "translation": "早上好", "vertical": true},
+            {"id": "3", "box": [343, 172, 363, 260], "source": "またね", "translation": "回头见", "vertical": true}
+        ]});
+        let combined = regions(&page, &gray, None, None, None).await?;
+        assert!(combined.iter().any(|region| region["block_ids"] == json!(["1", "2"])));
+
+        let mut image = Vector::new();
+        imgcodecs::imencode(".png", &gray, &mut image, &Vector::new())?;
+        page["blocks"][1]["keep_original"] = json!(true);
+        assert_eq!(preserved_bubbles::legacy_ids(&page), ["2"]);
+        preserved_bubbles::set(&mut page, "2", true, image.as_slice(), &[])?;
+        assert!(preserved_bubbles::legacy_ids(&page).is_empty());
+        assert!(keeps_original(&page["blocks"][0]));
+        assert!(keeps_original(&page["blocks"][1]));
+        assert!(!keeps_original(&page["blocks"][2]));
+        let displayed = regions(&page, &gray, None, None, None).await?;
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0]["block_ids"], json!(["3"]));
+        assert!(array(&displayed[0]["points"]).iter().all(|point| point[0].as_i64().unwrap() > 245));
+
+        crate::overlay::ensure_gray(&mut page, Some(&gray))?;
+        assert!(array(&page["overlay_regions"]).iter().all(|region| array(&region["block_ids"]).iter().all(|id| id == "3")));
+        preserved_bubbles::set(&mut page, "1", false, &[], &[])?;
+        assert!(array(&page["blocks"]).iter().all(|block| !keeps_original(block)));
+        assert_eq!(page["blocks"][0]["translation"], "你好");
+        assert_eq!(page["blocks"][1]["translation"], "早上好");
+        Ok(())
+    }
 }

@@ -13,6 +13,23 @@ pub fn atomic_json(path: &Path, value: &Value) -> Result<()> {
 }
 
 pub fn atomic_bytes(path:&Path,bytes:&[u8])->Result<()>{
+    write_temp(path, bytes)?.persist(path)?;
+    Ok(())
+}
+
+// Imports can race across candidate processes. Never replace a canonical
+// record that another process has already created.
+pub fn seed_page(path: &Path, bytes: &[u8], page: Value) -> Result<Value> {
+    match write_temp(path, bytes)?.persist_noclobber(path) {
+        Ok(_) => Ok(page),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(serde_json::from_slice(&fs::read(path)?)?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_temp(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -22,8 +39,7 @@ pub fn atomic_bytes(path:&Path,bytes:&[u8])->Result<()>{
     temp.as_file_mut().write_all(bytes)?;
     temp.as_file_mut().flush()?;
     temp.as_file().sync_all()?;
-    temp.persist(path)?;
-    Ok(())
+    Ok(temp)
 }
 
 pub fn cache_path(image: &Path, root: &Path) -> Result<PathBuf> {
