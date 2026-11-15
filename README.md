@@ -59,7 +59,7 @@ Windows 使用方法仍见 [Windows 说明](windows/README.md)，不能将其功
 
 ## 功能与显示效果
 
-- macOS 候选版支持前置可选超分：MetalFX / Real-CUGAN、1440/2160 目标尺寸；原图只读，增强图的识别、翻译和显示使用独立缓存。使用与实测限制见 [前置超分说明](docs/macos-super-resolution.md)。
+- macOS 候选版支持前置可选超分：MetalFX / Real-CUGAN、2560/3840 目标尺寸；原图只读，增强图的识别、翻译和显示使用独立缓存。使用与实测限制见 [前置超分说明](docs/macos-super-resolution.md)。
 
 - 支持 WebP、PNG、JPG、JPEG、BMP、TIFF，原图只读，按文件名自然排序。
 - macOS 支持单页/文件夹处理、取消、单句重译、原文/译文编辑及手改保护。
