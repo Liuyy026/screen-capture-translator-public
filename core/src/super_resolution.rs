@@ -12,7 +12,12 @@ pub struct Settings{pub engine:String,pub target:u32,pub axis:String,pub preset:
 impl Default for Settings{fn default()->Self{Self{engine:"off".into(),target:1440,axis:"long_edge".into(),preset:"standard".into()}}}
 pub fn dimensions(w:u32,h:u32,s:&Settings)->Result<Option<(u32,u32)>>{
     ensure!(["off","metalfx","realcugan"].contains(&s.engine.as_str()),"未知增强引擎");
-    ensure!(["long_edge","height"].contains(&s.axis.as_str())&&[1440,2160].contains(&s.target),"无效增强尺寸设置");
+    // Older targets are also used to validate the geometry of cached OCR results.
+    ensure!(
+        ["long_edge", "height"].contains(&s.axis.as_str())
+            && [1440, 2160, 2560, 3840].contains(&s.target),
+        "无效增强尺寸设置"
+    );
     ensure!(w>0&&h>0,"无效图片尺寸");
     let edge=if s.axis=="height"{h}else{w.max(h)};
     if s.engine=="off"||edge>=s.target{return Ok(None)}
@@ -84,7 +89,41 @@ impl Store{
         std::fs::rename(output,&target)?;let _=crate::cache_policy::touch_sr(&directory);Ok(target)
     }
 }
-#[cfg(test)]mod tests{
+#[cfg(test)]
+mod tests {
     use super::*;
-    #[test]fn sizes_and_skip(){let mut s=Settings{engine:"metalfx".into(),..Default::default()};assert_eq!(dimensions(540,720,&s).unwrap(),Some((1080,1440)));assert_eq!(dimensions(2160,1440,&s).unwrap(),None);s.axis="height".into();assert_eq!(dimensions(2160,720,&s).unwrap(),Some((4320,1440)));s.engine="off".into();assert_eq!(dimensions(540,720,&s).unwrap(),None);s.target=0;assert!(dimensions(540,720,&s).is_err());}
+
+    #[test]
+    fn sizes_and_skip() {
+        let mut s = Settings {
+            engine: "metalfx".into(),
+            target: 2560,
+            ..Default::default()
+        };
+        assert_eq!(dimensions(1280, 1807, &s).unwrap(), Some((1813, 2560)));
+        s.target = 3840;
+        assert_eq!(dimensions(1280, 1807, &s).unwrap(), Some((2720, 3840)));
+        assert_eq!(dimensions(1920, 1080, &s).unwrap(), Some((3840, 2160)));
+        assert_eq!(dimensions(3840, 2160, &s).unwrap(), None);
+        assert_eq!(dimensions(1280, 4000, &s).unwrap(), None);
+        s.axis = "height".into();
+        assert_eq!(dimensions(1920, 1080, &s).unwrap(), Some((6827, 3840)));
+        s.engine = "off".into();
+        assert_eq!(dimensions(1280, 1807, &s).unwrap(), None);
+        s.target = 0;
+        assert!(dimensions(540, 720, &s).is_err());
+    }
+
+    #[test]
+    fn legacy_sizes_remain_valid() {
+        let mut s = Settings {
+            engine: "realcugan".into(),
+            target: 1440,
+            ..Default::default()
+        };
+        assert_eq!(dimensions(540, 720, &s).unwrap(), Some((1080, 1440)));
+        s.target = 2160;
+        s.axis = "height".into();
+        assert_eq!(dimensions(2160, 720, &s).unwrap(), Some((6480, 2160)));
+    }
 }

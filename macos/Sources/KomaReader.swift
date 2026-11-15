@@ -9,6 +9,8 @@ private typealias EditorState<Value> = SwiftUI.State<Value>
 private struct NativeLoadedPage: Decodable { var cache: String; var page: PageResult?; var revision: String?; var effective_image: String? }
 
 @MainActor final class Reader: ObservableObject {
+    static let enhancementTargets = [2560, 3840]
+
     @Published var files: [URL] = []
     @Published var selected: URL?
     @Published var page: PageResult? { didSet { presentationCache = nil } }
@@ -31,11 +33,15 @@ private struct NativeLoadedPage: Decodable { var cache: String; var page: PageRe
     @Published var model = "qwen3:4b"
     @Published var processingMode = "text"
     @Published var srEngine = "off"
-    @Published var srTarget = 1440
+    @Published var srTarget = Reader.enhancementTargets[0]
     @Published var srAxis = "long_edge"
     @Published var srPreset = "standard"
     @Published var srStatus = ""
     private var effectiveImage: URL?
+    var displaysEnhancedImage: Bool {
+        guard let effectiveImage, let selected else { return false }
+        return effectiveImage.path != selected.path
+    }
     var srSettings: [String: Any] { ["engine": srEngine, "target": srTarget, "axis": srAxis, "preset": srPreset] }
     private func resetPageForEnhancement() {
         cancel()
@@ -610,6 +616,11 @@ struct ContentView: View {
                 else { Image(systemName: "internaldrive").foregroundStyle(.secondary) }
                 Text(reader.message).lineLimit(2).font(.caption)
                 Spacer()
+                if let pixels = reader.image?.representations.first {
+                    let source = reader.displaysEnhancedImage ? "增强图" : "原图"
+                    Text(verbatim: "\(source) · \(pixels.pixelsWide) × \(pixels.pixelsHigh) px")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
                 if reader.busy && reader.queueTotal > 1 { Text("\(reader.queueDone)/\(reader.queueTotal)").font(.caption) }
                 Circle().fill(reader.engineReady ? .green : .orange).frame(width: 7, height: 7)
                 Text(reader.engineReady ? "本地模型就绪" : "模型未就绪").font(.caption).foregroundStyle(.secondary)
@@ -723,7 +734,9 @@ struct ContentView: View {
                 }
                 if reader.srEngine != "off" {
                     Picker("目标尺寸", selection: $reader.srTarget) {
-                        Text("1440").tag(1440); Text("2160").tag(2160)
+                        ForEach(Reader.enhancementTargets, id: \.self) { target in
+                            Text(verbatim: "\(target) px").tag(target)
+                        }
                     }.onChange(of: reader.srTarget) { _, _ in reader.changeEnhancement() }
                     Picker("按", selection: $reader.srAxis) {
                         Text("长边").tag("long_edge"); Text("高度").tag("height")
