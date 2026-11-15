@@ -1,10 +1,10 @@
-# Koma · Local Manga Translation (Rust candidate)
+# Koma · Local Manga Translation
 
 [简体中文](README.md) | English
 
-Local Japanese manga OCR, translation and Chinese typesetting. **This is the independent `refactor/rust-core` development branch.** The macOS business core now runs in Rust; Swift retains the UI and Chinese layout, while Python runs detection, OCR and background-restoration models. The Windows reader still uses the original Python backend.
+Koma recognizes Japanese text in manga, translates it and typesets Chinese on the original page. The macOS reader on `main` uses a Rust core and a SwiftUI interface. Python runs the detection, OCR and background-restoration models. The Windows reader uses the original Python backend.
 
-The stable version remains on [`main`](https://github.com/Liuyy026/screen-capture-translator-public/tree/main). The frozen pre-migration baseline is `a08b421` / `stable/pre-rust-20261108`. The candidate has a separate app identity, configuration and caches; it has not been merged into stable and is not a standalone distribution package.
+This guide covers the current source build. The macOS build is still named `Koma Rust 候选版.app` and depends on the checkout and its local runtime. The pre-migration Python reader is available at `stable/pre-rust-20261108`.
 
 ## Architecture
 
@@ -31,13 +31,13 @@ flowchart TD
 | Python adapter | Installed CTD, Manga OCR and Anime LaMa inference, including model preprocessing/output conversion |
 | oMLX / Ollama | Language or vision model serving; model inference was not rewritten in Rust |
 
-The candidate does not invoke the old Python business workers. Rust lazily starts and reuses the inference adapter and only manages local Ollama processes it owns. Existing services and oMLX are not taken over. See [core documentation](core/README.md).
+Rust starts the Python inference adapter on demand and reuses it. It manages any local Ollama processes it starts. Users manage existing Ollama and oMLX services. See [core documentation](core/README.md).
 
 ## Run
 
 Requires Apple Silicon, macOS 14+, Swift build tools, Rust/Cargo, native OpenCV 4.11.0, a prepared `macos/.venv`, and installed weights under `.models/`. Follow the [macOS setup guide](macos/README.en.md) for first-time preparation.
 
-For daily use, double-click **[启动 Rust 候选版.command](启动%20Rust%20候选版.command)** at the repository root, or `macos/启动.command`. Both open only the candidate, activate an existing instance, and build only if application/core artifacts are missing or the checkout has moved. Prepare the dependencies first.
+For daily use, double-click **[启动 Rust 候选版.command](启动%20Rust%20候选版.command)** at the repository root, or `macos/启动.command`. The launchers activate an existing window and build if app or core artifacts are missing or the checkout has moved. After updating existing source files, rebuild with the command below.
 
 For development, from this branch's repository root:
 
@@ -57,13 +57,15 @@ For Windows, use the existing [Windows guide](windows/README.en.md); the Rust mi
 
 ## Features
 
-- Optional pre-OCR MetalFX or Real-CUGAN upscaling in the macOS candidate; originals and per-mode caches are preserved. See the [setup and validation notes (Chinese)](docs/macos-super-resolution.md).
 - WebP, PNG, JPG, JPEG, BMP and TIFF, naturally sorted; original images remain read-only.
-- macOS page/folder processing, cancellation, individual retranslation, source/translation editing and manual-edit protection.
+- The macOS reader supports single-page and chapter processing, individual retranslation, source and translation editing, and manual-edit protection. The bottom bar offers display modes, zoom, chapter thumbnails and page diagnostics for upscaling, OCR, translation and layout.
+- Choose **Keep original bubble** in the dialogue editor to skip translation and typesetting for the detected bubble. Choose **Translate this bubble** to resume processing.
+- **Export manga** saves the whole chapter or selected pages as local PNGs with their original chapter page numbers. Choose the destination and folder name. See the [macOS export guide](macos/README.en.md#export-manga).
+- MetalFX and Real-CUGAN can upscale to 2560 or 3840 pixels by long edge or height. Changing enhancement settings reuses OCR, translations and manual edits within the selected translation mode. Real-CUGAN uses exact full-image feature synchronization to reduce color casts in dense screentones. See the [upscaling guide in Chinese](docs/macos-super-resolution.md).
 - Separate text and vision caches; proposed OCR corrections require manual confirmation.
 - Left-to-right Chinese text with measured glyph widths and contour-aware lines for long sentences and irregular/connected bubbles.
 - Pixel masks and local background restoration replace broad white strips; narration is grouped in reading order.
-- Display caches are separate from translations. Unsafe layouts preserve the image and show the full translation and reason in the sidebar.
+- Display caches are separate from translations. When a translation cannot be typeset, the image is preserved, the dialogue pane retains the available translation and the bottom status area shows a notice.
 
 ## 35-page validation — November 8, 2026
 
@@ -89,13 +91,13 @@ The remaining 15 blocks follow existing skip/preservation rules. Original image 
 
 First generation is about 2.1× faster in this run. Gains include persistent processes and cache reuse, not just language choice. Timing excludes UI drawing; OS file caches were not forcibly cleared. **These are display measurements, not OCR/LLM inference speed or translation-quality improvements.** Memory measurements use different methods and do not establish lower memory usage; resident models retain memory.
 
-See the [validation report](docs/rust-core-validation.md), [migration record](docs/rust-core-migration.md) and [November 7–8 progress](进度汇总/07_填充修复与Rust重构_2026-11-08/当前进度_2026-11-08.md) for methods, reproducibility entry points and local evidence locations. This documentation update reports completed validation; it does not rerun model benchmarks.
+See the [validation report](docs/rust-core-validation.md), [migration record](docs/rust-core-migration.md) and [November 7–8 progress](进度汇总/07_填充修复与Rust重构_2026-11-08/当前进度_2026-11-08.md) for methods and evidence from the migration build.
 
 ## Limits and repository layout
 
 Parity on 35 pages does not establish universal correctness. OCR omissions, handwriting, names/dates and translation semantics still need review; restoration may leave texture artifacts. This migration preserved existing source text and translations without content corrections.
 
-Standalone packaging, broader long-term testing and a Windows Rust integration remain unfinished. Manual box editing, cross-page character memory, glossaries, in-app translated-image export, ZIP/PDF input and recursive subfolders are outside this delivery. Test rendering tools are not an in-app export feature.
+Windows continues to use the original reader. Manual box editing, cross-page character memory, glossaries, ZIP/PDF input and recursive subfolders remain outside the current feature set.
 
 ```text
 core/                   Rust core, native bridge and Python model adapter

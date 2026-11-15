@@ -1,10 +1,11 @@
 //! OCR-side region classification retained for cache/translation compatibility.
 //! Final display uses reading.rs; these regions also inform dialogue grouping.
 use crate::{
-    compat::{array, number, python_json, string_or_empty, text, truth},
+    compat::{array, keeps_original, number, python_json, string_or_empty, text, truth},
     geometry::{self, Candidate},
     imaging,
     ink::Box4,
+    preserved_bubbles,
     raster::*,
     translation,
 };
@@ -323,12 +324,15 @@ pub fn ensure_gray(page: &mut Value, gray: Option<&Mat>) -> Result<bool> {
                 .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
         })
         .transpose()?;
-    let signature = json!([8, fingerprint, image_key]);
+    let original_ids: Vec<_> = array(&page["blocks"]).iter().filter(|block| keeps_original(block))
+        .map(|block| &block["id"]).collect();
+    let signature = if original_ids.is_empty() { json!([8, fingerprint, image_key]) }
+        else { json!([8, fingerprint, image_key, original_ids, page["preserved_bubbles"]]) };
     if page["overlay_signature"] == signature && page.get("overlay_regions").is_some() {
         return Ok(false);
     }
     let mut blocks = array(&page["blocks"]).to_vec();
-    for block in &mut blocks {
+    for block in blocks.iter_mut().filter(|block| !keeps_original(block)) {
         mark(
             block,
             "uncertain",
@@ -339,8 +343,9 @@ pub fn ensure_gray(page: &mut Value, gray: Option<&Mat>) -> Result<bool> {
     }
     let boxes: Vec<_> = blocks
         .iter()
-        .map(|b| gray.and_then(|g| bounds(b, g.cols(), g.rows())))
+        .map(|b| gray.filter(|_| !keeps_original(b)).and_then(|g| bounds(b, g.cols(), g.rows())))
         .collect();
+    let protected = gray.map(|g| preserved_bubbles::protected_bounds(page, g.cols(), g.rows())).unwrap_or_default();
     let mut candidates = vec![];
     if let Some(gray) = gray {
         for (i, &b) in boxes.iter().enumerate() {
@@ -419,7 +424,7 @@ pub fn ensure_gray(page: &mut Value, gray: Option<&Mat>) -> Result<bool> {
     let mut assigned = HashSet::new();
     let mut regions = vec![];
     for p in candidates {
-        if p.shape.members.iter().any(|i| assigned.contains(i)) {
+        if p.shape.members.iter().any(|i| assigned.contains(i)) || preserved_bubbles::touches(&p.shape, &protected)? {
             continue;
         }
         let mut overlap = false;
@@ -497,6 +502,9 @@ pub fn ensure_gray(page: &mut Value, gray: Option<&Mat>) -> Result<bool> {
                 continue;
             }
             let candidate = geometry::shape(&blank(r - l, b - t, 1)?, [l, t])?.expect("rectangle");
+            if preserved_bubbles::touches(&candidate, &protected)? {
+                continue;
+            }
             let mut overlap = false;
             for previous in &accepted {
                 if geometry::overlap(&candidate, previous)? > 0.02 {

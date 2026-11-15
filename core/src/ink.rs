@@ -1,6 +1,6 @@
 //! Display-only recovery of detached vertical punctuation. Neither OCR boxes
 //! in the page cache nor the source image are changed.
-use crate::compat::{array, number, text, truth};
+use crate::compat::{array, keeps_original, number, text, truth};
 use anyhow::Result;
 use opencv::{
     core::{self, Mat, Scalar},
@@ -33,9 +33,8 @@ pub fn clipped_box(block: &Value, width: i32, height: i32) -> Option<Box4> {
 }
 
 pub fn ready(block: &Value) -> bool {
-    block["translation"]
-        .as_str()
-        .is_some_and(|s| !s.trim().is_empty())
+    !keeps_original(block)
+        && block["translation"].as_str().is_some_and(|s| !s.trim().is_empty())
         && !truth(&block["error"])
 }
 

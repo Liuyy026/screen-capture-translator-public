@@ -1,7 +1,7 @@
 //! Native translation orchestration. The page is caller-owned; every completed
 //! batch is checkpointed through an observer, suitable for resumable queued work.
 use crate::{
-    compat::{array, text, truth},
+    compat::{array, keeps_original, text, truth},
     overlay,
     service::TranslationService,
     structure, translation,
@@ -59,6 +59,7 @@ fn has_content(block: &Value) -> bool {
 }
 fn allowed(block: &Value, block_id: Option<&str>) -> bool {
     !truth(&block["edited"])
+        && !keeps_original(block)
         && block["overlay"] != "skip"
         && block["text_kind"] != "noise"
         && block_id.is_none_or(|id| text(&block["id"]) == id)
@@ -127,7 +128,7 @@ pub async fn translate(
         || previous.is_none() && (options.unit == "dialogues" || service.identity() != legacy);
     if invalidate {
         for block in page["blocks"].as_array_mut().unwrap() {
-            if !truth(&block["edited"]) {
+            if !truth(&block["edited"]) && !keeps_original(block) {
                 block["translation"] = json!("");
                 block["error"] = json!("");
             }
@@ -171,7 +172,10 @@ pub async fn translate(
             .collect();
         for (i, d) in array(&page["dialogues"]).iter().enumerate() {
             let ids = array(d.get("source_block_ids").unwrap_or(&d["block_ids"]));
-            if ids.is_empty() || ids.iter().any(|id| !eligible_ids.contains(&text(id))) {
+            if ids.is_empty() || ids.iter().any(|id| !eligible_ids.contains(&text(id)))
+                || array(&d["block_ids"]).iter().any(|id| by_id.get(&text(id))
+                    .is_some_and(|&i| keeps_original(&page["blocks"][i])))
+            {
                 continue;
             }
             let members: Vec<_> = ids.iter().map(|id| by_id[&text(id)]).collect();
@@ -216,7 +220,7 @@ pub async fn translate(
             let context: Vec<_> = ordered[start..end]
                 .iter()
                 .map(|&i| &page["blocks"][i])
-                .filter(|b| b["overlay"] != "skip" && b["text_kind"] != "noise")
+                .filter(|b| !keeps_original(b) && b["overlay"] != "skip" && b["text_kind"] != "noise")
                 .map(|b| json!({"id":text(&b["id"]),"ja":b["source"]}))
                 .collect();
             (ids, Value::Object(sources), json!(context))

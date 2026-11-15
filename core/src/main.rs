@@ -12,6 +12,7 @@ mod ocr;
 mod overlay;
 mod panels;
 mod persistence;
+mod preserved_bubbles;
 mod protocol;
 mod raster;
 mod reading;
@@ -315,6 +316,7 @@ async fn main() -> Result<()> {
                 vision_pipeline::translate(
                     &mut page,
                     image.as_deref().expect("clap requires image"),
+                    image.as_deref(),
                     &model,
                     &service,
                     block_id.as_deref(),

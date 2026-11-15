@@ -4,15 +4,19 @@ import AppKit
 struct ReadingOverlayView: View {
     var presentation: ReadingPresentation
     var scale: Double
+    var verticalScale: Double? = nil
     var selected: Bool
+    var selectionColor: Color = .accentColor
     var select: () -> Void
+
+    private var yScale: Double { verticalScale ?? scale }
 
     private func polygon(_ points: [[Double]], origin: CGPoint) -> Path {
         Path { path in
             let valid = points.filter { $0.count == 2 && $0.allSatisfy(\.isFinite) }
             guard let first = valid.first else { return }
-            path.move(to: CGPoint(x: (first[0] - origin.x) * scale, y: (first[1] - origin.y) * scale))
-            for point in valid.dropFirst() { path.addLine(to: CGPoint(x: (point[0] - origin.x) * scale, y: (point[1] - origin.y) * scale)) }
+            path.move(to: CGPoint(x: (first[0] - origin.x) * scale, y: (first[1] - origin.y) * yScale))
+            for point in valid.dropFirst() { path.addLine(to: CGPoint(x: (point[0] - origin.x) * scale, y: (point[1] - origin.y) * yScale)) }
             path.closeSubpath()
         }
     }
@@ -36,8 +40,8 @@ struct ReadingOverlayView: View {
             if let encoded = region.background_png, let box = region.background_box,
                box.count == 4, let data = Data(base64Encoded: encoded), let restored = NSImage(data: data) {
                 let patch = Image(nsImage: restored)
-                context.draw(patch, in: CGRect(x: (box[0] - left) * scale, y: (box[1] - top) * scale,
-                                              width: (box[2] - box[0]) * scale, height: (box[3] - box[1]) * scale))
+                context.draw(patch, in: CGRect(x: (box[0] - left) * scale, y: (box[1] - top) * yScale,
+                                              width: (box[2] - box[0]) * scale, height: (box[3] - box[1]) * yScale))
             } else if region.background_png == nil {
                 for erase in region.erase_points ?? [region.points] {
                     context.fill(polygon(erase, origin: origin), with: .color(fill))
@@ -51,19 +55,19 @@ struct ReadingOverlayView: View {
                         let angle = Double(direction) * .pi / 4
                         context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(outlineColor),
                                      at: CGPoint(x: (glyph.center.x - left) * scale + cos(angle) * stroke,
-                                                 y: (glyph.center.y - top) * scale + sin(angle) * stroke))
+                                                 y: (glyph.center.y - top) * yScale + sin(angle) * stroke))
                     }
                 }
                 context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(textColor),
-                             at: CGPoint(x: (glyph.center.x - left) * scale, y: (glyph.center.y - top) * scale))
+                             at: CGPoint(x: (glyph.center.x - left) * scale, y: (glyph.center.y - top) * yScale))
             }
-            if selected { context.stroke(contour, with: .color(.teal), lineWidth: 2) }
+            if selected { context.stroke(contour, with: .color(selectionColor), lineWidth: 2) }
         }
-        .frame(width: max(1, (right - left) * scale), height: max(1, (bottom - top) * scale))
+        .frame(width: max(1, (right - left) * scale), height: max(1, (bottom - top) * yScale))
         .contentShape(polygon(region.points, origin: origin))
         .onTapGesture(perform: select)
         .accessibilityLabel(presentation.text)
         .help(presentation.text)
-        .offset(x: left * scale, y: top * scale)
+        .offset(x: left * scale, y: top * yScale)
     }
 }

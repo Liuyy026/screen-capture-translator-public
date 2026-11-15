@@ -21,6 +21,7 @@ impl Store{
         let mut digest=Sha256::new();digest.update(b"koma-native-display-v1\0");digest.update(image);digest.update([0]);digest.update(cache);
         for code in [include_bytes!("reading.rs").as_slice(),include_bytes!("ink.rs").as_slice(),include_bytes!("geometry.rs").as_slice(),
             include_bytes!("background.rs").as_slice(),include_bytes!("texture.rs").as_slice(),include_bytes!("raster.rs").as_slice(),
+            include_bytes!("preserved_bubbles.rs").as_slice(),
             include_bytes!("imaging.rs").as_slice(),include_bytes!("display_cache.rs").as_slice(),include_bytes!("compat.rs").as_slice(),
             include_bytes!("model_images.rs").as_slice(),include_bytes!("../python/model_worker.py").as_slice()]{digest.update(code);}
         for name in ["comictextdetector.pt","anime-manga-big-lama.pt"]{model_identity(&mut digest,&self.weights.join(name))?;}
