@@ -1,5 +1,5 @@
 //! Atomic private page/status persistence shared by CLI and queued tasks.
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,13 +17,35 @@ pub fn atomic_bytes(path:&Path,bytes:&[u8])->Result<()>{
     Ok(())
 }
 
+pub fn validate_page(page: &Value) -> Result<()> {
+    let dimensions_valid = ["width", "height"].iter().all(|&field|
+        page[field].as_u64().is_some_and(|size| (1..=i32::MAX as u64).contains(&size)));
+    ensure!(dimensions_valid, "页面缓存的图像尺寸无效");
+    let blocks = page["blocks"].as_array().context("页面缓存缺少文字块列表")?;
+    let mut ids = std::collections::HashSet::new();
+    for block in blocks {
+        let id = block["id"].as_str().filter(|id| !id.is_empty()).context("文字块缺少有效编号")?;
+        ensure!(ids.insert(id), "页面缓存包含重复的文字块编号");
+    }
+    ensure!(page["dialogues"].is_null() || page["dialogues"].as_array()
+        .is_some_and(|rows| rows.iter().all(Value::is_object)), "页面缓存的对白列表无效");
+    ensure!(page["diagnostics"].is_null() || page["diagnostics"].is_object(), "页面缓存的诊断信息无效");
+    Ok(())
+}
+
+pub fn parse_page(bytes: &[u8]) -> Result<Value> {
+    let page = serde_json::from_slice(bytes).context("无法解析页面缓存")?;
+    validate_page(&page)?;
+    Ok(page)
+}
+
 // Imports can race across candidate processes. Never replace a canonical
 // record that another process has already created.
 pub fn seed_page(path: &Path, bytes: &[u8], page: Value) -> Result<Value> {
     match write_temp(path, bytes)?.persist_noclobber(path) {
         Ok(_) => Ok(page),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Ok(serde_json::from_slice(&fs::read(path)?)?)
+            parse_page(&fs::read(path)?)
         }
         Err(error) => Err(error.into()),
     }

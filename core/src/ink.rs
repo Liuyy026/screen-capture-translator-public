@@ -34,6 +34,7 @@ pub fn clipped_box(block: &Value, width: i32, height: i32) -> Option<Box4> {
 
 pub fn ready(block: &Value) -> bool {
     !keeps_original(block)
+        && !crate::ocr_review::suppressed(block)
         && block["translation"].as_str().is_some_and(|s| !s.trim().is_empty())
         && !truth(&block["error"])
 }
@@ -45,6 +46,11 @@ pub fn preserved_markers(page: &Value) -> Value {
     );
     let mut preserved = json!({});
     for block in array(&page["blocks"]) {
+        if keeps_original(block) { continue; }
+        if crate::ocr_review::suppressed(block) {
+            preserved[text(&block["id"])] = json!(crate::ocr_review::reason(block));
+            continue;
+        }
         if truth(&block["edited"]) || !ready(block) {
             continue;
         }
@@ -65,6 +71,21 @@ pub fn preserved_markers(page: &Value) -> Value {
         }
     }
     preserved
+}
+
+// Tiny kana marks and punctuation can fall just outside a narrow OCR column.
+// Bound recovery to less than one character around that column; large connected
+// artwork/frame strokes cannot qualify. This does not alter stored OCR boxes.
+fn near_narrow_column(bounds: Box4, stat: [i32; 5], page_width: i32) -> bool {
+    let [a, b, c, d] = bounds;
+    let [x, y, w, h, _] = stat;
+    let width = c - a;
+    let reach = ((width as f64 * 0.8).ceil() as i32).clamp(6, 28);
+    width <= (page_width as f64 * 0.04).max(16.) as i32 && d - b >= width * 3
+        && x >= a - reach && x + w <= c + reach
+        && y >= b - reach && y + h <= d + reach
+        && (x < a || x + w > c || y < b || y + h > d)
+        && (x + w).min(c) - x.max(a) >= -3
 }
 
 pub fn complete_vertical_strokes(
@@ -115,11 +136,12 @@ pub fn complete_vertical_strokes(
     for label in 1..count {
         let start = label as usize * 5;
         let [x, y, w, h, area]: [i32; 5] = statistics[start..start + 5].try_into()?;
-        if !(2..=10).contains(&w)
-            || !(35..=180).contains(&h)
-            || h < 8 * w
-            || (area as f64) < h as f64 * 0.5
-        {
+        let long_stroke = (2..=10).contains(&w) && (35..=180).contains(&h)
+            && h >= 8 * w && (area as f64) >= h as f64 * 0.5;
+        let compact = area >= 3 && w >= 1 && h >= 2 && w.max(h) <= 32 && w.min(h) <= 12
+            && boxes.iter().zip(blocks).any(|(bbox, block)| bbox.is_some_and(|bounds|
+                truth(&block["vertical"]) && ready(block) && near_narrow_column(bounds, [x,y,w,h,area], width)));
+        if !long_stroke && !compact {
             continue;
         }
         let mut members = Vec::new();
@@ -163,20 +185,19 @@ pub fn complete_vertical_strokes(
             }
             let extension = (b - y).max(0) + (y + h - d).max(0);
             let middle = x as f64 + w as f64 / 2.0;
-            if !(a as f64 + (c - a) as f64 * 0.15 < middle
+            let compact_mark = compact && near_narrow_column([a,b,c,d], [x,y,w,h,area], width)
+                && (evidence >= 0.45 || (nearby <= 3.0 && y >= b && y + h <= d));
+            let aligned_stroke = long_stroke && a as f64 + (c - a) as f64 * 0.15 < middle
                 && middle < c as f64 - (c - a) as f64 * 0.15
                 && extension > 8
-                && extension <= 160)
-            {
-                continue;
-            }
+                && extension <= 160;
             let overlap = (y + h).min(d) - y.max(b);
             let detected_dash = overlap >= 2 && evidence >= 0.12;
             let trailing = d - y >= -2
                 && ((d - y) as f64) <= 6.0f64.min(h as f64 * 0.1)
                 && nearby <= 3.0
                 && evidence == 0.0;
-            if !detected_dash && !trailing {
+            if !compact_mark && !(aligned_stroke && (detected_dash || trailing)) {
                 continue;
             }
             if boxes.iter().enumerate().any(|(j, other)| {
@@ -188,6 +209,10 @@ pub fn complete_vertical_strokes(
                 continue;
             }
             let expanded = expanded[i].as_mut().unwrap();
+            if compact_mark {
+                expanded[0] = expanded[0].min((x - 2).max(0));
+                expanded[2] = expanded[2].max((x + w + 2).min(width));
+            }
             expanded[1] = expanded[1].min((y - 2).max(0));
             expanded[3] = expanded[3].max((y + h + 2).min(height));
             for &p in &members {
@@ -197,6 +222,38 @@ pub fn complete_vertical_strokes(
         }
     }
     Ok((expanded, Some(supplemented)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::blank;
+    use opencv::core::Rect;
+
+    #[test]
+    fn recover_clipped_note_marks_without_frame_or_other_text() -> Result<()> {
+        let mut gray = blank(400, 500, 255)?;
+        let mut source = blank(400, 500, 0)?;
+        // Column ends at y=190; the detector still sees its detached final mark.
+        for y in [70, 95, 120, 145, 170, 193] {
+            imgproc::rectangle(&mut gray, Rect::new(82,y,4,9), Scalar::all(0.), -1, 8, 0)?;
+            imgproc::rectangle(&mut source, Rect::new(82,y,4,9), Scalar::all(255.), -1, 8, 0)?;
+        }
+        // A neighboring frame and an unsupported drawing mark must survive.
+        imgproc::rectangle(&mut gray, Rect::new(102,30,3,250), Scalar::all(0.), -1, 8, 0)?;
+        imgproc::rectangle(&mut gray, Rect::new(75,196,3,6), Scalar::all(0.), -1, 8, 0)?;
+        let blocks = vec![json!({"id":"note","vertical":true,"translation":"这么一说","error":""})];
+        let boxes = vec![Some([78,65,92,190])];
+        let (recovered, _) = complete_vertical_strokes(&gray, &boxes, &blocks, Some(&source))?;
+        assert_eq!(recovered, vec![Some([78,65,92,204])]);
+        assert_eq!(boxes, vec![Some([78,65,92,190])]);
+        let mut other = blocks.clone(); other.push(json!({"id":"other","vertical":true,"translation":"其他"}));
+        let (protected, _) = complete_vertical_strokes(&gray, &[boxes[0],Some([80,191,90,205])], &other, Some(&source))?;
+        assert_eq!(protected[0], boxes[0]);
+        let mut kept = blocks.clone(); kept[0]["keep_original"] = json!(true);
+        assert_eq!(complete_vertical_strokes(&gray, &boxes, &kept, Some(&source))?.0, boxes);
+        Ok(())
+    }
 }
 
 pub fn probe(page: &Value, gray: &Mat, source: Option<&Mat>) -> Result<Value> {

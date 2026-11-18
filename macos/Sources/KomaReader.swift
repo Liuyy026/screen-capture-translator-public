@@ -51,17 +51,11 @@ private struct NativeLoadedPage: Decodable {
     }
     private var layoutImage: URL?
     var srSettings: [String: Any] { ["engine": srEngine, "target": srTarget, "axis": srAxis, "preset": srPreset] }
-    private func resetPageForEnhancement() {
-        cancel()
-        page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil; layoutImage = nil
-        readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
-        image = selected.flatMap { NSImage(contentsOf: $0) }
-    }
-
     func changeEnhancement() {
         if srEngine == "metalfx" { srPreset = "standard" }
         error = nil; srStatus = ""
-        resetPageForEnhancement()
+        page = nil; cacheURL = nil; pageRevision = nil; effectiveImage = nil; layoutImage = nil
+        image = selected.flatMap { NSImage(contentsOf: $0) }
         reloadPage(updateMessage: true)
         Task {
             struct Backend: Decodable { var engine: String; var available: Bool; var presets: [String]; var reason: String }
@@ -99,9 +93,11 @@ private struct NativeLoadedPage: Decodable {
     var editCacheIdentity: String? { cacheURL?.path }
     private var started = false
     @Published private var folderRequest: UUID?
-    private var connectionRequest = UUID()
+    var openingFolder: Bool { folderRequest != nil }
+    private var connectionRequest: UUID?
     private var sessionKeys: [String: String] = [:]
     private let connectionConfigStore: TranslationLocalConfigStore
+    var connectionConfigURL: URL { connectionConfigStore.url }
     private let defaults: UserDefaults
     private var localConfiguration: TranslationLocalConfiguration
     private(set) var configurationLoadError: String?
@@ -140,10 +136,8 @@ private struct NativeLoadedPage: Decodable {
         do {
             if let saved = try self.connectionConfigStore.load() {
                 localConfiguration = saved
-            } else if configurationStore == nil, FileManager.default.fileExists(atPath: TranslationLocalConfigStore.defaultURL.path) {
-                // Read stable configuration without changing its permissions or contents.
-                let data = try Data(contentsOf: TranslationLocalConfigStore.defaultURL)
-                localConfiguration = try JSONDecoder().decode(TranslationLocalConfiguration.self, from: data).validated()
+            } else if configurationStore == nil, let stable = try TranslationLocalConfigStore().load(readOnly: true) {
+                localConfiguration = stable
                 try self.connectionConfigStore.save(localConfiguration)
             } else {
                 // Preserve legacy endpoint/model choices, without consulting Keychain.
@@ -216,7 +210,7 @@ private struct NativeLoadedPage: Decodable {
         try connectionConfigStore.save(updated)
         localConfiguration = updated
         sessionKeys[config.identity] = config.apiKey
-        connectionRequest = UUID()
+        connectionRequest = nil
         connection = config
         availableModels = models
         self.model = model
@@ -286,10 +280,11 @@ private struct NativeLoadedPage: Decodable {
             engineReady = false
             return false
         }
-        guard !busy else { return engineReady }
+        guard !busy, connectionRequest == nil else { return engineReady }
         let snapshot = connection
         let request = UUID()
         connectionRequest = request
+        defer { if request == connectionRequest { connectionRequest = nil } }
         do {
             let models = try await discoverModels(snapshot, allowLocalStart: allowLocalStart, requireCurrentConnection: true)
             guard request == connectionRequest, snapshot == connection, !busy else { return false }
@@ -300,7 +295,7 @@ private struct NativeLoadedPage: Decodable {
             if !model.isEmpty { defaults.set(model, forKey: "translationModel." + connection.identity) }
             engineReady = !models.isEmpty
             connectionError = models.isEmpty ? "连接成功，但服务没有返回可用模型。" : nil
-            return true
+            return engineReady
         } catch {
             guard request == connectionRequest, snapshot == connection, !busy else { return false }
             engineReady = false
@@ -326,14 +321,18 @@ private struct NativeLoadedPage: Decodable {
             defer { if request == folderRequest { folderRequest = nil } }
             do {
                 let images = try await Task.detached(priority: .userInitiated) {
-                    let extensions: Set<String> = ["webp", "png", "jpg", "jpeg", "bmp", "tiff"]
+                    let extensions: Set<String> = ["webp", "png", "jpg", "jpeg", "bmp", "tif", "tiff"]
                     let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
                     return contents.filter { extensions.contains($0.pathExtension.lowercased()) &&
                         ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true) }
                         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 }.value
                 guard request == folderRequest else { return }
-                guard !images.isEmpty else { self.error = "这个文件夹里没有 WebP、PNG 或 JPG 图片。请选择直接包含漫画图片的文件夹。"; return }
+                guard !images.isEmpty else {
+                    self.error = "这个文件夹里没有支持的漫画图片。请选择直接包含图片的文件夹。"
+                    message = "未打开新文件夹"
+                    return
+                }
                 pageProcessingErrors.removeAll()
                 files = images; folderName = url.lastPathComponent
                 defaults.set(url.path, forKey: "folder")
@@ -341,7 +340,10 @@ private struct NativeLoadedPage: Decodable {
                 let initial = restore ? (images.first { $0.path == last } ?? images[0]) : images[0]
                 select(initial)
             } catch {
-                if request == folderRequest { self.error = "无法打开文件夹：\(error.localizedDescription)" }
+                if request == folderRequest {
+                    self.error = "无法打开文件夹：\(error.localizedDescription)"
+                    message = "未打开新文件夹"
+                }
             }
         }
     }
@@ -369,16 +371,18 @@ private struct NativeLoadedPage: Decodable {
         readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
     }
 
-    func reloadPage(updateMessage: Bool = false) {
+    func reloadPage(updateMessage: Bool = false, useOriginalImage: Bool = false) {
         pageTask?.cancel()
         pageRequest = UUID()
         resetReadingRegions()
         guard let selected else { page = nil; return }
         let request = pageRequest, mode = processingMode
-        let enhancement = srSettings
+        var enhancement = srSettings
+        if useOriginalImage { enhancement["engine"] = "off" }
         loadingPage = true; pageLoadError = nil; enhancementWarning = nil
-        preparingImage = srEngine != "off"
-        if updateMessage, !busy { message = "正在读取本页结果…" }
+        preparingImage = !useOriginalImage && srEngine != "off"
+        let loadingMessage = "正在读取本页结果…"
+        if updateMessage, !busy { message = loadingMessage }
         pageTask = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -395,8 +399,12 @@ private struct NativeLoadedPage: Decodable {
                 cacheURL = URL(fileURLWithPath: result.cache); pageRevision = result.revision
                 page = result.page
                 if page != nil { prepareReadingRegions(cache: cacheURL!) }
-                if updateMessage, !busy {
-                    message = page == nil ? "当前翻译方式下尚无本页识别结果" : "已读取本页识别与译文 · \(page?.blocks.count ?? 0) 处文字"
+                if updateMessage, !busy, message == loadingMessage {
+                    if let page {
+                        let review = page.blocks.filter(\.needsOCRReview).count
+                        message = "已读取本页识别与译文 · \(page.blocks.count - review) 处文字"
+                        if review > 0 { message += " · \(review) 处疑似非文字，待核对" }
+                    } else { message = "当前翻译方式下尚无本页识别结果" }
                 }
             } catch {
                 guard !Task.isCancelled, request == pageRequest else { return }
@@ -404,6 +412,7 @@ private struct NativeLoadedPage: Decodable {
                 let detail = "无法读取本页：\(error.localizedDescription)"
                 pageLoadError = detail
                 self.error = detail
+                if updateMessage, !busy, message == loadingMessage { message = "未能读取本页结果" }
             }
         }
     }
@@ -453,12 +462,15 @@ private struct NativeLoadedPage: Decodable {
             completion?(false)
             return
         }
-        let sourceChanged = source != block.source
+        var edit = ReaderEditDraft(block: block)
+        edit.source = source
+        edit.translation = translation
+        let savedTranslation = edit.savedTranslation
         editBlock(id: id, fields: [
-            "source": source, "translation": sourceChanged ? "" : translation,
-            "edited": !sourceChanged && !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "source": source, "translation": savedTranslation,
+            "edited": !savedTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             "error": "", "vision_source": "", "quality_warnings": []],
-            status: sourceChanged ? "日文已修改，旧译文已清除；点击翻译生成新译文" : "修改已保存；手改的译文会保留", completion: completion)
+            status: edit.sourceChanged && savedTranslation.isEmpty ? "日文已修改，旧译文已清除；点击翻译生成新译文" : "修改已保存", completion: completion)
     }
 
     func setPreserveBubble(_ keep: Bool, id: String) {
@@ -475,8 +487,13 @@ private struct NativeLoadedPage: Decodable {
         }
     }
 
+    func confirmOCR(_ id: String) {
+        editBlock(id: id, fields: ["ocr_confirmed": true],
+                  status: "已确认为文字，可编辑或重新翻译", completion: nil)
+    }
+
     private func editBlock(id: String, fields: [String: Any], status: String, completion: ((Bool) -> Void)?) {
-        guard !busy, !preparingImage, let cacheURL, let revision = pageRevision else {
+        guard !busy, !openingFolder, !preparingImage, let cacheURL, let revision = pageRevision else {
             completion?(false)
             return
         }
@@ -499,11 +516,16 @@ private struct NativeLoadedPage: Decodable {
                     pageRevision = result.revision
                     page = result.page
                     prepareReadingRegions(cache: cacheURL)
+                } else if self.selected == selected {
+                    // A round trip may have loaded this page before the edit committed.
+                    // Ask for the current view's image, cache and revision together.
+                    reloadPage()
                 }
                 message = status
                 completion?(true)
             } catch is CancellationError {
-                message = "已停止；请重新打开页面确认保存结果"
+                if self.selected == selected { reloadPage() }
+                message = "已停止保存"
                 completion?(false)
             } catch {
                 self.error = "保存失败：\(error.localizedDescription)"
@@ -513,12 +535,12 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func retryBlock(_ id: String) {
-        guard !busy, page?.blocks.contains(where: { $0.id == id && !$0.keepsOriginal }) == true else { return }
+        guard !busy, page?.blocks.contains(where: { $0.id == id && !$0.keepsOriginal && !$0.needsOCRReview }) == true else { return }
         run(operation: "translate", blockID: id)
     }
 
     func run(operation: String = "both", batch: Bool = false, blockID: String? = nil) {
-        guard !busy, let selected else { return }
+        guard !busy, !openingFolder, !preparingImage, let selected else { return }
         let jobConnection = connection
         var options: [String: Any] = ["mode": processingMode, "model": model, "provider": jobConnection.provider,
             "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
@@ -537,7 +559,6 @@ private struct NativeLoadedPage: Decodable {
             srEngine = "metalfx"
             srPreset = "standard"
             srStatus = ""
-            resetPageForEnhancement()
         }
         runQueue(files, operation: "enhance")
     }
@@ -630,14 +651,23 @@ private struct NativeLoadedPage: Decodable {
         if enhancing { message = "正在准备整章超分…" }
         let request = UUID(); operationRequest = request
         task = Task { [self] in
+            var startedImages = Set<String>()
             defer {
                 // No newer processing task can start while this one owns busy.
                 busy = false; task = nil
-                if !enhancing, request == operationRequest { reloadPage() }
+                if Task.isCancelled { message = "已停止；已完成的结果已保存" }
+                if !enhancing, request == operationRequest || selected.map({ startedImages.contains($0.path) }) == true {
+                    reloadPage()
+                }
             }
             do {
                 let data = try await nativeCore.request("process", values: values) { [weak self] event in
-                    guard let self, request == operationRequest, !Task.isCancelled else { return }
+                    // Rust announces a page before writing its cache. Checkpoints can
+                    // arrive after Stop, or be dropped while the event channel is full.
+                    if event["event"] as? String == "page_started", let path = event["image"] as? String {
+                        startedImages.insert(path)
+                    }
+                    guard let self, request == operationRequest else { return }
                     switch event["event"] as? String {
                     case "progress": if let text = event["message"] as? String { message = text }
                     case "page_started":
@@ -700,14 +730,24 @@ private struct NativeLoadedPage: Decodable {
             task?.cancel()
             return
         }
-        if busy { message = "已停止；已完成的结果已保存" }
-        else if preparingImage { message = "已停止前置增强；原图保留" }
-        operationRequest = UUID()
-        task?.cancel(); pageTask?.cancel(); readingTask?.cancel()
+        if busy {
+            message = "正在停止处理…"
+            operationRequest = UUID()
+            task?.cancel()
+            // Page navigation and its overlay load belong to the reader, not the queued job.
+            return
+        }
+        if preparingImage {
+            message = "已停止前置增强；当前页使用原图"
+            reloadPage(useOriginalImage: true)
+            return
+        }
+        pageTask?.cancel(); readingTask?.cancel()
         pageRequest = UUID(); readingRequest = UUID(); preparingImage = false; loadingPage = false
     }
     func shutdown() {
-        pageTask?.cancel(); readingTask?.cancel(); cancel(); modelTimer?.invalidate()
+        folderRequest = nil; connectionRequest = nil
+        pageTask?.cancel(); readingTask?.cancel(); task?.cancel(); modelTimer?.invalidate()
         nativeCore.shutdown()
     }
 

@@ -25,7 +25,16 @@ def run(r):
     else:send({'id':ident,'event':'result','result':{'echo':r.get('value',0)}})
 for line in sys.stdin:
     r=json.loads(line)
-    if r['op']=='cancel':
+    if r['op']=='disconnect':
+        os.close(0)
+        send({'id':r['id'],'event':'result','result':{}})
+        # Keep stdout open so the next write reaches a closed pipe.
+        release=Path(__file__).with_suffix('.release')
+        deadline=time.monotonic()+10
+        while not release.exists() and time.monotonic()<deadline:
+            time.sleep(.01)
+        sys.exit(0)
+    elif r['op']=='cancel':
         cancelled.get(r['target'],threading.Event()).set()
         send({'id':r['id'],'event':'result','result':{}})
     else:
@@ -55,6 +64,12 @@ Path(__file__).with_suffix('.closed').write_text('closed')
         catch let error as NativeCoreService.Failure { precondition(error.message == "expected error") }
         let again = try object(await service.request("echo", values: ["value": 99]))
         precondition(again["echo"] as? Int == 99)
+        _ = try await service.request("disconnect")
+        do { _ = try await service.request("echo"); preconditionFailure("broken input did not throw") }
+        catch is NativeCoreService.Failure { }
+        try Data().write(to: fake.deletingPathExtension().appendingPathExtension("release"))
+        let restarted = try object(await service.request("echo", values: ["value": 42]))
+        precondition(restarted["echo"] as? Int == 42)
         service.shutdown()
         let closed = fake.deletingPathExtension().appendingPathExtension("closed")
         for _ in 0..<200 {
@@ -63,6 +78,6 @@ Path(__file__).with_suffix('.closed').write_text('closed')
         }
         precondition(FileManager.default.fileExists(atPath: closed.path))
 
-        print("Native Swift transport passed: multiplexing, large reply, cancellation, error recovery and EOF.")
+        print("Native Swift transport passed: multiplexing, large reply, cancellation, error recovery, broken input and restart, and EOF.")
     }
 }

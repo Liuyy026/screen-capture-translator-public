@@ -1,10 +1,10 @@
 //! Image-grounded translation; original OCR and ordinary caches stay intact.
 use crate::{
     compat::{array, keeps_original, text, truth},
-    overlay, persistence,
+    persistence,
     service::TranslationService,
     structure,
-    translate_pipeline::{Observer, Trace, remove},
+    translate_pipeline::{Observer, Trace, prepare_config, remove, save_results},
     translation, vision_image,
 };
 use anyhow::{Result, ensure};
@@ -17,13 +17,13 @@ use std::{
 
 pub fn prepare(image: &Path, destination: &Path, ordinary_root: &Path) -> Result<Option<Value>> {
     if destination.exists() {
-        return Ok(Some(serde_json::from_slice(&std::fs::read(destination)?)?));
+        return Ok(Some(persistence::parse_page(&std::fs::read(destination)?)?));
     }
     let ordinary = persistence::cache_path(image, ordinary_root)?;
     if !ordinary.exists() {
         return Ok(None);
     }
-    let page = serde_json::from_slice(&std::fs::read(ordinary)?)?;
+    let page = persistence::parse_page(&std::fs::read(ordinary)?)?;
     Ok(Some(from_text(page)))
 }
 
@@ -33,6 +33,7 @@ pub fn from_text(mut page: Value) -> Value {
             if !truth(&b["edited"]) {
                 b["translation"] = json!("");
                 b["error"] = json!("");
+                remove(b, &["translation_config_override", "quality_warnings", "vision_source"]);
             }
         }
     }
@@ -55,7 +56,7 @@ pub fn from_text(mut page: Value) -> Value {
 }
 
 pub async fn translate(
-    page: &mut Value,
+    current_page: &mut Value,
     image: &Path,
     layout_image: Option<&Path>,
     model: &str,
@@ -67,44 +68,26 @@ pub async fn translate(
         service.provider == "omlx",
         "视觉辅助翻译需要 oMLX 和支持图片的模型，请在接口设置中选择。"
     );
-    if array(&page["blocks"]).is_empty() {
+    if array(&current_page["blocks"]).is_empty() {
         return Ok(());
     }
-    translation::audit_cache(page);
+    // Planning normalizes dialogue structure and block provenance. Publish the
+    // prepared page only after the model check (or a fully cached result).
+    let mut prepared = current_page.clone();
+    let page = &mut prepared;
+    let audit_changed = translation::audit_cache(page, block_id);
     structure::ensure(page, layout_image)?;
     let config = json!({"mode":"vision","version":1,"prompt_revision":2,"model":model,
         "image_edge":vision_image::IMAGE_EDGE,"batch_size":8,"ocr":structure::ocr_signature(page),
         "provider":service.provider,"base_url":service.base_url});
-    if page["translation_config"] != config {
-        for b in page["blocks"].as_array_mut().unwrap() {
-            if !truth(&b["edited"]) && !keeps_original(b) {
-                b["translation"] = json!("");
-                b["error"] = json!("");
-                remove(b, &["vision_source"]);
-            }
-        }
-        if let Some(dialogues) = page["dialogues"].as_array_mut() {
-            for d in dialogues {
-                remove(
-                    d,
-                    &[
-                        "full_translation",
-                        "mapping",
-                        "mapping_status",
-                        "translation_config",
-                    ],
-                );
-            }
-        }
-        page["translation_config"] = config;
-        page["model"] = json!(model);
-        observer.save(page)?;
-    }
+    let page_changed = page["translation_config"] != config;
+    let changed = prepare_config(page, &config, page_changed, block_id);
     let mut pending: Vec<_> = (0..array(&page["blocks"]).len())
         .filter(|&i| {
             let b = &page["blocks"][i];
             !truth(&b["edited"])
                 && !keeps_original(b)
+                && !crate::ocr_review::suppressed(b)
                 && b["overlay"] != "skip"
                 && b["text_kind"] != "noise"
                 && block_id.is_none_or(|id| text(&b["id"]) == id)
@@ -118,6 +101,8 @@ pub async fn translate(
             .total_cmp(&page["blocks"][b]["reading_order"].as_f64().unwrap_or(1e9))
     });
     if pending.is_empty() {
+        if changed || audit_changed { structure::sync(page)?; observer.save(page)?; }
+        *current_page = prepared;
         return Ok(());
     }
     ensure!(
@@ -129,6 +114,9 @@ pub async fn translate(
         "所选视觉模型不在 oMLX 模型列表中，请刷新模型列表。"
     );
     let encoded = vision_image::encode(image)?;
+    *current_page = prepared;
+    let page = current_page;
+    if changed { observer.save(page)?; }
     let count = pending.len().div_ceil(8);
     for (index, indices) in pending.chunks(8).enumerate() {
         observer.progress(&format!("正在结合画面翻译第 {} / {} 组…", index + 1, count))?;
@@ -233,9 +221,7 @@ pub async fn translate(
         }
         page["vision_runs"] = json!(runs);
         page["vision_input"] = json!({"width":encoded.width,"height":encoded.height});
-        overlay::ensure(page, Some(image))?;
-        structure::sync(page)?;
-        observer.save(page)?;
+        save_results(page, layout_image, observer)?;
         observer.metrics(&event)?;
     }
     Ok(())

@@ -199,20 +199,25 @@ pub fn low_impact(source: &Value, has_region: bool) -> bool {
         .contains(&compact.as_str())
 }
 
-pub fn audit_cache(page: &mut Value) {
+pub fn audit_cache(page: &mut Value, block_id: Option<&str>) -> bool {
+    let mut changed = false;
     if let Some(blocks) = page["blocks"].as_array_mut() {
         for block in blocks {
-            if truth(&block["translation"]) && !truth(&block["edited"]) && !keeps_original(block) {
+            if block_id.is_none_or(|id| text(&block["id"]) == id)
+                && truth(&block["translation"]) && !truth(&block["edited"])
+                && !keeps_original(block) && !crate::ocr_review::suppressed(block) {
                 let mut reason = translation_error(&block["translation"]);
                 if reason.is_empty() && same_as_source(&block["source"], &block["translation"]) {
                     reason = ECHO_ERROR.into();
                 }
-                if !reason.is_empty() {
+                if !reason.is_empty() && block["error"] != reason {
                     block["error"] = json!(reason);
+                    changed = true;
                 }
             }
         }
     }
+    changed
 }
 
 pub fn parse_translations(
@@ -368,7 +373,9 @@ pub fn vision_payload(
             .unwrap_or(1e9)
             .total_cmp(&b["reading_order"].as_f64().unwrap_or(1e9))
     });
-    let context:Vec<_>=blocks.iter().filter(|b| !keeps_original(b)).map(|b|json!({"id":text(&b["id"]),"ja":b["source"],"box":b["box"],"vertical":truth(&b["vertical"]),"reading_order":b["reading_order"]})).collect();
+    let context:Vec<_>=blocks.iter().filter(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)
+        && b["overlay"] != "skip" && b["text_kind"] != "noise")
+        .map(|b|json!({"id":text(&b["id"]),"ja":b["source"],"box":b["box"],"vertical":truth(&b["vertical"]),"reading_order":b["reading_order"]})).collect();
     let instruction = concat!(
         "你是一名日译中漫画译者。图片是完整漫画页，文字坐标以原图像素计。",
         "结合画面中的人物表情、动作、物品和说话场景，忠实翻译 target_ids 对应的日文，返回自然简体中文。",
@@ -413,7 +420,7 @@ pub fn protocol_probe(request: &Value) -> Result<Value> {
         }
         "audit" => {
             let mut page = request["page"].clone();
-            audit_cache(&mut page);
+            audit_cache(&mut page, None);
             page
         }
         _ => bail!("unknown translation probe"),

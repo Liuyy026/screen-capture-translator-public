@@ -13,9 +13,12 @@ pub fn decode_gray(path: &Path) -> Result<Mat> {
 }
 
 pub fn display_gray(path: &Path) -> Result<Mat> {
-    let color = decode_color(path)?;
+    color_to_gray(&decode_color(path)?)
+}
+
+pub fn color_to_gray(color: &Mat) -> Result<Mat> {
     let mut gray = Mat::default();
-    imgproc::cvt_color_def(&color, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+    imgproc::cvt_color_def(color, &mut gray, imgproc::COLOR_BGR2GRAY)?;
     Ok(gray)
 }
 

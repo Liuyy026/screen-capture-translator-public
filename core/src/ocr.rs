@@ -28,6 +28,7 @@ pub fn assemble(raw:&Value)->Result<Value>{
 pub async fn recognize(image:&Path,models:&mut ImageModels)->Result<Value>{
     let raw=models.ocr(image).await?;
     let mut page=assemble(&raw)?;
+    crate::ocr_review::ensure(&mut page, &crate::imaging::display_gray(image)?)?;
     overlay::ensure(&mut page,Some(image))?;
     structure::ensure(&mut page,Some(image))?;
     Ok(page)

@@ -89,7 +89,7 @@ pub(super) fn legacy_enhanced_page(
         let Some(page) = read_json(&legacy, 16 * 1024 * 1024) else {
             continue;
         };
-        let Some((width, height)) = canvas(&page).filter(|_| page["blocks"].is_array()) else {
+        let Some((width, height)) = canvas(&page).filter(|_| crate::persistence::validate_page(&page).is_ok()) else {
             continue;
         };
         if identity["width"] != width || identity["height"] != height {

@@ -9,6 +9,7 @@ mod local_engine;
 mod model_images;
 mod models;
 mod ocr;
+mod ocr_review;
 mod overlay;
 mod panels;
 mod persistence;

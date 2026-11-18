@@ -103,7 +103,7 @@ for line in __import__('sys').stdin:
             (weights/'started').write_text(str(os.getpid()))
             time.sleep(60)
         if (weights/'crash').exists():os._exit(23)
-        result={'img_width':64,'img_height':64,'blocks':[]}
+        result={'img_width':300,'img_height':300,'blocks':[]}
     print(json.dumps({'id':r['id'],'ok':True,'result':result}),flush=True)
     if op=='shutdown':break
 '''
@@ -150,10 +150,12 @@ def main():
         assert client.call('health')['active'] == 0
         loaded = [client.call('load_page', image=p['image'], mode='vision') for p in pages]
         for p, result in zip(pages, loaded):
-            assert Path(result['cache']).read_bytes() == Path(p['cache']).read_bytes()
+            imported = json.loads(Path(result['cache']).read_bytes())
+            assert imported.pop('ocr_review_signature')
+            assert imported == json.loads(Path(p['cache']).read_bytes())
             assert Path(result['cache']).stat().st_mode & 0o777 == 0o600
         assert not (weights/'calls.jsonl').exists()
-        passed('Synthetic caches copied byte-for-byte, private and lazy', pages=len(loaded))
+        passed('Synthetic imports preserve original data and add OCR review metadata without inference', pages=len(loaded))
         job = client.send('process', images=[p['image'] for p in pages], operation='ocr', mode='vision', model='unused')
         reply = client.wait(job)['result']
         assert len(reply['pages']) == len(pages) and all(p['ok'] for p in reply['pages'])
@@ -165,7 +167,7 @@ def main():
         updated = client.call('edit', cache=first['cache'], block_id=block_id,
                               values={'translation':'手动校正内容', 'edited':True}, revision=first['revision'])
         expected = json.loads(json.dumps(original))
-        expected['blocks'][0].update(translation='手动校正内容', edited=True)
+        expected['blocks'][0].update(translation='手动校正内容', edited=True, ocr_confirmed=True)
         expected['cache_retention'] = {'version': 1, 'kind': 'manual'}
         assert updated['page'] == expected
         stale = client.wait(client.send('edit', cache=first['cache'], block_id=block_id,
@@ -223,8 +225,8 @@ def main():
         with Server() as server:
             result = client.call('load_page', image=image, mode='text')
             page = result['page']
-            page['blocks'] = [dict(id='1',box=[10,10,50,50],source='こんにちは',translation='',error='',edited=False),
-                              dict(id='2',box=[10,10,50,50],source='さようなら',translation='保留手改',error='',edited=True)]
+            page['blocks'] = [dict(id='1',box=[50,50,85,110],source='こんにちは',translation='',error='',edited=False),
+                              dict(id='2',box=[190,50,225,110],source='さようなら',translation='保留手改',error='',edited=True)]
             Path(result['cache']).write_text(json.dumps(page))
             options = dict(images=[image], operation='translate', mode='text', model='same-model',
                            provider='omlx', base_url=server.url, key='fake-secret')

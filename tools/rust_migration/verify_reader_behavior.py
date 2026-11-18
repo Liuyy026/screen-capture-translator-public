@@ -50,7 +50,15 @@ def main():
         prefix.with_suffix('.reply.json').write_bytes(result.stdout)
         return json.loads(result.stdout)
     module.reading.reading_regions = lambda page,gray,**kw: run(page,gray,**kw)['regions']
-    module.reading.preserved_markers = lambda page: run(page,np.full((page['height'],page['width']),255,np.uint8))['preserved']
+    def preserved_markers(page):
+        # This page-only test exercises footer detection. Draw a visible glyph
+        # at each supplied box so a blank test image does not trigger OCR review.
+        gray = np.full((page['height'], page['width']), 255, np.uint8)
+        for block in page['blocks']:
+            x, y, right, bottom = block['box']
+            gray[y + 4:bottom - 4, x + 4:right - 4] = 20
+        return run(page, gray)['preserved']
+    module.reading.preserved_markers = preserved_markers
     adapter = output/'native_cli_adapter.py'
     adapter.write_text('import os,sys\ncore = '+repr(str(binary))+'\nos.execv(core,[core,"display",*sys.argv[1:]])\n')
     module.SCRIPT = adapter

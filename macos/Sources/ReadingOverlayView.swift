@@ -37,9 +37,8 @@ struct ReadingOverlayView: View {
         Canvas { context, _ in
             let contour = polygon(region.points, origin: origin)
             context.clip(to: contour)
-            if let encoded = region.background_png, let box = region.background_box,
-               box.count == 4, let data = Data(base64Encoded: encoded), let restored = NSImage(data: data) {
-                let patch = Image(nsImage: restored)
+            if let restored = presentation.background, let box = region.background_box {
+                let patch = Image(decorative: restored, scale: 1)
                 context.draw(patch, in: CGRect(x: (box[0] - left) * scale, y: (box[1] - top) * yScale,
                                               width: (box[2] - box[0]) * scale, height: (box[3] - box[1]) * yScale))
             } else if region.background_png == nil {

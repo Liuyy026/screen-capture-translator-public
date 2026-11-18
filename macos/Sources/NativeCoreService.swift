@@ -44,6 +44,11 @@ import Darwin
         if child?.isRunning == true { return }
         guard pending.isEmpty else { throw Failure(message: "处理服务正在退出，请稍后重试。") }
         let process = Process(), incoming = Pipe(), outgoing = Pipe()
+        // If the core exits during a write, deliver EPIPE to the writer so
+        // pending requests fail normally and the next request can restart it.
+        guard fcntl(incoming.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw Failure(message: "无法建立与处理服务的连接。")
+        }
         process.executableURL = executable; process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "KOMA_TRANSLATION_API_KEY")

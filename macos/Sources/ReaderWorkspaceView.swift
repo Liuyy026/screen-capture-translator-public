@@ -91,7 +91,7 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
                 Button("只识别本页日文") { reader.run(operation: "ocr") }
                 Button("翻译整个文件夹") { reader.run(batch: true) }.disabled(!reader.engineReady)
             } label: { Image(systemName: "ellipsis") }
-                .disabled(reader.selected == nil || working)
+                .disabled(reader.selected == nil || working || reader.openingFolder)
                 .help("更多处理操作").accessibilityIdentifier("more-processing")
         }
     }
@@ -115,7 +115,7 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
             } else {
                 Button { reader.run() } label: {
                     Label("识别并翻译", systemImage: "character.bubble").frame(width: 102)
-                }.disabled(reader.selected == nil || !reader.engineReady)
+                }.disabled(reader.selected == nil || !reader.engineReady || reader.openingFolder)
                     .accessibilityIdentifier("translate-page")
             }
         }.labelStyle(.titleAndIcon).buttonStyle(ReaderToolbarPrimaryButtonStyle())
@@ -254,7 +254,7 @@ private struct ReaderCanvasView: View {
             }
         }.frame(width: width, height: height).contentShape(Rectangle())
             .onTapGesture { select(block.id) }
-            .help(block.keepsOriginal || block.translation.isEmpty ? block.source : block.translation)
+            .help(block.needsOCRReview ? (block.ocr_review?.reason ?? "疑似非文字，请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? block.source : block.translation))
             .accessibilityLabel("定位对白 " + block.id).accessibilityIdentifier("comic-block-" + block.id)
             .offset(x: x, y: y)
     }
@@ -271,7 +271,10 @@ private struct ReaderStatusView: View {
         if reader.readingRegions == nil { return "正在整理中文排版…" }
         var notes: [String] = []
         if reader.unreadableOverlayCount > 0 { notes.append("\(reader.unreadableOverlayCount) 处译文暂未覆盖到图片，可在对白栏阅读。") }
-        if !reader.readingPreserved.isEmpty { notes.append("\(reader.readingPreserved.count) 处疑似页码已保留原图，请核对原文。") }
+        let review = Set((reader.page?.blocks ?? []).filter(\.needsOCRReview).map(\.id))
+        if !review.isEmpty { notes.append("\(review.count) 处疑似非文字已暂停处理，可在「本页诊断」核对。") }
+        let markers = reader.readingPreserved.keys.filter { !review.contains($0) }.count
+        if markers > 0 { notes.append("\(markers) 处疑似页码已保留原图，请核对原文。") }
         return notes.isEmpty ? nil : notes.joined(separator: " ")
     }
 

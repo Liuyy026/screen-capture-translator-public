@@ -25,6 +25,9 @@ def make_pages(directory):
         draw = ImageDraw.Draw(pixels)
         draw.ellipse((25, 25, 130, 160), fill='white', outline='black', width=3)
         draw.ellipse((165, 25, 280, 160), fill='white', outline='black', width=3)
+        for left in (50, 190):
+            for y in (58, 75, 92):
+                draw.rectangle((left + 8, y, left + 16, y + 5), fill='black')
         pixels.save(image)
         image_hash = hashlib.sha256(image.read_bytes()).hexdigest()
         page = {'version': 2, 'width': 300, 'height': 300, 'model': '', 'ocr': 'synthetic',

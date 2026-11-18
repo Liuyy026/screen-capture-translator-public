@@ -88,6 +88,50 @@ import CoreGraphics
         region.background_box = [0,0,100,200]
         precondition(ReadingLayout.presentations(page: page, regions: [region]).isEmpty,
                      "Invalid background must not draw Chinese over uncleared source")
+        region.background_png = "iVBORw0KGgo="
+        precondition(ReadingLayout.presentations(page: page, regions: [region]).isEmpty,
+                     "The PNG signature by itself is not a drawable patch")
+        precondition(ReadingLayout.failureReason(blockID: "1", page: page, regions: [region]).contains("背景"))
+        region.background_png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAFUlEQVR4nGMMDQ39z8DAwMAEIlAYADA8AgTZwH/pAAAAAElFTkSuQmCC"
+        region.background_box = [10,10,12,13]
+        precondition(ReadingLayout.presentations(page: page, regions: [region]).count == 1)
+        region.background_box = [10,10,13,12]
+        precondition(ReadingLayout.presentations(page: page, regions: [region]).isEmpty,
+                     "Mismatched dimensions would stretch the cleanup over other artwork")
+        precondition(ReadingLayout.failureReason(blockID: "1", page: page, regions: [region]).contains("背景"))
+        // Reproduction of a one-character-wide marginal note: horizontal text
+        // cannot fit, but all seven Chinese characters fit in the original direction.
+        var note = ReadingRegion(id: "note", block_ids: ["1"],
+            points: [[68.4,405.85],[101.6,405.85],[101.6,619.15],[68.4,619.15]],
+            text_box: [68.4,405.85,101.6,619.15], fill_color: [255,255,255], vertical: true)
+        page.blocks[0].translation = "这么一说还真是"
+        let noteLayout = ReadingLayout.presentations(page: page, regions: [note]).first!.layout
+        precondition(noteLayout.glyphs.map(\.text).joined() == page.blocks[0].translation)
+        precondition(noteLayout.glyphs[1].center.y > noteLayout.glyphs[0].center.y)
+        precondition(Set(noteLayout.glyphs.map { $0.center.x }).count == 1)
+        var paddedNote = note
+        paddedNote.text_box = [63,405,110,639]
+        paddedNote.points = [[63,405],[109,405],[109,638],[63,638]]
+        let paddedLayout = ReadingLayout.presentations(page: page, regions: [paddedNote]).first!.layout
+        precondition(paddedLayout.fontSize >= 26 && Set(paddedLayout.glyphs.map { $0.center.x }).count == 1,
+                     "Recovering punctuation bounds must not shrink a marginal note into tiny horizontal fragments")
+        page.blocks[0].ocr_review = OCRReview(status: "suspect", reason: "缺少笔画")
+        precondition(ReadingLayout.presentations(page: page, regions: [note]).isEmpty,
+                     "An old translation must not erase suspected artwork")
+        precondition(!page.blocks[0].needsReadingOverlay)
+        page.blocks[0].ocr_confirmed = true
+        precondition(ReadingLayout.presentations(page: page, regions: [note]).count == 1)
+        page.blocks[0].keep_original = true
+        precondition(ReadingLayout.presentations(page: page, regions: [note]).isEmpty,
+                     "Confirming OCR never overrides preserve-original")
+        page.blocks[0].keep_original = false
+        page.blocks[0].translation = String(repeating: "长句", count: 100)
+        precondition(ReadingLayout.presentations(page: page, regions: [note]).isEmpty,
+                     "An overflowing note must retain its original image")
+        precondition(ReadingLayout.failureReason(blockID: "1", page: page, regions: [note]).contains("排不下"))
+        page.blocks[0].translation = "这么一说还真是"
+        note.points = [[0], [1,2], [3,4]]
+        precondition(ReadingLayout.presentations(page: page, regions: [note]).isEmpty)
         print("Reading layout checks passed: vertical order, wrapping, punctuation, complete text, legibility fallback and incomplete-group preservation")
     }
 }

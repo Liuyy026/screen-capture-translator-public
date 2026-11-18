@@ -12,6 +12,7 @@ struct ReaderEditDraft: Equatable {
     var source: String
     var translation: String
     var phase: Phase = .editing
+    var pageChangedWhileEditing = false
 
     init(block: TextBlock) {
         originalSource = block.source; originalTranslation = block.translation
@@ -20,7 +21,17 @@ struct ReaderEditDraft: Equatable {
 
     var changed: Bool { source != originalSource || translation != originalTranslation }
     var sourceChanged: Bool { source != originalSource }
-    var savedTranslation: String { sourceChanged ? "" : translation }
+    var clearsPreviousTranslation: Bool { sourceChanged && translation == originalTranslation }
+    var savedTranslation: String { clearsPreviousTranslation ? "" : translation }
+
+    func refreshed(with block: TextBlock) -> Self {
+        guard phase == .editing, block.source != originalSource || block.translation != originalTranslation else { return self }
+        var updated = Self(block: block)
+        if sourceChanged { updated.source = source }
+        if translation != originalTranslation { updated.translation = translation }
+        updated.pageChangedWhileEditing = true
+        return updated
+    }
 }
 
 @MainActor final class ReaderWorkspaceState: ObservableObject {
@@ -31,7 +42,7 @@ struct ReaderEditDraft: Equatable {
     @Published private(set) var drafts: [ReaderDraftKey: ReaderEditDraft] = [:]
 
     func draft(for key: ReaderDraftKey, block: TextBlock) -> ReaderEditDraft {
-        drafts[key] ?? ReaderEditDraft(block: block)
+        drafts[key]?.refreshed(with: block) ?? ReaderEditDraft(block: block)
     }
 
     func update(_ key: ReaderDraftKey, block: TextBlock, source: String? = nil, translation: String? = nil) {
@@ -47,17 +58,28 @@ struct ReaderEditDraft: Equatable {
         draft.phase = .saving; drafts[key] = draft
     }
 
-    func finishSave(_ key: ReaderDraftKey, succeeded: Bool) {
+    func finishSave(_ key: ReaderDraftKey, succeeded: Bool, visibleCache: String?) {
         guard var draft = drafts[key] else { return }
+        if succeeded && visibleCache != key.cache {
+            // Returning to this page will load the committed edit or a newer translation.
+            drafts.removeValue(forKey: key)
+            return
+        }
         draft.phase = succeeded ? .saved : .editing
         drafts[key] = draft
     }
 
     func reconcile(cache: String, page: PageResult) {
+        for (key, draft) in drafts where key.cache != cache && draft.phase == .saved {
+            drafts.removeValue(forKey: key)
+        }
         for block in page.blocks {
             let key = ReaderDraftKey(cache: cache, blockID: block.id)
-            guard let draft = drafts[key], draft.phase == .saved else { continue }
-            if block.source == draft.source && block.translation == draft.savedTranslation {
+            guard let draft = drafts[key] else { continue }
+            if draft.phase == .editing {
+                let updated = draft.refreshed(with: block)
+                if updated != draft { drafts[key] = updated.changed ? updated : nil }
+            } else if draft.phase == .saved && block.source == draft.source && block.translation == draft.savedTranslation {
                 drafts.removeValue(forKey: key)
             }
         }

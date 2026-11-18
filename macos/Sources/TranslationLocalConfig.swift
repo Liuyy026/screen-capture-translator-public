@@ -27,10 +27,12 @@ struct TranslationConnection: Equatable {
             guard (1...65535).contains(port) else { throw ConnectionError("接口端口无效。") }
             if (parts.scheme == "http" && port == 80) || (parts.scheme == "https" && port == 443) { parts.port = nil }
         }
-        var path = parts.path
+        // An escaped slash is data inside a proxy path component.
+        // Decoding it here would change the requested endpoint.
+        var path = parts.percentEncodedPath
         while path.hasSuffix("/") { path.removeLast() }
         if provider == "omlx" && !path.hasSuffix("/v1") { path += "/v1" }
-        parts.path = path
+        parts.percentEncodedPath = path
         guard let url = parts.url else { throw ConnectionError("接口地址无效。") }
         return TranslationConnection(provider: provider, baseURL: url.absoluteString,
                                      apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -125,8 +127,8 @@ struct TranslationLocalConfigStore {
         ConnectionError("\(reason)\n配置文件：\(url.path)\n请修正该文件，或将它移走保留备份，再重新打开应用；现有配置不会被自动覆盖。")
     }
 
-    func load() throws -> TranslationLocalConfiguration? {
-        // Refuse symlinks and nonregular files; tighten existing files before reading secrets.
+    func load(readOnly: Bool = false) throws -> TranslationLocalConfiguration? {
+        // Apply the same file checks to legacy imports, without changing the stable app's file.
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else {
             if errno == ENOENT { return nil }
@@ -137,7 +139,7 @@ struct TranslationLocalConfigStore {
         var info = stat()
         guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
               info.st_uid == getuid(), info.st_size <= 1_048_576,
-              fchmod(descriptor, S_IRUSR | S_IWUSR) == 0 else {
+              (readOnly || fchmod(descriptor, S_IRUSR | S_IWUSR) == 0) else {
             throw failure("本地连接配置必须是当前用户拥有、可读写的普通文件（不超过 1 MB）。")
         }
         do {

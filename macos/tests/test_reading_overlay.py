@@ -154,6 +154,10 @@ class ReadingOverlayTests(unittest.TestCase):
         page.update(width=1000, height=1400)
         cv2.ellipse(gray, (420, 220), (80, 150), 0, 0, 360, 255, -1)
         cv2.ellipse(gray, (280, 360), (80, 140), 0, 0, 360, 255, -1)
+        for entry in entries:
+            x, y, r, d = entry["box"]
+            for top in range(y + 5, d - 8, 16):
+                cv2.rectangle(gray, (x + 3, top), (r - 4, top + 5), 20, -1)
         regions = reading.reading_regions(page, gray)
         self.assertEqual([r["block_ids"] for r in regions], [["a"], ["b"]])
         masks = [polygon_mask(region["points"], gray.shape) for region in regions]
@@ -162,6 +166,7 @@ class ReadingOverlayTests(unittest.TestCase):
     def test_old_disjoint_fallback_is_preserved_but_overlapping_fallback_is_rejected(self):
         page, gray = fixture()
         page["blocks"].append(block("outside", (70, 700, 95, 800)))
+        page["blocks"][-1]["ocr_confirmed"] = True  # Exercise the legacy fallback for a reviewed block.
         safe = rectangle("old", ["outside"], (65, 695, 100, 805))
         page["overlay_regions"] = [safe]
         regions = reading.reading_regions(page, gray)

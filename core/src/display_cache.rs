@@ -1,7 +1,7 @@
 //! Disposable native display cache, independent from OCR/translation storage.
 use crate::{compat,imaging,ink,model_images::ImageModels,persistence,reading};
 use anyhow::{Result,ensure};
-use opencv::{core::{Mat,Vector},imgcodecs,imgproc,prelude::*};
+use opencv::{core::{Mat,Vector},imgcodecs,prelude::*};
 use serde_json::{Value,json};
 use sha2::{Digest,Sha256};
 use std::{path::{Path,PathBuf},time::UNIX_EPOCH};
@@ -22,6 +22,7 @@ impl Store{
         for code in [include_bytes!("reading.rs").as_slice(),include_bytes!("ink.rs").as_slice(),include_bytes!("geometry.rs").as_slice(),
             include_bytes!("background.rs").as_slice(),include_bytes!("texture.rs").as_slice(),include_bytes!("raster.rs").as_slice(),
             include_bytes!("preserved_bubbles.rs").as_slice(),
+            include_bytes!("ocr_review.rs").as_slice(),
             include_bytes!("imaging.rs").as_slice(),include_bytes!("display_cache.rs").as_slice(),include_bytes!("compat.rs").as_slice(),
             include_bytes!("model_images.rs").as_slice(),include_bytes!("../python/model_worker.py").as_slice()]{digest.update(code);}
         for name in ["comictextdetector.pt","anime-manga-big-lama.pt"]{model_identity(&mut digest,&self.weights.join(name))?;}
@@ -66,7 +67,10 @@ impl Store{
 
 pub async fn generate(image_bytes:&[u8],page:&Value,source:Option<Mat>,mut models:Option<&mut ImageModels>,store:Option<&Store>)->Result<Value>{
     let color=imaging::decode_bytes(image_bytes,imgcodecs::IMREAD_COLOR)?;
-    let mut gray=Mat::default();imgproc::cvt_color_def(&color,&mut gray,imgproc::COLOR_BGR2GRAY)?;
+    let gray=imaging::color_to_gray(&color)?;
+    let mut reviewed = page.clone();
+    crate::ocr_review::ensure(&mut reviewed, &gray)?;
+    let page = &reviewed;
     let has_color=color.data_bytes()?.chunks_exact(3).any(|p|p.iter().max().unwrap()-p.iter().min().unwrap()>8);
     let mut source=source;
     if source.is_none()&&compat::array(&page["blocks"]).iter().any(ink::ready){

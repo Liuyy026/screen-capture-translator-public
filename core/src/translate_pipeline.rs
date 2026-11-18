@@ -36,7 +36,7 @@ pub(crate) fn remove(value: &mut Value, keys: &[&str]) {
     }
 }
 
-fn save_results(
+pub(super) fn save_results(
     page: &mut Value,
     image: Option<&Path>,
     observer: &mut impl Observer,
@@ -60,13 +60,67 @@ fn has_content(block: &Value) -> bool {
 fn allowed(block: &Value, block_id: Option<&str>) -> bool {
     !truth(&block["edited"])
         && !keeps_original(block)
+        && !crate::ocr_review::suppressed(block)
         && block["overlay"] != "skip"
         && block["text_kind"] != "noise"
         && block_id.is_none_or(|id| text(&block["id"]) == id)
 }
 
+// A one-block retry can use a different model from its neighbours. Keep the
+// page-wide provenance until a full-page request actually adopts a new config.
+pub(super) fn prepare_config(
+    page: &mut Value, config: &Value, page_changed: bool, block_id: Option<&str>,
+) -> bool {
+    let mut reset_ids = HashSet::new();
+    let mut changed = false;
+    for block in page["blocks"].as_array_mut().expect("validated blocks") {
+        if block_id.is_some_and(|id| text(&block["id"]) != id)
+            || truth(&block["edited"]) {
+            continue;
+        }
+        if keeps_original(block) || crate::ocr_review::suppressed(block) {
+            // Old pages did not record which model produced a hidden translation.
+            // Never attribute that text to an inferred model after a bulk switch.
+            if block_id.is_none() && page_changed && truth(&block["translation"])
+                && block.get("translation_config_override").is_none() {
+                block["translation_config_override"] = Value::Null;
+            }
+            continue;
+        }
+        let stale = block.get("translation_config_override")
+            .map_or(page_changed, |previous| previous != config);
+        if stale {
+            block["translation"] = json!("");
+            block["error"] = json!("");
+            remove(block, &["quality_warnings", "vision_source"]);
+            reset_ids.insert(text(&block["id"]));
+        }
+        if block_id.is_some() && page_changed {
+            changed |= block.get("translation_config_override") != Some(config);
+            block["translation_config_override"] = config.clone();
+        } else if block.get("translation_config_override").is_some() {
+            remove(block, &["translation_config_override"]);
+            changed = true;
+        }
+    }
+    if let Some(dialogues) = page["dialogues"].as_array_mut() {
+        for d in dialogues {
+            if (block_id.is_none() && page_changed)
+                || array(&d["block_ids"]).iter().any(|id| reset_ids.contains(&text(id))) {
+                remove(d, &["full_translation", "mapping", "mapping_status", "translation_error",
+                    "translation_config", "quality_warnings"]);
+            }
+        }
+    }
+    if block_id.is_none() {
+        page["model"] = config["model"].clone();
+        page["translation_config"] = config.clone();
+    }
+    changed || !reset_ids.is_empty() || (block_id.is_none() && page_changed)
+}
+
 pub async fn translate(
-    page: &mut Value,
+    current_page: &mut Value,
     service: &TranslationService,
     options: &Options<'_>,
     observer: &mut impl Observer,
@@ -75,10 +129,14 @@ pub async fn translate(
         ["blocks", "dialogues"].contains(&options.unit),
         "未知翻译单位"
     );
-    if array(&page["blocks"]).is_empty() {
+    if array(&current_page["blocks"]).is_empty() {
         return Ok(());
     }
-    translation::audit_cache(page);
+    // Planning normalizes dialogue structure and block provenance. Publish the
+    // prepared page only after the model check (or a fully cached result).
+    let mut prepared = current_page.clone();
+    let page = &mut prepared;
+    translation::audit_cache(page, options.block_id);
     structure::ensure(page, options.image)?;
     let mut ordered: Vec<usize> = (0..array(&page["blocks"]).len()).collect();
     ordered.sort_by(|&a, &b| {
@@ -93,16 +151,9 @@ pub async fn translate(
         .filter(|&i| allowed(&page["blocks"][i], options.block_id))
         .collect();
     if eligible.is_empty() {
+        *current_page = prepared;
         return Ok(());
     }
-    ensure!(
-        service
-            .list_models()
-            .await?
-            .iter()
-            .any(|m| m == options.model),
-        "所选模型不在服务的本地模型列表中，请刷新模型列表并选择已下载模型"
-    );
     let batch_size = if options.batch_size == 0 {
         8
     } else {
@@ -126,33 +177,8 @@ pub async fn translate(
     let invalidate = page["model"] != options.model
         || previous.as_ref().is_some_and(|p| p != &config)
         || previous.is_none() && (options.unit == "dialogues" || service.identity() != legacy);
-    if invalidate {
-        for block in page["blocks"].as_array_mut().unwrap() {
-            if !truth(&block["edited"]) && !keeps_original(block) {
-                block["translation"] = json!("");
-                block["error"] = json!("");
-            }
-        }
-        if let Some(dialogues) = page["dialogues"].as_array_mut() {
-            for d in dialogues {
-                remove(
-                    d,
-                    &[
-                        "full_translation",
-                        "mapping",
-                        "mapping_status",
-                        "translation_error",
-                        "translation_config",
-                    ],
-                );
-            }
-        }
-    }
-    page["model"] = json!(options.model);
-    page["translation_config"] = config.clone();
-    if invalidate {
-        save_results(page, options.image, observer)?;
-    }
+    let changed = prepare_config(page, &config, invalidate, options.block_id);
+    if changed { structure::sync(page)?; }
     let pending: Vec<_> = eligible
         .iter()
         .copied()
@@ -174,7 +200,7 @@ pub async fn translate(
             let ids = array(d.get("source_block_ids").unwrap_or(&d["block_ids"]));
             if ids.is_empty() || ids.iter().any(|id| !eligible_ids.contains(&text(id)))
                 || array(&d["block_ids"]).iter().any(|id| by_id.get(&text(id))
-                    .is_some_and(|&i| keeps_original(&page["blocks"][i])))
+                    .is_some_and(|&i| keeps_original(&page["blocks"][i]) || crate::ocr_review::suppressed(&page["blocks"][i])))
             {
                 continue;
             }
@@ -195,6 +221,15 @@ pub async fn translate(
             .chunks(batch_size)
             .map(|chunk| (chunk.to_vec(), None)),
     );
+    if !jobs.is_empty() {
+        ensure!(
+            service.list_models().await?.iter().any(|m| m == options.model),
+            "所选模型不在服务的本地模型列表中，请刷新模型列表并选择已下载模型"
+        );
+    }
+    *current_page = prepared;
+    let page = current_page;
+    if changed { save_results(page, options.image, observer)?; }
     for (job_index, (indices, dialogue_index)) in jobs.iter().enumerate() {
         let members: Vec<_> = indices.iter().map(|&i| page["blocks"][i].clone()).collect();
         let dialogue = dialogue_index.map(|i| page["dialogues"][i].clone());
@@ -220,7 +255,7 @@ pub async fn translate(
             let context: Vec<_> = ordered[start..end]
                 .iter()
                 .map(|&i| &page["blocks"][i])
-                .filter(|b| !keeps_original(b) && b["overlay"] != "skip" && b["text_kind"] != "noise")
+                .filter(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b) && b["overlay"] != "skip" && b["text_kind"] != "noise")
                 .map(|b| json!({"id":text(&b["id"]),"ja":b["source"]}))
                 .collect();
             (ids, Value::Object(sources), json!(context))
@@ -324,7 +359,8 @@ pub async fn translate(
                             .iter()
                             .any(|id| ids.contains(&text(id)))
                         {
-                            remove(d, &["full_translation", "mapping"]);
+                            remove(d, &["full_translation", "mapping", "mapping_status",
+                                "translation_error", "translation_config", "quality_warnings"]);
                         }
                     }
                 }
@@ -394,4 +430,120 @@ pub async fn probe(request: &Value) -> Result<Value> {
         json!({"page":page,"saves":trace.saves,"progress":trace.progress,"metrics":trace.metrics,
         "error":result.err().map(|e|service.safe_error(e))}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restoring_a_block_after_switching_models_rechecks_its_own_translation() {
+        let old = json!({"model":"A"});
+        let new = json!({"model":"B"});
+        for excluded in [json!({"keep_original":true}), json!({"ocr_review":{"status":"suspect"}})] {
+            let mut block = json!({"id":"1","translation":"旧模型译文","translation_config_override":old});
+            block.as_object_mut().unwrap().extend(excluded.as_object().unwrap().clone());
+            let mut page = json!({"model":"A","translation_config":old,"blocks":[block]});
+            prepare_config(&mut page, &new, true, None);
+            assert_eq!(page["blocks"][0]["translation"], "旧模型译文");
+            page["blocks"][0]["keep_original"] = json!(false);
+            page["blocks"][0]["ocr_confirmed"] = json!(true);
+            let mut back_to_old = page.clone();
+            prepare_config(&mut back_to_old, &old, true, None);
+            assert_eq!(back_to_old["blocks"][0]["translation"], "旧模型译文");
+            assert!(prepare_config(&mut page, &new, false, None));
+            assert_eq!(page["blocks"][0]["translation"], "");
+        }
+        let mut legacy = json!({"model":"A","translation_config":old,"blocks":[
+            {"id":"1","keep_original":true,"translation":"无法追溯的旧译文"}]});
+        prepare_config(&mut legacy, &new, true, None);
+        assert_eq!(legacy["blocks"][0]["translation"], "无法追溯的旧译文");
+        legacy["blocks"][0]["keep_original"] = json!(false);
+        prepare_config(&mut legacy, &old, true, None);
+        assert_eq!(legacy["blocks"][0]["translation"], "");
+    }
+
+    #[test]
+    fn single_block_model_change_preserves_siblings_and_reconciles_the_next_bulk_run() {
+        let old = json!({"model":"A"});
+        let new = json!({"model":"B"});
+        let mut page = json!({"model":"A", "translation_config":old, "blocks":[
+            {"id":"first","translation":"一"}, {"id":"other","translation":"二"},
+            {"id":"manual","translation":"手改","edited":true}],
+            "dialogues":[{"block_ids":["first"],"full_translation":"一"},
+                         {"block_ids":["other"],"full_translation":"二"}]});
+        let other = page["blocks"][1].clone();
+        let manual = page["blocks"][2].clone();
+        let other_dialogue = page["dialogues"][1].clone();
+        assert!(prepare_config(&mut page, &new, true, Some("first")));
+        assert_eq!(page["model"], "A");
+        assert_eq!(page["translation_config"], old);
+        assert_eq!(page["blocks"][0]["translation_config_override"], new);
+        assert_eq!(page["blocks"][1], other);
+        assert_eq!(page["blocks"][2], manual);
+        assert_eq!(page["dialogues"][1], other_dialogue);
+        page["blocks"][0]["translation"] = json!("新一");
+
+        let mut bulk_a = page.clone();
+        assert!(prepare_config(&mut bulk_a, &old, false, None));
+        assert_eq!(bulk_a["blocks"][0]["translation"], "");
+        assert_eq!(bulk_a["blocks"][1], other);
+
+        assert!(prepare_config(&mut page, &new, true, None));
+        assert_eq!(page["translation_config"], new);
+        assert_eq!(page["blocks"][0]["translation"], "新一");
+        assert!(page["blocks"][0].get("translation_config_override").is_none());
+        assert_eq!(page["blocks"][1]["translation"], "");
+        assert_eq!(page["blocks"][2], manual);
+    }
+
+    #[tokio::test]
+    async fn failed_model_lookup_preserves_the_callers_page_in_both_modes() -> Result<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let original = json!({"width":80,"height":80,"model":"old","translation_config":{"model":"old"},
+            "blocks":[{"id":"1","box":[4,4,28,40],"source":"こんにちは","translation":"旧译文"}]});
+        for vision in [false, true] {
+            for body in [r#"{"data":[]}"#, r#"{"data":false}"#] {
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                let url = format!("http://{}/v1", listener.local_addr()?);
+                let server = std::thread::spawn(move || -> std::io::Result<()> {
+                    let (mut stream, _) = listener.accept()?;
+                    for line in BufReader::new(&stream).lines() {
+                        if line?.is_empty() { break; }
+                    }
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                });
+                let service = TranslationService::new("omlx", Some(&url), None)?;
+                let mut page = original.clone();
+                let mut trace = Trace::default();
+                let result = if vision {
+                    crate::vision_pipeline::translate(&mut page, Path::new("unused.png"), None, "new",
+                        &service, None, &mut trace).await
+                } else {
+                    let options = Options { model:"new", unit:"blocks", block_id:None, batch_size:8, image:None };
+                    translate(&mut page, &service, &options, &mut trace).await
+                };
+                assert!(result.unwrap_err().to_string().contains("模型列表"));
+                server.join().unwrap()?;
+                assert_eq!(page, original);
+                assert!(trace.saves.is_empty() && trace.metrics.is_empty() && trace.progress.is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn complete_legacy_text_page_can_be_reused_offline() -> Result<()> {
+        let mut page = json!({"width":100,"height":100,"model":"offline", "blocks":[
+            {"id":"1","source":"こんにちは","translation":"你好","box":[10,10,40,40]}]});
+        let service = TranslationService::new("ollama", None, None)?;
+        let options = Options { model:"offline", unit:"blocks", block_id:None, batch_size:8, image:None };
+        let mut trace = Trace::default();
+        translate(&mut page, &service, &options, &mut trace).await?;
+        assert_eq!(page["blocks"][0]["translation"], "你好");
+        assert!(trace.progress.is_empty() && trace.metrics.is_empty());
+        Ok(())
+    }
 }

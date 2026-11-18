@@ -13,6 +13,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from unittest.mock import patch
+from verify_translate_pipeline import clear_pending_warnings
 
 
 class Server:
@@ -71,6 +72,31 @@ def comparable(value):
     return value
 
 
+def expected_vision_context(calls, page):
+    # Exclude known noise from the prompt while comparing the complete request,
+    # including the original JPEG, target IDs and every remaining context row.
+    excluded = {str(block['id']) for block in page['blocks']
+                if block.get('overlay') == 'skip' or block.get('text_kind') == 'noise'}
+    for call in calls:
+        if call['method'] == 'POST':
+            message = call['payload']['messages'][1]['content'][0]
+            prompt = json.loads(message['text'])
+            prompt['page'] = [row for row in prompt['page'] if row['id'] not in excluded]
+            message['text'] = json.dumps(prompt, ensure_ascii=False)
+
+
+def expect_model_change(page, trace):
+    if not trace['saves'] or page.get('translation_config') == trace['page'].get('translation_config'):
+        return
+    previous_blocks = {block['id']: block for block in page['blocks']}
+    # The first checkpoint resets the previous model's records before the
+    # first new response. Later checkpoints also recalculate diagnostic totals.
+    for index, snapshot in enumerate(trace['saves']):
+        clear_pending_warnings(snapshot, previous_blocks, refresh_diagnostics=index != 0)
+    for dialogue in trace['saves'][0].get('dialogues', []):
+        dialogue.pop('quality_warnings', None)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
@@ -109,6 +135,11 @@ def main():
                                   lambda p:expected['saves'].append(copy.deepcopy(p)),block_id)
                 except ValueError as exc:expected['error']=str(exc)
             expected_calls=copy.deepcopy(endpoint.calls);endpoint.calls=[]
+            if mode == 'missing-model':
+                # Model validation must preserve the caller's existing data.
+                expected.update(page=copy.deepcopy(page), saves=[])
+            expect_model_change(page, expected)
+            expected_vision_context(expected_calls, expected['page'])
             request={'page':page,'image':str(image),'model':model,'provider':provider,'base_url':endpoint.url,'block_id':block_id,'key':'fake-secret'}
             actual,prefix=native(request)
             result_page=copy.deepcopy(actual['page'])
@@ -144,9 +175,10 @@ def main():
         page['blocks'][3]['source']='ん';page['blocks'][3]['overlay']='skip'
         page['blocks'][4]['source']='';page['blocks'][4]['text_kind_override']='noise'
         for mode in ['good','partial','echo','placeholder','suggestion','same-suggestion','long-suggestion','invalid-suggestion',
-                     'invalid-suggestion-value','duplicate','duplicate-row','invalid-json','truncated','usage-list','no-usage','bad-content','http-error','missing-model']:
+                     'invalid-suggestion-value','duplicate','duplicate-row','invalid-json','truncated','usage-list','no-usage','bad-content','http-error']:
             run(page,image,mode=mode)
         current=run(page,image)
+        run(current,image,mode='missing-model',model='other-model')
         run(current,image)
         current=run(current,image,model='other-model')
         current=run(current,image,model='other-model',endpoint=other)

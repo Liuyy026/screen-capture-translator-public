@@ -92,13 +92,18 @@ pub async fn regions(
         );
     }
     let preserved = ink::preserved_markers(page);
+    let mut originals = preserved_bubbles::protected_bounds(page, width, height);
     let boxes: Vec<_> = blocks
         .iter()
         .map(|b| {
-            if keeps_original(b) || preserved.get(text(&b["id"])).is_some() {
+            let bounds = ink::clipped_box(b, width, height);
+            if preserved.get(text(&b["id"])).is_some() {
+                originals.extend(bounds);
+                None
+            } else if keeps_original(b) {
                 None
             } else {
-                ink::clipped_box(b, width, height)
+                bounds
             }
         })
         .collect();
@@ -107,7 +112,6 @@ pub async fn regions(
     }
     let (boxes, supplemented) = ink::complete_vertical_strokes(gray, &boxes, blocks, source)?;
     let source = supplemented.as_ref();
-    let originals = preserved_bubbles::protected_bounds(page, width, height);
     let bubbles = geometry::bubbles(gray, &boxes)?;
     let narrations = geometry::narration_groups(gray, blocks, &boxes, &bubbles)?;
     let mut regions = vec![];
@@ -217,6 +221,15 @@ pub async fn regions(
             continue;
         }
         let member_boxes: Vec<_> = members.iter().map(|id| boxes[by_id[id]].unwrap()).collect();
+        if old["overlay"] == "rectangle" && members.iter().any(|id| {
+            boxes[by_id[id]] != ink::clipped_box(&blocks[by_id[id]], width, height)
+        }) {
+            let mut fits = true;
+            for &bounds in &member_boxes {
+                if geometry::coverage(&shape, Some(bounds))? < 0.97 { fits = false; break; }
+            }
+            if !fits { continue; }
+        }
         let mut region = old.clone();
         let [x, y] = shape.origin;
         let w = shape.mask.cols().min(width - x);
@@ -391,6 +404,21 @@ mod tests {
         ]});
         let combined = regions(&page, &gray, None, None, None).await?;
         assert!(combined.iter().any(|region| region["block_ids"] == json!(["1", "2"])));
+
+        // A neighbouring translation must not be typeset over an unconfirmed
+        // OCR candidate in the same balloon, even if that candidate is omitted.
+        let mut suspect = page.clone();
+        suspect["blocks"][1]["ocr_review"] = json!({"status": "suspect", "reason": "需要核对"});
+        let protected_box = [195, 172, 213, 260];
+        let cautious = regions(&suspect, &gray, None, None, None).await?;
+        assert!(cautious.iter().any(|r| r["block_ids"] == json!(["1"])));
+        assert!(cautious.iter().any(|r| r["block_ids"] == json!(["3"])));
+        for region in &cautious {
+            let shape = geometry::cached_shape(region, 480, 640)?.unwrap();
+            assert_eq!(geometry::coverage(&shape, Some(protected_box))?, 0.0);
+        }
+        suspect["blocks"][1]["ocr_confirmed"] = json!(true);
+        assert_eq!(regions(&suspect, &gray, None, None, None).await?, combined);
 
         let mut image = Vector::new();
         imgcodecs::imencode(".png", &gray, &mut image, &Vector::new())?;

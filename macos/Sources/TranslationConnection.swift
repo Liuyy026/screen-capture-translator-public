@@ -30,8 +30,12 @@ struct TranslationSettingsView: View {
     private var draft: TranslationConnection {
         TranslationConnection(provider: provider, baseURL: address, apiKey: apiKey)
     }
+    private var isConnected: Bool {
+        guard !testing, let testedConnection else { return false }
+        return testedConnection == (try? draft.normalized())
+    }
     private var canSave: Bool {
-        !testing && testedConnection == (try? draft.normalized()) && models.contains(selectedModel)
+        isConnected && models.contains(selectedModel)
     }
 
     var body: some View {
@@ -48,7 +52,7 @@ struct TranslationSettingsView: View {
             Toggle("将 API Key 保存在本地配置文件", isOn: $rememberKey)
             Text("开发期间使用本地明文配置，仅当前用户可读写；不勾选时密钥仅在本次运行中使用。")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("~/Library/Application Support/KomaReader/config.json")
+            Text(reader.connectionConfigURL.path)
                 .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
             if let configurationError = reader.configurationLoadError {
                 Text(configurationError).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
@@ -61,7 +65,7 @@ struct TranslationSettingsView: View {
                     .accessibilityIdentifier("translation-connect")
                     .disabled(testing)
                 if testing { ProgressView().controlSize(.small) }
-                if testedConnection == (try? draft.normalized()), !testing {
+                if isConnected {
                     Text("已连接 · \(models.count) 个模型").font(.caption).foregroundStyle(.secondary)
                 }
             }

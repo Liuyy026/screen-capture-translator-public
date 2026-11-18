@@ -88,6 +88,34 @@ class Server:
         self.thread.join()
 
 
+def clear_pending_warnings(snapshot, previous_blocks, *, refresh_diagnostics=True):
+    """Remove warnings inherited from the previous model on reset blocks."""
+    removed = 0
+    for block in snapshot['blocks']:
+        prior = previous_blocks.get(block['id'], {})
+        if (not block.get('edited') and not block.get('translation') and not block.get('error')
+                and not block.get('dialogue_translation_complete')
+                and 'quality_warnings' in prior and block.get('quality_warnings') == prior['quality_warnings']):
+            removed += len(block.pop('quality_warnings'))
+    if refresh_diagnostics and removed:
+        snapshot['diagnostics']['translation']['quality_warnings'] -= removed
+
+
+def expect_model_change(page, trace):
+    if not trace['saves'] or page.get('translation_config') == trace['page'].get('translation_config'):
+        return
+    previous_blocks = {block['id']: block for block in page['blocks']}
+    previous_dialogues = {dialogue['id']: dialogue for dialogue in page.get('dialogues', [])}
+    for snapshot in [*trace['saves'], trace['page']]:
+        clear_pending_warnings(snapshot, previous_blocks)
+        for dialogue in snapshot.get('dialogues', []):
+            warnings = dialogue.get('quality_warnings')
+            prior = previous_dialogues.get(dialogue['id'], {})
+            if warnings and not dialogue.get('full_translation') and warnings == prior.get('quality_warnings'):
+                snapshot['diagnostics']['translation']['dialogue_quality_warnings'] -= len(warnings)
+                dialogue['quality_warnings'] = []
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
@@ -128,6 +156,16 @@ def main():
                 except ValueError as exc:
                     expected['error']=str(exc)
             expected_calls=copy.deepcopy(endpoint.calls)
+            # A complete cache needs neither inference nor a model-list request.
+            if expected['error'] is None and not expected['metrics'] and expected_calls:
+                model_route = '/api/tags' if provider == 'ollama' else '/v1/models'
+                assert len(expected_calls) == 1 and expected_calls[0]['method'] == 'GET'
+                assert expected_calls[0]['path'] == model_route
+                expected_calls = []
+            if mode == 'missing-model':
+                # Validation fails before publishing any changes to the page.
+                expected['page'] = copy.deepcopy(page)
+            expect_model_change(page, expected)
             endpoint.calls=[]
             proc=subprocess.run([str(binary),'translation-probe','--requests',str(path)],capture_output=True,text=True,timeout=90)
             prefix.with_suffix('.stderr.log').write_text(proc.stderr)
@@ -166,6 +204,9 @@ def main():
             page=json.loads(Path(entry['cache']).read_text())
             for unit in ['blocks','dialogues']:
                 current=run(page,image=Path(entry['image']),unit=unit)
+                current=run(current,image=Path(entry['image']),unit=unit)
+                # First resume can settle the structure created by rendering.
+                # The next resume should exercise the complete cache path.
                 run(current,image=Path(entry['image']),unit=unit)
         simple={'version':2,'width':300,'height':300,'model':'same-model','blocks':[
             {'id':'1','box':[10,10,60,60],'source':'危険もありません','translation':'旧译文','error':'','edited':False},

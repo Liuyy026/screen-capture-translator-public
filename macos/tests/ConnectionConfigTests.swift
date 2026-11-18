@@ -12,6 +12,12 @@ private func check(_ value: Bool, _ message: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = TranslationLocalConfigStore(url: directory.appendingPathComponent("settings/config.json"))
+        for provider in ["omlx", "ollama"] {
+            let base = "https://example.invalid/proxy/team%2Fproject"
+            let normalized = try TranslationConnection(provider: provider, baseURL: base + "/", apiKey: "").normalized()
+            try check(normalized.baseURL == base + (provider == "omlx" ? "/v1" : ""),
+                      "Normalization must preserve encoded path separators in a proxy endpoint")
+        }
         try check(try store.load() == nil, "Missing file must be distinguishable from invalid configuration")
         let suite = "KomaConnectionConfigTests." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -39,6 +45,9 @@ private func check(_ value: Bool, _ message: String) throws {
         try check((updatedAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "Replacement config keeps mode 0600")
         try check((updatedAttributes[.systemFileNumber] as? NSNumber) != originalInode, "Save replaces the file atomically")
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: store.url.path)
+        try check(try store.load(readOnly: true) == next, "Stable config imports without mutation")
+        let stableAttributes = try FileManager.default.attributesOfItem(atPath: store.url.path)
+        try check((stableAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o644, "Import preserves stable permissions")
         _ = try store.load()
         let tightened = try FileManager.default.attributesOfItem(atPath: store.url.path)
         try check((tightened[.posixPermissions] as? NSNumber)?.intValue == 0o600, "Reading tightens existing permissions")
@@ -88,9 +97,11 @@ private func check(_ value: Bool, _ message: String) throws {
         catch {}
         let fifo = directory.appendingPathComponent("fifo")
         guard mkfifo(fifo.path, 0o600) == 0 else { throw TestFailure(message: "Cannot prepare FIFO test") }
-        do { _ = try TranslationLocalConfigStore(url: fifo).load(); throw TestFailure(message: "FIFO accepted") }
-        catch is TestFailure { throw TestFailure(message: "FIFO accepted") }
-        catch {}
+        for readOnly in [false, true] {
+            do { _ = try TranslationLocalConfigStore(url: fifo).load(readOnly: readOnly); throw TestFailure(message: "FIFO accepted") }
+            catch is TestFailure { throw TestFailure(message: "FIFO accepted") }
+            catch {}
+        }
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: store.url.deletingLastPathComponent().path)
         try check(leftovers == ["config.json"], "Atomic writes clean up temporary files")
         print("Connection config migration, persistence, session-only keys, permissions, atomic replacement and invalid-file preservation passed")

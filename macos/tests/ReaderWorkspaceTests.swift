@@ -39,11 +39,11 @@ import SwiftUI
         workspace.beginSave(text)
         workspace.update(text, block: original, translation: "不应覆盖正在保存的内容")
         precondition(workspace.draft(for: text, block: original).translation == "未保存的修正")
-        workspace.finishSave(text, succeeded: false)
+        workspace.finishSave(text, succeeded: false, visibleCache: otherPage.cache)
         precondition(workspace.draft(for: text, block: original).phase == .editing)
         precondition(workspace.draft(for: text, block: original).translation == "未保存的修正")
         workspace.beginSave(text)
-        workspace.finishSave(text, succeeded: true)
+        workspace.finishSave(text, succeeded: true, visibleCache: text.cache)
         workspace.reconcile(cache: text.cache, page: page([original]))
         precondition(workspace.drafts[text] != nil, "An older reload must not discard the saved draft before it arrives")
         var updated = original; updated.translation = "未保存的修正"
@@ -51,14 +51,41 @@ import SwiftUI
         precondition(workspace.drafts[text] == nil)
 
         workspace.update(text, block: updated, source: "修正した原文")
-        workspace.beginSave(text); workspace.finishSave(text, succeeded: true)
+        workspace.beginSave(text); workspace.finishSave(text, succeeded: true, visibleCache: text.cache)
         var sourceSaved = updated; sourceSaved.source = "修正した原文"; sourceSaved.translation = ""
         workspace.reconcile(cache: text.cache, page: page([sourceSaved]))
         precondition(workspace.drafts[text] == nil, "A successful source edit clears the obsolete translation")
+        workspace.update(text, block: updated, source: sourceSaved.source)
+        workspace.beginSave(text)
+        workspace.finishSave(text, succeeded: true, visibleCache: otherPage.cache)
+        var translatedOffscreen = sourceSaved
+        translatedOffscreen.translation = "页面再次打开之前模型已生成的新译文"
+        workspace.reconcile(cache: text.cache, page: page([translatedOffscreen]))
+        let reopened = workspace.draft(for: text, block: translatedOffscreen)
+        precondition(reopened.phase == .editing && reopened.translation == translatedOffscreen.translation,
+                     "A confirmed offscreen edit must not lock a newer translation on return")
+        workspace.update(text, block: updated, source: sourceSaved.source)
+        workspace.beginSave(text)
+        workspace.finishSave(text, succeeded: true, visibleCache: text.cache)
+        workspace.reconcile(cache: otherPage.cache, page: page([second]))
+        precondition(workspace.drafts[text] == nil, "Navigating away retires an acknowledged draft awaiting reload")
+        workspace.update(textSecond, block: second, source: "新しい原文", translation: "核对后的新译文")
+        precondition(workspace.draft(for: textSecond, block: second).savedTranslation == "核对后的新译文",
+                     "Editing both languages must keep the newly typed translation")
         workspace.update(text, block: sourceSaved, translation: "临时草稿")
         workspace.update(text, block: sourceSaved, translation: "")
         precondition(workspace.drafts[text] == nil, "Undoing an edit returns to the clean state")
-        print("Workspace checks passed: whole-page fit, centering, zoom, draft isolation, failed save recovery, stale reload, and source-edit semantics")
+        workspace.update(text, block: original, translation: "正在核对的译文")
+        var corrected = original
+        corrected.source = "訂正された原文"
+        workspace.reconcile(cache: text.cache, page: page([corrected]))
+        let refreshed = workspace.draft(for: text, block: corrected)
+        precondition(refreshed.source == corrected.source && !refreshed.sourceChanged)
+        precondition(refreshed.savedTranslation == "正在核对的译文" && refreshed.pageChangedWhileEditing)
+        corrected.translation = refreshed.savedTranslation
+        workspace.reconcile(cache: text.cache, page: page([corrected]))
+        precondition(workspace.drafts[text] == nil, "A reload that already includes the draft must clear it")
+        print("Workspace checks passed: whole-page fit, centering, zoom, draft isolation, failed save recovery, stale reload, offscreen save, and source-edit semantics")
     }
 
     private static func page(_ blocks: [TextBlock]) -> PageResult {

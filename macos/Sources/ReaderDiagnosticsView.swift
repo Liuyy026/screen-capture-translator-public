@@ -6,20 +6,21 @@ struct ReaderDiagnosticsView: View {
     let showDialogue: (String) -> Void
 
     private var blocks: [TextBlock] { reader.page?.blocks ?? [] }
-    private var candidates: [TextBlock] { blocks.filter { !$0.keepsOriginal } }
+    private var candidates: [TextBlock] { blocks.filter { !$0.keepsOriginal && !$0.needsOCRReview } }
     private var translated: Int {
         candidates.filter { $0.error.isEmpty && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
     }
     private var problems: [(block: TextBlock, reason: String)] {
         let displayed = Set(reader.readingPresentations.flatMap(\.region.block_ids))
-        return candidates.compactMap { block in
+        return blocks.filter { !$0.keepsOriginal }.compactMap { block in
+            if block.needsOCRReview { return (block, block.ocr_review?.reason ?? "疑似非文字，已暂停处理") }
             if !block.error.isEmpty { return (block, block.error) }
             if block.overlay == "skip" || block.text_kind == "noise" || reader.readingPreserved[block.id] != nil { return nil }
             if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return (block, block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "日文识别为空" : "缺少中文译文")
             }
             if reader.readingRegions != nil && block.needsReadingOverlay && !displayed.contains(block.id) {
-                return (block, "已有译文，暂未回填")
+                return (block, ReadingLayout.failureReason(blockID: block.id, page: reader.page!, regions: reader.readingRegions!))
             }
             return nil
         }
@@ -80,6 +81,8 @@ struct ReaderDiagnosticsView: View {
         guard reader.page != nil else {
             return "当前方式下没有本页识别结果。可从工具栏的「…」选择「只识别本页日文」。"
         }
+        let review = blocks.filter(\.needsOCRReview).count
+        if review > 0 { return "已识别 \(blocks.count - review) 处文字 · \(review) 处疑似非文字，待核对" }
         return blocks.isEmpty ? "识别完成，未找到文字。可在「文字框」视图核对是否漏检。" : "已识别 \(blocks.count) 处文字"
     }
 
@@ -94,7 +97,7 @@ struct ReaderDiagnosticsView: View {
             return service + "\n" + detail
         }
         let failures = candidates.filter { !$0.error.isEmpty }.count
-        let kept = blocks.count - candidates.count
+        let kept = blocks.filter(\.keepsOriginal).count
         let cachedModel = reader.page?.model ?? ""
         let provenance = cachedModel.isEmpty || cachedModel == model ? "" : "\n已存译文使用 \(cachedModel)"
         return service + "\n已有译文 \(translated) 处 · 失败 \(failures) 处 · 保留原框 \(kept) 处" + provenance

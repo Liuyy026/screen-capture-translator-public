@@ -121,16 +121,19 @@ enum ChapterExport {
         let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions)
         let shown = Set(presentations.flatMap(\.region.block_ids))
         let omitted = page.blocks.filter { block in
-            !block.keepsOriginal && block.overlay != "skip" && block.text_kind != "noise"
+            !block.keepsOriginal && !block.needsOCRReview && block.overlay != "skip" && block.text_kind != "noise"
                 && !shown.contains(block.id) && input.reply.preserved?[block.id] == nil
                 && (block.needsReadingOverlay || !block.error.isEmpty
                     || block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }.count
 
         let imageURL = URL(fileURLWithPath: input.effective_image)
-        let base = try decodeImage(at: imageURL)
-        let output = presentations.isEmpty ? base : try composite(base, page: page, presentations: presentations)
+        let base = try await Task.detached(priority: .userInitiated) { try decodeImage(at: imageURL) }.value
+        try Task.checkCancellation()
+        let size = CGSize(width: base.width, height: base.height)
+        let layer = presentations.isEmpty ? nil : try renderOverlay(size: size, page: page, presentations: presentations)
         try await Task.detached(priority: .userInitiated) {
+            let output = try layer.map { try composite($0, over: base) } ?? base
             guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
                 throw CocoaError(.fileWriteUnknown)
             }
@@ -141,14 +144,16 @@ enum ChapterExport {
     }
 
     private static func decodeImage(at url: URL) throws -> CGImage {
+        let decodeOptions = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let pixels = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let pixels = CGImageSourceCreateImageAtIndex(source, 0, decodeOptions) else {
             throw CocoaError(.fileReadCorruptFile)
         }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         guard let orientation = properties?[kCGImagePropertyOrientation] as? Int, orientation != 1 else { return pixels }
         let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
                        kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceShouldCacheImmediately: true,
                        kCGImageSourceThumbnailMaxPixelSize: max(pixels.width, pixels.height)] as [CFString: Any]
         guard let oriented = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             throw CocoaError(.fileReadCorruptFile)
@@ -156,22 +161,42 @@ enum ChapterExport {
         return oriented
     }
 
-    @MainActor private static func composite(_ image: CGImage, page: PageResult,
-                                             presentations: [ReadingPresentation]) throws -> CGImage {
-        let width = Double(image.width), height = Double(image.height)
-        let scale = width / Double(page.width)
+    @MainActor private static func renderOverlay(size: CGSize, page: PageResult,
+                                                 presentations: [ReadingPresentation]) throws -> CGImage {
+        let scale = size.width / Double(page.width)
+        let verticalScale = size.height / Double(page.height)
         let content = ZStack(alignment: .topLeading) {
-            Image(decorative: image, scale: 1).resizable().frame(width: width, height: height)
             ForEach(presentations) { item in
-                ReadingOverlayView(presentation: item, scale: scale, verticalScale: height / Double(page.height),
+                ReadingOverlayView(presentation: item, scale: scale, verticalScale: verticalScale,
                                    selected: false, select: {})
             }
-        }.frame(width: width, height: height, alignment: .topLeading).clipped()
+        }.frame(width: size.width, height: size.height, alignment: .topLeading).clipped()
         let renderer = ImageRenderer(content: content)
         renderer.scale = 1
-        guard let result = renderer.cgImage, result.width == image.width, result.height == image.height else {
+        guard let result = renderer.cgImage, result.width == Int(size.width), result.height == Int(size.height) else {
             throw NativeCoreService.Failure(message: "无法按实际像素尺寸渲染这页漫画。")
         }
+        return result
+    }
+
+    private static func composite(_ layer: CGImage, over image: CGImage) throws -> CGImage {
+        // SwiftUI's working space can shift the colors of the source even outside the overlay.
+        let sourceSpace = image.colorSpace
+        let colorSpace = sourceSpace?.model == .rgb ? sourceSpace : CGColorSpace(name: CGColorSpace.sRGB)
+        let bits = image.bitsPerComponent > 8 ? 16 : 8
+        guard let colorSpace,
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: bits,
+                                      bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        context.interpolationQuality = .none
+        context.setBlendMode(.copy)
+        context.draw(image, in: bounds)
+        context.setBlendMode(.normal)
+        context.draw(layer, in: bounds)
+        guard let result = context.makeImage() else { throw CocoaError(.fileWriteUnknown) }
         return result
     }
 }

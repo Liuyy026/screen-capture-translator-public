@@ -13,7 +13,7 @@ struct ReaderInspectorView: View {
             HStack {
                 Text("对白对照").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text("\(reader.page?.blocks.count ?? 0) 处文字").font(.caption)
+                Text(candidateSummary).font(.caption)
                     .foregroundStyle(ReaderPalette.secondary)
             }.padding(12)
             Divider().overlay(ReaderPalette.separator)
@@ -59,11 +59,17 @@ struct ReaderInspectorView: View {
             .accessibilityIdentifier("dialogue-inspector")
     }
 
+    private var candidateSummary: String {
+        let blocks = reader.page?.blocks ?? []
+        let review = blocks.filter(\.needsOCRReview).count
+        return review == 0 ? "\(blocks.count) 处文字" : "\(blocks.count - review) 处文字 · \(review) 处待核对"
+    }
+
     private func dialogueRow(_ block: TextBlock) -> some View {
         let active = reader.selectedBlock == block.id
         let source = block.source.isEmpty ? "尚无原文" : block.source
-        let title = block.keepsOriginal ? source : (block.translation.isEmpty ? "尚未翻译" : block.translation)
-        let detail = block.keepsOriginal ? "保留原框" : source
+        let title = block.needsOCRReview ? "疑似非文字" : (block.keepsOriginal ? source : (block.translation.isEmpty ? "尚未翻译" : block.translation))
+        let detail = block.needsOCRReview ? "已暂停翻译与回填" : (block.keepsOriginal ? "保留原框" : source)
         return Button { reader.selectedBlock = block.id } label: {
             HStack(alignment: .top, spacing: 6) {
                 Text(block.id.count == 1 ? "0" + block.id : block.id)
@@ -83,7 +89,7 @@ struct ReaderInspectorView: View {
                 .background(active ? ReaderPalette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
-            .help(block.keepsOriginal || block.translation.isEmpty ? source : block.translation)
+            .help(block.needsOCRReview ? (block.ocr_review?.reason ?? "请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? source : block.translation))
             .accessibilityLabel("对白 " + block.id + "，" + title + "，" + detail)
             .accessibilityIdentifier("dialogue-" + block.id)
     }
@@ -96,7 +102,7 @@ private struct ReaderSelectedBlockEditor: View {
     let key: ReaderDraftKey
 
     private var draft: ReaderEditDraft { workspace.draft(for: key, block: block) }
-    private var disabled: Bool { reader.busy || reader.preparingImage || draft.phase != .editing }
+    private var disabled: Bool { reader.busy || reader.openingFolder || reader.preparingImage || draft.phase != .editing }
     private var index: Int { reader.page?.blocks.firstIndex(where: { $0.id == block.id }) ?? 0 }
     private var warnings: [String] {
         var values: [String] = []
@@ -104,8 +110,14 @@ private struct ReaderSelectedBlockEditor: View {
             if !block.error.isEmpty { values.append(block.error) }
             values += (block.quality_warnings ?? []).filter { $0.hasPrefix("原文与译文相同") }
             if let note = reader.readingPreserved[block.id] { values.append(note) }
+            else if block.needsOCRReview, let reason = block.ocr_review?.reason { values.append(reason) }
+            else if block.needsReadingOverlay, let page = reader.page, let regions = reader.readingRegions,
+                    !reader.readingPresentations.contains(where: { $0.region.block_ids.contains(block.id) }) {
+                values.append(ReadingLayout.failureReason(blockID: block.id, page: page, regions: regions))
+            }
         }
-        if draft.sourceChanged { values.append("修改日文后，保存会清除这条对白的旧译文。") }
+        if draft.pageChangedWhileEditing { values.append("编辑期间页面内容已更新，请核对原文和草稿后保存。") }
+        if draft.clearsPreviousTranslation { values.append("只修改日文会清除旧译文；同时填写的新译文会一起保存。") }
         return values
     }
 
@@ -139,11 +151,16 @@ private struct ReaderSelectedBlockEditor: View {
             field("日文原文", text: Binding(get: { draft.source }, set: {
                 workspace.update(key, block: block, source: $0)
             }), height: 76, identifier: "dialogue-source")
-            field("中文译文", text: Binding(get: {
+            field(block.needsOCRReview ? "旧译文（未采用）" : "中文译文", text: Binding(get: {
                 draft.phase == .saved ? draft.savedTranslation : draft.translation
             }, set: {
                 workspace.update(key, block: block, translation: $0)
             }), height: 64, identifier: "dialogue-translation")
+            if block.needsOCRReview {
+                Button("确认为文字，恢复处理") { reader.confirmOCR(block.id) }
+                    .buttonStyle(.link).font(.caption).disabled(disabled || draft.changed)
+                    .accessibilityIdentifier("confirm-ocr-candidate")
+            }
             if let suggestion = block.vision_source, !suggestion.isEmpty, suggestion != block.source {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
@@ -158,12 +175,12 @@ private struct ReaderSelectedBlockEditor: View {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(warnings, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
                     }.frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(maxHeight: 64).foregroundStyle(ReaderPalette.secondary)
+                }.frame(height: 64).foregroundStyle(ReaderPalette.secondary)
             }
             HStack {
                 Button { reader.retryBlock(block.id) } label: { Label("重新翻译", systemImage: "arrow.clockwise") }
                     .buttonStyle(.borderless).font(.system(size: 12))
-                    .disabled(disabled || draft.changed || !reader.engineReady || block.keepsOriginal)
+                    .disabled(disabled || draft.changed || !reader.engineReady || block.keepsOriginal || block.needsOCRReview)
                     .accessibilityIdentifier("retry-dialogue")
                 Spacer(minLength: 4)
                 Button("保存修改", action: save).buttonStyle(ReaderPrimaryButtonStyle())
@@ -193,7 +210,7 @@ private struct ReaderSelectedBlockEditor: View {
         guard !disabled, value.changed else { return }
         workspace.beginSave(key)
         reader.saveEdit(id: block.id, source: value.source, translation: value.translation) { succeeded in
-            workspace.finishSave(key, succeeded: succeeded)
+            workspace.finishSave(key, succeeded: succeeded, visibleCache: reader.editCacheIdentity)
             if succeeded, let page = reader.page, reader.editCacheIdentity == key.cache {
                 workspace.reconcile(cache: key.cache, page: page)
             }

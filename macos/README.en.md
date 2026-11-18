@@ -51,6 +51,8 @@ Use **Processing settings** (`处理设置`) in the top toolbar to choose enhanc
 
 Open **Page diagnostics** (`本页诊断`) at the bottom to see the image's pixel dimensions and the upscaling, OCR, translation and layout status. Click a flagged dialogue to jump to its editor. The panel can also reveal the local log in Finder.
 
+When a box looks like blank space or screentone, the reader pauses translation and rendering for that box. Check the source image and select **Confirm as text** (`确认为文字，恢复处理`) in the dialogue pane to resume. See the [Mac workflow audit (Chinese)](../docs/macos-flow-audit.md) for the save, cancellation and export regression checks.
+
 ### Keep the original bubble
 
 Select a dialogue and choose **Keep original bubble** (`保留原框`) in the editor. All blocks grouped in the detected bubble are kept together. Later processing skips translation, cleanup and typesetting for that bubble. If the outline cannot be determined, the app preserves the selected OCR box. Choose **Translate this bubble** (`翻译此框`) to resume processing. The selection is saved locally for the current translation mode, and any existing translation remains available.
