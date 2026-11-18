@@ -6,6 +6,8 @@ Koma recognizes Japanese text in manga, translates it and typesets Chinese on th
 
 This guide covers the current source build. The macOS build is still named `Koma Rust 候选版.app` and depends on the checkout and its local runtime. The pre-migration Python reader is available at `stable/pre-rust-20261108`.
 
+**November 18, 2026 · macOS candidate preview.** The local candidate supports per-dialogue typography, page reflow using saved translations, and a resizable dialogue sidebar. [Candidate notes and verification (Chinese)](docs/macos-typesetting-2026-11-18.md)
+
 ## Architecture
 
 ```mermaid
