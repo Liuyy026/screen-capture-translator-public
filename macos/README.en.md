@@ -95,15 +95,16 @@ Display assets are separate from translation caches, so existing translations ca
 
 ## Validation
 
-After preparing native dependencies, run basic tests without real model weights or translation services:
+In a public checkout, run the model process protocol tests without real model weights or translation services.
 
 ```sh
-python3 tools/rust_migration/cargo.py test
-macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
+macos/.venv/bin/python scripts/check_regressions.py
 ```
+
+After preparing native dependencies, run the Rust unit tests with `python3 tools/rust_migration/cargo.py test`.
 
 The November 8, 2026 migration validation covered 35 real OCR pages, pixel-identical rendering of 244 existing translations, simulated translation, controller and window flows, restart cache reuse and application startup. See the [root results](../README.en.md), [full report](../docs/rust-core-validation.md) and [core tools](../core/README.md).
 
-Run current offline core regressions with `scripts/check_regressions.py --native --swift`; see the [development guide](../docs/development.en.md). Historical corpus, model and screenshot acceptance scripts have been removed; their results remain historical evidence.
+With the local test files in place, `macos/.venv/bin/python scripts/check_regressions.py --local --native --swift` runs the shared backend, macOS Python, native differential and Swift regression suites. See the [development guide](../docs/development.en.md) for the files each option requires. Historical corpus, model and screenshot acceptance scripts have been removed; their results remain historical evidence.
 
 The [November 7 vision report](../docs/macos-vision-1209806-2026-11-07.md) covers the older Python implementation with Keychain and white overlays.

@@ -38,7 +38,7 @@ Windows 开发环境使用 Python 3.12.14 验证，系统中的其他 Python 版
 
 ```powershell
 .\windows\.venv\Scripts\python.exe --version
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\windows\.venv\Scripts\python.exe -X utf8 scripts\check_regressions.py
 .\windows\.venv\Scripts\python.exe -X utf8 backend\worker.py --help
 ```
 
@@ -90,12 +90,11 @@ py -3.12 -m venv windows\.venv
 
 ```powershell
 .\windows\.venv\Scripts\python.exe -X utf8 scripts\prepare_models.py
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s windows/tests -v
+.\windows\.venv\Scripts\python.exe -X utf8 scripts\check_regressions.py
 .\windows\.venv\Scripts\python.exe -X utf8 backend\worker.py --image samples\01.webp --operation both --status windows\.runtime\test-status.json
 ```
 
-使用 CUDA 时将 `.venv` 换成 `.venv-cuda`。共用测试 `tests/` 与界面测试 `windows/tests/` 两组都要运行。界面入口为 `windows/windows_app.py`；结果区仍为只读，编辑、重译和文件夹队列尚未接入。启动日志和进度文件在 `windows/.runtime/`，页面缓存仍在 `%LOCALAPPDATA%\KomaReader\pages\`。
+使用 CUDA 时将 `.venv` 换成 `.venv-cuda`。已有本地 `windows/tests/` 用例并安装 PySide6 时，可在回归命令末尾添加 `--windows` 运行 Windows 界面测试。界面入口为 `windows/windows_app.py`；结果区仍为只读，编辑、重译和文件夹队列尚未接入。启动日志和进度文件在 `windows/.runtime/`，页面缓存仍在 `%LOCALAPPDATA%\KomaReader\pages\`。
 
 [共用开发说明](../docs/development.md) · [旧路径对照](../docs/layout-migration.md)
 

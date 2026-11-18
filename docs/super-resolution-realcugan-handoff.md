@@ -16,12 +16,12 @@
 - 历史验收脚本：`realcugan_review.py`、`realcugan_protocol_review.py`、`realcugan_cancel_review.py`（已移除，源码见页首固定版本链接）
 - `docs/licenses/RealCUGAN-model-MIT.txt`
 
-整合者 cherry-pick 本交付提交即可取得源码。**还必须复制独立运行资产**（Git 不含权重和引擎）：
+整合者 cherry-pick 本交付提交即可取得源码。**还必须复制独立运行资产**（Git 不含权重和引擎），以下路径相对于本地 Real-CUGAN 工作副本根目录：
 
 ```
-/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/realcugan/.runtime/super-resolution/realcugan/realcugan-ncnn-vulkan-20220728-macos/
-/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/realcugan/.runtime/super-resolution/realcugan/manifest.json
-/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/realcugan/.runtime/super-resolution/realcugan/LICENSE-model-MIT.txt
+.runtime/super-resolution/realcugan/realcugan-ncnn-vulkan-20220728-macos/
+.runtime/super-resolution/realcugan/manifest.json
+.runtime/super-resolution/realcugan/LICENSE-model-MIT.txt
 ```
 
 目标 checkout 保持相同相对目录后重新运行 `macos/scripts/build_realcugan.sh`。也可重新运行准备脚本下载，zip SHA256 已钉住。默认从 helper 的 `macos/.build/` 向上定位 checkout；应用打包时可用 `KOMA_REALCUGAN_ROOT` 指定包含 engine 和 models-se 的发行目录，不能指到上一级资产根目录。
@@ -81,7 +81,7 @@ macos/scripts/prepare_realcugan.sh
 macos/scripts/build_realcugan.sh
 macos/.build/koma-sr-realcugan --capabilities
 macos/.venv/bin/python macos/tests/realcugan_protocol_review.py
-macos/.venv/bin/python macos/tests/realcugan_review.py --manifest /Users/lyy-studio/Desktop/project111/本地ai翻译/screen-capture-translator-rust/.runtime/rust-migration/pages.json --output "$PWD/.runtime/super-resolution/realcugan/review" --lock /Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/gpu-test.lock
+macos/.venv/bin/python macos/tests/realcugan_review.py --manifest "${KOMA_READER_MANIFEST_PATH:?请设为主项目的页面清单路径}" --output "$PWD/.runtime/super-resolution/realcugan/review" --lock "${KOMA_REALCUGAN_LOCK_PATH:?请设为本地验收锁文件路径}"
 macos/.venv/bin/python macos/tests/realcugan_cancel_review.py
 KOMA_REALCUGAN_ROOT=/nonexistent macos/.build/koma-sr-realcugan --capabilities
 bash -n macos/scripts/build_realcugan.sh macos/scripts/prepare_realcugan.sh
@@ -121,10 +121,10 @@ venv 为已有只读用途链接，仅运行 Pillow/numpy QA，没有安装或�
 
 ## 本地产物（不提交 Git）
 
-全部结果目录：
+全部结果目录（相对于本地 Real-CUGAN 工作副本根目录）：
 
 ```
-/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/realcugan/.runtime/super-resolution/realcugan/review/
+.runtime/super-resolution/realcugan/review/
 ```
 
 `results.json`：18 次推理结果、模型身份、耗时、文件/像素 hash、取消和负例；`protocol-results.json`：原生输入/4x/方向/进程组；`cancel-results.json`：三种取消与残留回收；`unavailable.json`：资源缺失；每次推理 `.stderr` 保留实际 GPU 日志。`compare-page{2,5}-{540,720,1080}-{1440,2160}.jpg` 与 `compare-native-page2-2160.jpg` 为可视裁剪，完整 PNG 也在同目录。`review.log` 在资产根目录。漫画、输出、权重及工具二进制均不纳入提交。

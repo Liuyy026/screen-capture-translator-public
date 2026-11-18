@@ -2,7 +2,7 @@
 
 > 历史记录：本文涉及的阶段性测试/评测脚本已于 2026-11-14 精简。旧命令请使用 [精简前源码](https://github.com/Liuyy026/screen-capture-translator-public/tree/75c7276a93f1d6a55ff09592cf1b2dbd3aede91f)；当前回归入口为 `scripts/check_regressions.py`。本文结果不代表本轮重新验证。
 
-日期：2026-11-08。独占副本：`/Users/lyy-studio/Desktop/project111/本地ai翻译/超分候选实验/20261108-front-sr/metalfx`。
+日期：2026-11-08。独占副本：`$METALFX_WORKTREE`（本地 MetalFX 工作副本根目录）。
 基线：`d24a9325699d8b9102c354b46025ed42dce22996`。交付提交为包含本文件的本副本 Git HEAD；交接时可 `git rev-parse HEAD` 获取。
 
 ## 已完成
@@ -83,7 +83,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 tools/rust_migration/run_sr_review.py --flow .
 原有 Reader 完整回归命令：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 tools/rust_migration/verify_reader_state.py --manifest .runtime/rust-migration/pages.json --assets /Users/lyy-studio/Desktop/project111/本地ai翻译/screen-capture-translator-rust/.runtime/rust-migration/reader-state-01/reading-native-v1 --output .runtime/super-resolution/reader-state-recheck
+PYTHONDONTWRITEBYTECODE=1 python3 tools/rust_migration/verify_reader_state.py --manifest .runtime/rust-migration/pages.json --assets "${KOMA_READER_ASSETS_DIR:?请设为主项目的本地阅读器资产目录}" --output .runtime/super-resolution/reader-state-recheck
 ```
 
 manifest 为本副本 `.runtime/rust-migration/pages.json` 的只读内容副本；assets 参数来自主项目，测试自行复制到独立输出，不修改主项目。Swift 新测试编译方式同现有 harness：`-D KOMA_REVIEW_HARNESS macos/Sources/*.swift macos/tests/SuperResolutionReaderTests.swift`，链接 SwiftUI/AppKit/CryptoKit/Security，参数为副本根、独立输出目录、两张人工720图片。
