@@ -109,7 +109,7 @@ macos/                  Swift 界面、候选构建及模型环境
 windows/                原 Python Windows 阅读器
 backend/                原 Python 后端，保留作稳定版/差分参照
 tools/rust_migration/   Rust 构建及离线核心回归
-scripts/ tests/         模型准备、缓存迁移及核心回归
+scripts/                模型准备、缓存迁移及回归入口
 docs/                   架构、迁移和验收记录
 进度汇总/               当前进度与分日期历史归档
 ```

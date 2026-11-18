@@ -97,12 +97,13 @@ Swift 的 `NativeCoreService.swift` 通过 JSONL 管道连接 `core/target/relea
 
 首次可只读复制 `KomaReader` 中的稳定配置和对应页面，之后写入候选独立目录。稳定数据不会随候选编辑变化，普通和视觉模式的编辑也不自动互相同步。
 
-已准备原生依赖后，可运行不需要真实模型权重或翻译服务的基础检查：
+公开检出可运行模型进程协议基础测试，无需真实模型权重或翻译服务。
 
 ```sh
-python3 tools/rust_migration/cargo.py test
-macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
+macos/.venv/bin/python scripts/check_regressions.py
 ```
+
+准备好原生依赖后，可用 `python3 tools/rust_migration/cargo.py test` 运行 Rust 单元测试。
 
 2026-11-08 的迁移验收覆盖 35 页真实 OCR 与像素对照、模拟 HTTP 流程、控制器及实际窗口。数字与计时口径见[验收报告](../docs/rust-core-validation.md)，当前回归入口见[核心说明](../core/README.md)。私人漫画、缓存及 `.runtime/rust-migration/pages.json` 未提交，克隆仓库不附带这套 35 页测试数据。
 
@@ -133,7 +134,7 @@ macos/.venv/bin/python -m unittest discover -s core/python -p 'test_*.py'
 
 切换服务后重新生成机器译文，手改译文继续保留。操作、CLI 参数和真实样例记录见[接入与验证说明](../docs/omlx-integration-2026-11-07.md)；该历史记录中的钥匙串说明已由上述本地配置方案替代。
 
-无需启动应用或模型即可运行本地配置检查：
+如果本地有 `macos/tests/ConnectionConfigTests.swift`，可直接检查连接配置，无需启动应用或模型。
 
 ```sh
 mkdir -p macos/.build
@@ -179,6 +180,6 @@ python3 macos/scripts/setup_reading_model.py
 
 候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。`macos/backend/reading_overlay.py` 保留作行为参照；原生回归通过实际 Rust CLI 复用其合成输入断言。
 
-离线核心回归通过 `scripts/check_regressions.py --native --swift` 运行，参见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
+已有本地测试文件时，可通过 `macos/.venv/bin/python scripts/check_regressions.py --local --native --swift` 运行共用、macOS Python、Rust 差分和 Swift 回归。各选项所需的用例见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
 
 模型复用会保留内存；退出候选应用时清理所属推理进程。Rust 只管理自己启动的、无密钥且位于既定 `127.0.0.1:11439` 地址的本地 Ollama；已有 Ollama/oMLX 服务不被接管。

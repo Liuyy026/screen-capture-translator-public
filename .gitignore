@@ -10,7 +10,9 @@ __pycache__/
 macos/.venv
 core/target/
 
-# Generated test caches and reports; keep reusable test source and fixtures.
+# Keep local test suites and their outputs out of Git.
+test/
+tests/
 .pytest_cache/
 .coverage
 .coverage.*

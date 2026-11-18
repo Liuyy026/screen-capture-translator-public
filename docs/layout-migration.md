@@ -20,7 +20,7 @@
 | `scripts/migrate_ollama_models.ps1` | `windows/scripts/migrate_ollama_models.ps1` |
 | `tests/test_canvas.py` | `windows/tests/test_canvas.py` |
 
-`backend/`、共用 `scripts/`、`tests/fixtures/`、`samples/`、`docs/` 和 `进度汇总/` 保留在根目录。
+整理时，`backend/`、共用 `scripts/`、`tests/fixtures/`、`samples/`、`docs/` 和 `进度汇总/` 都保留在根目录。当前公开检出已移除本地测试目录。
 
 ## 运行数据 / Runtime data
 
@@ -35,9 +35,9 @@
 
 本次从干净克隆开始，没有既有运行环境、模型或用户缓存需要移动。旧副本应按平台说明重新建立虚拟环境；虚拟环境包含绝对路径，不建议直接复制。macOS 应用保存构建时的仓库位置，移动整个仓库后需要重新构建。
 
-历史进度文档保持原文，其中旧代码位置按上表换算。旧测试命令只覆盖根目录 `tests/`；现在 Windows 开发需要额外运行 `python -m unittest discover -s windows/tests -v`。所有开发命令均从仓库根目录运行。
+历史进度文档保持原文，其中旧代码位置按上表换算。当前测试入口与本地用例要求见 [开发说明](development.md)。
 
-Shared source, model storage, system page caches, and backend CLI behavior remain at their previous locations. Environments, client logs, and build products now live under each platform directory. Recreate environments and rebuild the macOS app after moving the repository. Historical documentation retains its original paths; use the table above. Run both shared tests and `windows/tests/` when developing the Windows client.
+Shared source, model storage, system page caches, and backend CLI behavior remain at their previous locations. Environments, client logs, and build products now live under each platform directory. Recreate environments and rebuild the macOS app after moving the repository. Use the table above to interpret historical paths. See the [development guide](development.en.md) for the current commands and required local tests.
 
 ## 目录整理阶段验证（安装前） / Initial verification
 

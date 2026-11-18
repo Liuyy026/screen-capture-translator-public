@@ -38,7 +38,7 @@ The Windows development environment was validated with Python 3.12.14. Other sys
 
 ```powershell
 .\windows\.venv\Scripts\python.exe --version
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\windows\.venv\Scripts\python.exe -X utf8 scripts\check_regressions.py
 .\windows\.venv\Scripts\python.exe -X utf8 backend\worker.py --help
 ```
 
@@ -88,12 +88,11 @@ Install Ollama for Windows separately. The default model remains `qwen3:4b-q6k`.
 
 ```powershell
 .\windows\.venv\Scripts\python.exe -X utf8 scripts\prepare_models.py
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\windows\.venv\Scripts\python.exe -X utf8 -m unittest discover -s windows/tests -v
+.\windows\.venv\Scripts\python.exe -X utf8 scripts\check_regressions.py
 .\windows\.venv\Scripts\python.exe -X utf8 backend\worker.py --image samples\01.webp --operation both --status windows\.runtime\test-status.json
 ```
 
-Use `.venv-cuda` as appropriate. Run both shared (`tests/`) and client (`windows/tests/`) suites. Reader: `windows/windows_app.py`. The result pane remains read-only; editing, retranslation, and folder queues are pending. Logs and progress files: `windows/.runtime/`. Page caches remain in `%LOCALAPPDATA%\KomaReader\pages\`.
+Use `.venv-cuda` as appropriate. Add `--windows` to the regression command when you have the local `windows/tests/` suite and PySide6 installed. Reader: `windows/windows_app.py`. The result pane remains read-only; editing, retranslation, and folder queues are pending. Logs and progress files: `windows/.runtime/`. Page caches remain in `%LOCALAPPDATA%\KomaReader\pages\`.
 
 [Shared development](../docs/development.en.md) · [Path mapping](../docs/layout-migration.md)
 

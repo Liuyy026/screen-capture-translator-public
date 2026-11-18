@@ -2,29 +2,29 @@
 
 [Project overview](../README.en.md)
 
-Run all commands from the repository root using the chosen platform environment. Shared components: `backend/`, `scripts/`, `tests/`, `samples/`. Windows UI tests are in `windows/tests/`.
+Run all commands from the repository root using a Python environment with the project dependencies installed. Directories named `test/` or `tests/` at any level are for local use. `.gitignore` excludes them from Git.
 
 ## Core regressions
 
-Keep checks for translation protocols and recovery, manual edits, panels/dialogues, cleanup and layout, cache boundaries, cancellation, and client behavior. Inputs are generated; private manga, historical manifests, and real model services are not required.
-
-| Scope | Entry point |
-| --- | --- |
-| Shared backend | `tests/test_worker.py`, `test_translation_service.py`, `test_panels.py`, `test_structure.py`, `test_overlay.py` |
-| macOS display and vision inputs | `macos/tests/test_*.py` |
-| Model process protocol and array boundaries | `core/python/test_model_worker.py` |
-| Rust protocol, translation, display, queue and cancellation | `tools/rust_migration/verify_*.py`, using current Python assertions and generated fixtures |
-| Native cache and low-level behavior | Unit tests in `core/src/` |
-| Swift configuration, panning, layout and transport | `macos/tests/*Tests.swift` |
-| Windows Qt client and service selection | `windows/tests/` |
-
-From the repository root, use a Python environment with the project dependencies installed:
+A public checkout can run the model process protocol and array boundary tests in `core/python/`. They use generated inputs and run without a model server.
 
 ```sh
 python scripts/check_regressions.py
 ```
 
-After preparing native dependencies, build and test the Rust core, then enable native and Swift checks:
+The runner also runs any available local Python suites. Add `--local` to require both the shared backend suite in `tests/` and the basic macOS suite in `macos/tests/`.
+
+```sh
+python scripts/check_regressions.py --local
+```
+
+| Option | Required local tests and dependencies |
+| --- | --- |
+| `--native` | Python assertions from `tests/` and `macos/tests/` used by `tools/rust_migration/verify_*.py`, plus a built Rust core |
+| `--swift` | `macos/tests/*Tests.swift`, macOS and Xcode command-line tools |
+| `--windows` | Python tests in `windows/tests/` and PySide6 |
+
+Once the local tests and native dependencies are ready, build and test the Rust core, then run the native and Swift checks.
 
 ```sh
 python3 tools/rust_migration/cargo.py test -- --test-threads=1
@@ -32,9 +32,9 @@ python3 tools/rust_migration/cargo.py build
 python scripts/check_regressions.py --native --swift
 ```
 
-`--native` defaults to `core/target/debug/koma-core`; set `KOMA_TEST_CORE` to use another binary built from the current source. `--swift` requires macOS and Xcode command-line tools. Add `--windows` after installing PySide6. Requested checks fail on missing dependencies rather than reporting a skipped suite as a pass. The runner cleans its temporary `.runtime/` outputs on exit; individual verifiers accept a fresh `--output` directory to retain reports.
+`--native` defaults to `core/target/debug/koma-core`. Set `KOMA_TEST_CORE` to use another binary built from the current source. A requested suite fails if its local tests or dependencies are missing. The runner cleans its temporary `.runtime/` outputs on exit. Individual verifiers accept a fresh `--output` directory to retain reports.
 
-Commit test source, not local images, models, runtime caches, or coverage reports. `.gitignore` excludes generated outputs. Real model quality, GPU inference, and human review of the complete window experience remain outside these offline core regressions.
+Keep local images, model weights, runtime caches and coverage reports out of Git. Real model quality, GPU inference and the full window experience require separate checks.
 
 ## Historical acceptance and evaluation
 

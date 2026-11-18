@@ -2,29 +2,29 @@
 
 [项目首页](../README.md)
 
-以下命令均在仓库根目录运行，使用所选平台的 Python 环境。`backend/`、`scripts/`、`tests/`、`samples/` 为共用内容；Windows 界面测试单独放在 `windows/tests/`。
+以下命令均在仓库根目录运行，使用已安装项目依赖的 Python 环境。各层级名为 `test/` 或 `tests/` 的目录仅供本地使用，由 `.gitignore` 排除，请勿提交。
 
 ## 核心回归测试
 
-测试保留翻译协议与失败恢复、手改保护、分镜/对白、清字与排版、缓存边界、任务取消和两端界面行为。测试素材自动生成；不需要私人漫画、历史 manifest 或真实模型服务。
-
-| 范围 | 入口 |
-| --- | --- |
-| 共用后端 | `tests/test_worker.py`、`test_translation_service.py`、`test_panels.py`、`test_structure.py`、`test_overlay.py` |
-| macOS 显示与视觉输入 | `macos/tests/test_*.py` |
-| 模型进程协议与数组边界 | `core/python/test_model_worker.py` |
-| Rust 协议、普通/视觉翻译、显示、队列与取消 | `tools/rust_migration/verify_*.py`，复用当前 Python 行为断言和合成素材 |
-| Rust 缓存与原生底层 | `core/src/` 内的单元测试 |
-| Swift 配置、拖动、排版与进程通信 | `macos/tests/*Tests.swift` |
-| Windows Qt 界面与服务选择 | `windows/tests/` |
-
-使用已安装项目依赖的 Python，在仓库根目录运行：
+公开检出可运行 `core/python/` 下的模型进程协议和数组边界测试，素材自动生成，无需真实模型服务。
 
 ```sh
 python scripts/check_regressions.py
 ```
 
-原生依赖准备好后构建并运行 Rust 测试，再启用 Rust/Swift 回归：
+默认入口也会运行已经存在的本地 Python 套件。添加 `--local` 后，必须同时提供 `tests/` 的共用后端用例和 `macos/tests/` 的 macOS 基础用例。
+
+```sh
+python scripts/check_regressions.py --local
+```
+
+| 选项 | 所需本地用例与依赖 |
+| --- | --- |
+| `--native` | `tests/`、`macos/tests/` 中供 `tools/rust_migration/verify_*.py` 复用的 Python 断言，以及已构建的 Rust 核心 |
+| `--swift` | `macos/tests/*Tests.swift`、macOS 和 Xcode 命令行工具 |
+| `--windows` | `windows/tests/` 中的 Python 用例和 PySide6 |
+
+准备好本地用例与原生依赖后，可构建 Rust 核心并运行下列检查。
 
 ```sh
 python3 tools/rust_migration/cargo.py test -- --test-threads=1
@@ -32,9 +32,9 @@ python3 tools/rust_migration/cargo.py build
 python scripts/check_regressions.py --native --swift
 ```
 
-`--native` 默认使用 `core/target/debug/koma-core`，可用 `KOMA_TEST_CORE` 指向另一个与当前源码一致的已构建程序；`--swift` 需要 macOS/Xcode 命令行工具。安装 PySide6 后可添加 `--windows` 运行 Qt 测试。请求的测试缺少依赖时会报错，不会伪装成跳过后通过。临时输出在 `.runtime/` 中并在统一入口退出时清理；单独运行验证器可指定新的 `--output` 目录以保留报告。
+`--native` 默认使用 `core/target/debug/koma-core`，可用 `KOMA_TEST_CORE` 指向另一个与当前源码一致的已构建程序。请求的套件缺少本地用例或依赖时会报错。统一入口退出时会清理本次在 `.runtime/` 中的临时输出。单独运行验证器时，可指定新的 `--output` 目录保留报告。
 
-测试源码随 Git 提交；模型、运行缓存、覆盖率报告与本地图片不提交。`.gitignore` 保留相应排除规则。实际模型质量、真实 GPU 推理和完整窗口人工体验不属于这套离线核心回归。
+本地图片、模型权重、运行缓存和覆盖率报告也请勿提交。实际模型质量、真实 GPU 推理和完整窗口人工体验需要另行验证。
 
 ## 历史验收与评测
 
