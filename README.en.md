@@ -6,7 +6,7 @@ Koma recognizes Japanese text in manga, translates it and typesets Chinese on th
 
 This guide covers the current source build. The macOS build is still named `Koma Rust 候选版.app` and depends on the checkout and its local runtime. The pre-migration Python reader is available at `stable/pre-rust-20261108`.
 
-**November 18, 2026 · macOS candidate preview.** The local candidate supports per-dialogue typography, page reflow using saved translations, and a resizable dialogue sidebar. [Candidate notes and verification (Chinese)](docs/macos-typesetting-2026-11-18.md)
+**November 18, 2026 · macOS reader update.** Build from `main` to adjust typography for individual dialogue boxes, reflow a page using saved translations, and drag the divider to resize the dialogue sidebar. [Update notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
 
 ## Architecture
 
@@ -23,12 +23,12 @@ flowchart TD
     C --> D["Rust · Contours, masks, compositing and display cache"]
     D --> M["Python · CTD / LaMa inference"]
     M --> D
-    D --> S["Swift · Chinese line layout and final drawing"]
+    D --> S["Swift · Horizontal and vertical Chinese layout and drawing"]
 ```
 
 | Layer | Responsibilities |
 | --- | --- |
-| Swift / SwiftUI | Reader interaction, connection settings, left-to-right Chinese layout and drawing |
+| Swift / SwiftUI | Reader interaction, connection settings, horizontal and vertical Chinese layout and drawing |
 | Rust / native libraries | Task control, OCR assembly, structure, HTTP, image codecs, persistence, cleanup/compositing and owned engine lifecycle |
 | Python adapter | Installed CTD, Manga OCR and Anime LaMa inference, including model preprocessing/output conversion |
 | oMLX / Ollama | Language or vision model serving; model inference was not rewritten in Rust |
@@ -65,7 +65,7 @@ For Windows, use the existing [Windows guide](windows/README.en.md); the Rust mi
 - **Export manga** saves the whole chapter or selected pages as local PNGs with their original chapter page numbers. Choose the destination and folder name. See the [macOS export guide](macos/README.en.md#export-manga).
 - MetalFX and Real-CUGAN can upscale to 2560 or 3840 pixels by long edge or height. Changing enhancement settings reuses OCR, translations and manual edits within the selected translation mode. Real-CUGAN uses exact full-image feature synchronization to reduce color casts in dense screentones. See the [upscaling guide in Chinese](docs/macos-super-resolution.md).
 - Separate text and vision caches; proposed OCR corrections require manual confirmation.
-- Left-to-right Chinese text with measured glyph widths and contour-aware lines for long sentences and irregular/connected bubbles.
+- Horizontal Chinese text wraps to the bubble contour using measured glyph widths, including long sentences in irregular or connected bubbles. Automatic layout can choose vertical text for tall, narrow regions. You can also set the direction for a chapter or an individual dialogue.
 - Pixel masks and local background restoration replace broad white strips; narration is grouped in reading order.
 - Display caches are separate from translations. When a translation cannot be typeset, the image is preserved, the dialogue pane retains the available translation and the bottom status area shows a notice.
 

@@ -1,8 +1,13 @@
 import SwiftUI
 
+private typealias InspectorState<Value> = SwiftUI.State<Value>
+
 struct ReaderInspectorView: View {
     @ObservedObject var reader: Reader
     @ObservedObject var workspace: ReaderWorkspaceState
+    @InspectorState private var showsTypography = false
+    @InspectorState private var showsTypographyDetails = false
+    @InspectorState private var editorHeight: CGFloat = 0
 
     private var selectedBlock: TextBlock? {
         reader.page?.blocks.first { $0.id == reader.selectedBlock }
@@ -18,31 +23,29 @@ struct ReaderInspectorView: View {
             }.padding(12)
             Divider().overlay(ReaderPalette.separator)
             if let page = reader.page {
-                if let block = selectedBlock, let cache = reader.editCacheIdentity {
-                    ReaderSelectedBlockEditor(reader: reader, workspace: workspace, block: block,
-                                              key: ReaderDraftKey(cache: cache, blockID: block.id))
-                    Divider().overlay(ReaderPalette.separator)
-                }
-                Text("本页对白").font(.caption).foregroundStyle(ReaderPalette.secondary)
-                    .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 8)
-                if page.blocks.isEmpty {
-                    Text("没有检测到文字。复杂背景、手写字或低清晰度图片可能漏检。")
-                        .font(.callout).foregroundStyle(ReaderPalette.secondary).padding(12)
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 2) {
-                                ForEach(page.blocks) { block in
-                                    dialogueRow(block).id(block.id)
-                                }
-                            }.padding(.horizontal, 6).padding(.bottom, 8)
+                GeometryReader { geometry in
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let block = selectedBlock, let cache = reader.editCacheIdentity {
+                            let key = ReaderDraftKey(cache: cache, blockID: block.id)
+                            // Keep room for the page actions and list when the editor contents grow.
+                            let available = max(0, geometry.size.height - 138)
+                            ScrollView {
+                                ReaderSelectedBlockEditor(reader: reader, workspace: workspace, block: block, key: key,
+                                                          showsTypography: $showsTypography,
+                                                          showsTypographyDetails: $showsTypographyDetails)
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { editorHeight = $0 }
+                            }.scrollBounceBehavior(.basedOnSize)
+                                .frame(height: min(editorHeight > 0 ? editorHeight : available, available))
+                            Divider().overlay(ReaderPalette.separator)
                         }
-                        .onChange(of: reader.selectedBlock) { _, id in
-                            if let id { proxy.scrollTo(id, anchor: .center) }
+                        pageHeading(hasBlocks: !page.blocks.isEmpty)
+                        if page.blocks.isEmpty {
+                            Text("没有检测到文字。复杂背景、手写字或低清晰度图片可能漏检。")
+                                .font(.callout).foregroundStyle(ReaderPalette.secondary).padding(12)
+                        } else {
+                            dialogueList(page)
                         }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("dialogue-list")
-                    }.frame(minHeight: 100)
+                    }
                 }
             } else {
                 VStack(alignment: .leading, spacing: 12) {
@@ -53,10 +56,44 @@ struct ReaderInspectorView: View {
                 }.foregroundStyle(ReaderPalette.secondary).padding(16)
                 Spacer(minLength: 0)
             }
-        }.frame(width: 250).frame(maxHeight: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(ReaderPalette.text).background(ReaderPalette.inspector)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("dialogue-inspector")
+    }
+
+    private func pageHeading(hasBlocks: Bool) -> some View {
+        HStack {
+            Text("本页对白").font(.system(size: 12, weight: .semibold))
+            Spacer(minLength: 8)
+            Button { reader.reflowCurrentPageTypography() } label: {
+                Label("重排本页", systemImage: "arrow.clockwise")
+            }.buttonStyle(.borderless).font(.system(size: 12))
+                .disabled(!hasBlocks || reader.readingRegions == nil || reader.busy || reader.openingFolder
+                    || reader.preparingImage || reader.loadingPage)
+                .help("用现有译文和排版设置重新排版本页")
+                .accessibilityIdentifier("reflow-page-typography")
+        }.padding(.horizontal, 12).frame(height: 36)
+    }
+
+    private func dialogueList(_ page: PageResult) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(page.blocks) { block in
+                        dialogueRow(block).id(block.id)
+                    }
+                }.padding(.horizontal, 6).padding(.bottom, 8)
+            }
+            .onChange(of: reader.selectedBlock, initial: true) { _, id in
+                if let id { proxy.scrollTo(id, anchor: .center) }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
+                if let id = reader.selectedBlock { proxy.scrollTo(id, anchor: .center) }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("dialogue-list")
+        }.frame(minHeight: 100)
     }
 
     private var candidateSummary: String {
@@ -100,6 +137,8 @@ private struct ReaderSelectedBlockEditor: View {
     @ObservedObject var workspace: ReaderWorkspaceState
     let block: TextBlock
     let key: ReaderDraftKey
+    @Binding var showsTypography: Bool
+    @Binding var showsTypographyDetails: Bool
 
     private var draft: ReaderEditDraft { workspace.draft(for: key, block: block) }
     private var disabled: Bool { reader.busy || reader.openingFolder || reader.preparingImage || draft.phase != .editing }
@@ -156,6 +195,9 @@ private struct ReaderSelectedBlockEditor: View {
             }, set: {
                 workspace.update(key, block: block, translation: $0)
             }), height: 64, identifier: "dialogue-translation")
+            Divider().overlay(ReaderPalette.separator)
+            ReaderBlockTypographyView(reader: reader, block: block, key: key, isDisabled: disabled,
+                                      isExpanded: $showsTypography, showsDetails: $showsTypographyDetails)
             if block.needsOCRReview {
                 Button("确认为文字，恢复处理") { reader.confirmOCR(block.id) }
                     .buttonStyle(.link).font(.caption).disabled(disabled || draft.changed)

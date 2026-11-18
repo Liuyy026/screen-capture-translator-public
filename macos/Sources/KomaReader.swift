@@ -20,6 +20,9 @@ private struct NativeLoadedPage: Decodable {
     @Published var readingRegions: [ReadingRegion]? { didSet { presentationCache = nil } }
     @Published var readingPreserved: [String: String] = [:]
     private var presentationCache: [ReadingPresentation]?
+    @Published private var typography = ChapterTypography() { didSet { presentationCache = nil } }
+    private var typographyURL: URL?
+    private var originalPixelWidth: Double?
     @Published var readingLayoutError: String?
     @Published private(set) var loadingPage = false
     @Published private(set) var pageLoadError: String?
@@ -358,6 +361,16 @@ private struct NativeLoadedPage: Decodable {
     func select(_ url: URL) {
         effectiveImage = nil; layoutImage = nil
         selected = url; selectedBlock = nil; error = nil
+        originalPixelWidth = ChapterTypography.originalWidth(at: url)
+        let styleFile = url.deletingLastPathComponent().appendingPathComponent(ChapterTypography.filename)
+        if typographyURL != styleFile {
+            typographyURL = styleFile
+            do { typography = try ChapterTypography.read(from: styleFile) }
+            catch {
+                typography = ChapterTypography()
+                self.error = "无法读取章节排版：\(error.localizedDescription)"
+            }
+        }
         image = NSImage(contentsOf: url)
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
         page = nil; cacheURL = nil; pageRevision = nil
@@ -420,9 +433,67 @@ private struct NativeLoadedPage: Decodable {
     var readingPresentations: [ReadingPresentation] {
         if let presentationCache { return presentationCache }
         guard let page, let readingRegions else { return [] }
-        let items = ReadingLayout.presentations(page: page, regions: readingRegions)
+        let styles = typographyPageKey.map { typography.styles(for: page, key: $0) } ?? [:]
+        let items = ReadingLayout.presentations(page: page, regions: readingRegions, styles: styles,
+            sourcePixelScale: ChapterTypography.pixelScale(for: page, originalWidth: originalPixelWidth))
         presentationCache = items
         return items
+    }
+
+    private var typographyPageKey: String? {
+        guard let selected, let cacheURL else { return nil }
+        return ChapterTypography.pageKey(image: selected, cache: cacheURL)
+    }
+
+    var chapterTypography: ReadingTextStyle { typography.defaults }
+
+    func typographyOverride(for block: TextBlock) -> ReadingTextStyle {
+        guard let page, let key = typographyPageKey else { return ReadingTextStyle() }
+        return typography.override(for: block, on: page, key: key)
+    }
+
+    func resolvedTypography(for block: TextBlock) -> ReadingTextStyle {
+        guard let page, let key = typographyPageKey else { return chapterTypography }
+        return typography.resolved(for: block, on: page, key: key)
+    }
+
+    func actualTypeset(for block: TextBlock) -> ReadingTypeset? {
+        readingPresentations.first { $0.region.block_ids.contains(block.id) }?.layout(for: block.id)
+    }
+
+    func setTypographyOverride(_ style: ReadingTextStyle, for block: TextBlock) {
+        guard let page, let key = typographyPageKey, typographyOverride(for: block) != style,
+              page.blocks.contains(where: { $0.id == block.id && $0.box == block.box }) else { return }
+        saveTypography { $0.set(style, for: block, on: page, key: key) }
+    }
+
+    func resetTypographyOverride(for block: TextBlock) {
+        setTypographyOverride(ReadingTextStyle(), for: block)
+    }
+
+    @discardableResult func setChapterTypography(_ style: ReadingTextStyle) -> Bool {
+        guard chapterTypography != style else { return true }
+        return saveTypography { $0.defaults = style }
+    }
+
+    @discardableResult private func saveTypography(_ change: (inout ChapterTypography) -> Void) -> Bool {
+        guard !busy, !openingFolder, let typographyURL else { return false }
+        do {
+            typography = try ChapterTypography.update(at: typographyURL, change: change)
+            displayMode = 2
+            return true
+        } catch {
+            self.error = "章节排版未保存：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func reflowCurrentPageTypography() {
+        guard !busy, !openingFolder, page != nil, readingRegions != nil else { return }
+        presentationCache = nil
+        displayMode = 2
+        let missing = unreadableOverlayCount
+        message = missing == 0 ? "已按现有译文重排本页" : "已重排本页 · \(missing) 处无法回填，已保留原图"
     }
 
     var unreadableOverlayCount: Int {
@@ -589,6 +660,7 @@ private struct NativeLoadedPage: Decodable {
         let directory = options.directory.standardizedFileURL
         let isCustomDirectory = directory.path != ChapterExport.defaultDirectory(project: root, defaults: defaults).path
         let pages = options.pages.map { (number: $0, file: files[$0 - 1]) }
+        let exportTypography = typography
         let digits = max(3, String(files.count).count)
         let mode = processingMode
         let useOriginal = srEngine == "off"
@@ -618,7 +690,12 @@ private struct NativeLoadedPage: Decodable {
                     let page = try JSONDecoder().decode(ChapterExport.Page.self, from: data)
                     let number = String(pageNumber)
                     let name = String(repeating: "0", count: digits - number.count) + number + ".png"
-                    omitted += try await ChapterExport.write(page, to: staging.appendingPathComponent(name))
+                    let cache = try page.cache.map { URL(fileURLWithPath: $0) } ?? cacheFor(input, mode: mode)
+                    let key = ChapterTypography.pageKey(image: input, cache: cache)
+                    let styles = exportTypography.styles(for: page.page, key: key)
+                    let scale = ChapterTypography.pixelScale(for: page.page, originalWidth: ChapterTypography.originalWidth(at: input))
+                    omitted += try await ChapterExport.write(page, to: staging.appendingPathComponent(name),
+                                                             styles: styles, sourcePixelScale: scale)
                     try Task.checkCancellation()
                     queueDone = index + 1
                 }

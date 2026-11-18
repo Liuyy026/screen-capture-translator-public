@@ -1,13 +1,23 @@
 import SwiftUI
 import AppKit
 
-private typealias StatusState<Value> = SwiftUI.State<Value>
+private typealias ViewState<Value> = SwiftUI.State<Value>
 
 @MainActor struct ContentView: View {
     @ObservedObject var reader: Reader
     let startsServices: Bool
     @StateObject private var workspace: ReaderWorkspaceState
     @StateObject private var imagePan = ImagePanController()
+    @AppStorage("reader.inspectorWidth") private var preferredInspectorWidth = 356.0
+    @ViewState private var inspectorDrag: InspectorDrag?
+    @ViewState private var showsChapterTypography = false
+
+    private struct InspectorDrag {
+        let initialWidth: CGFloat
+        var translation: CGFloat = 0
+    }
+
+    private static let inspectorDividerWidth: CGFloat = 9
 
     init(reader: Reader, startsServices: Bool = true, workspace: ReaderWorkspaceState? = nil) {
         self.reader = reader
@@ -23,23 +33,9 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    if let image = reader.image {
-                        ReaderCanvasView(reader: reader, controller: imagePan, image: image,
-                                         showsSelection: workspace.showsInspector, select: selectBlock)
-                    } else {
-                        welcome.frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(ReaderPalette.canvas)
-                    }
-                    Divider().overlay(ReaderPalette.separator)
-                    readingControls
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                if workspace.showsInspector {
-                    Divider().overlay(ReaderPalette.separator)
-                    ReaderInspectorView(reader: reader, workspace: workspace)
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            GeometryReader { geometry in
+                readerSplit(windowWidth: geometry.size.width)
+            }
             ReaderStatusView(reader: reader, showDialogue: selectBlock)
         }
         .foregroundStyle(ReaderPalette.text).background(ReaderPalette.bar).tint(ReaderPalette.accent)
@@ -49,6 +45,7 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
         .frame(minWidth: 840, minHeight: 660)
         .sheet(isPresented: $reader.showConnectionSettings) { TranslationSettingsView(reader: reader).tint(ReaderPalette.accent) }
         .sheet(isPresented: $workspace.showsExportOptions) { ReaderExportOptionsView(reader: reader) }
+        .sheet(isPresented: $showsChapterTypography) { ReaderChapterTypographyEditor(reader: reader) }
         .task { if startsServices { reader.startup() } }
         .onReceive(reader.$page) { page in
             guard let page else { return }
@@ -58,7 +55,62 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
             }
         }
         .onChange(of: reader.selected) { _, _ in workspace.showsPages = false }
+        .onChange(of: workspace.showsInspector) { _, isShown in
+            if !isShown { inspectorDrag = nil }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
+    }
+
+    private func clampedInspectorWidth(_ width: CGFloat, windowWidth: CGFloat) -> CGFloat {
+        let minimum: CGFloat = 250
+        // Leave space for the normal reading controls even at the minimum window size.
+        let maximum = max(minimum, min(580, windowWidth - 560 - Self.inspectorDividerWidth))
+        return min(maximum, max(minimum, width))
+    }
+
+    private func readerSplit(windowWidth: CGFloat) -> some View {
+        let proposedWidth = inspectorDrag.map { $0.initialWidth - $0.translation } ?? CGFloat(preferredInspectorWidth)
+        let width = clampedInspectorWidth(proposedWidth, windowWidth: windowWidth)
+        return HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                if let image = reader.image {
+                    ReaderCanvasView(reader: reader, controller: imagePan, image: image,
+                                     showsSelection: workspace.showsInspector, select: selectBlock)
+                } else {
+                    welcome.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(ReaderPalette.canvas)
+                }
+                Divider().overlay(ReaderPalette.separator)
+                readingControls
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            if workspace.showsInspector {
+                Rectangle().fill(inspectorDrag == nil ? ReaderPalette.separator : ReaderPalette.accent)
+                    .frame(width: 1)
+                    .frame(width: Self.inspectorDividerWidth)
+                    .frame(maxHeight: .infinity)
+                    .overlay {
+                        ReaderInspectorDivider { drag in
+                            switch drag {
+                            case .began:
+                                inspectorDrag = InspectorDrag(initialWidth: width)
+                            case .changed(let translation):
+                                inspectorDrag?.translation = translation
+                            case .ended(let translation):
+                                if let inspectorDrag, translation != 0 {
+                                    let finalWidth = clampedInspectorWidth(inspectorDrag.initialWidth - translation,
+                                                                             windowWidth: windowWidth)
+                                    if finalWidth != inspectorDrag.initialWidth {
+                                        preferredInspectorWidth = Double(finalWidth)
+                                    }
+                                }
+                                inspectorDrag = nil
+                            }
+                        }
+                    }
+                ReaderInspectorView(reader: reader, workspace: workspace)
+                    .frame(width: width)
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ToolbarContentBuilder private var readerToolbar: some ToolbarContent {
@@ -90,6 +142,9 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
             Menu {
                 Button("只识别本页日文") { reader.run(operation: "ocr") }
                 Button("翻译整个文件夹") { reader.run(batch: true) }.disabled(!reader.engineReady)
+                Button("章节排版默认…") { showsChapterTypography = true }
+                    .disabled(reader.selected == nil)
+                    .accessibilityIdentifier("chapter-typography")
             } label: { Image(systemName: "ellipsis") }
                 .disabled(reader.selected == nil || working || reader.openingFolder)
                 .help("更多处理操作").accessibilityIdentifier("more-processing")
@@ -163,6 +218,7 @@ private typealias StatusState<Value> = SwiftUI.State<Value>
                     .padding(.horizontal, 7).padding(.vertical, 5)
                     .background(workspace.showsInspector ? ReaderPalette.selection : .clear,
                                 in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityIdentifier("toggle-inspector")
                 .help(workspace.showsInspector ? "收起对白对照" : "展开对白对照")
         }.padding(.horizontal, 12).padding(.vertical, 8).controlSize(.small)
@@ -263,7 +319,7 @@ private struct ReaderCanvasView: View {
 private struct ReaderStatusView: View {
     @ObservedObject var reader: Reader
     let showDialogue: (String) -> Void
-    @StatusState private var showsDiagnostics = false
+    @ViewState private var showsDiagnostics = false
 
     private var layoutNotice: String? {
         guard reader.displayMode == 2, reader.page != nil else { return nil }

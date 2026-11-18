@@ -15,6 +15,7 @@ enum ChapterExport {
         let page: PageResult
         let reply: ReadingOverlayService.Reply
         let effective_image: String
+        var cache: String? = nil
     }
 
     private struct LocalSettings: Decodable { let directory: String }
@@ -113,12 +114,14 @@ enum ChapterExport {
         }
     }
 
-    @MainActor static func write(_ input: Page, to url: URL) async throws -> Int {
+    @MainActor static func write(_ input: Page, to url: URL, styles: [String: ReadingTextStyle] = [:],
+                                 sourcePixelScale: Double = 1) async throws -> Int {
         let page = input.page
         guard input.reply.version == 3, page.width > 0, page.height > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions)
+        let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions,
+                                                        styles: styles, sourcePixelScale: sourcePixelScale)
         let shown = Set(presentations.flatMap(\.region.block_ids))
         let omitted = page.blocks.filter { block in
             !block.keepsOriginal && !block.needsOCRReview && block.overlay != "skip" && block.text_kind != "noise"

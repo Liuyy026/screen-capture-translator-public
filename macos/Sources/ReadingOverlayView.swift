@@ -46,19 +46,26 @@ struct ReadingOverlayView: View {
                     context.fill(polygon(erase, origin: origin), with: .color(fill))
                 }
             }
-            for glyph in presentation.layout.glyphs {
-                if region.background_png != nil {
-                    // A small glyph outline keeps text readable over screentone without a white card.
-                    let stroke = max(0.5, presentation.layout.fontSize * 0.055) * scale
-                    for direction in 0..<8 {
-                        let angle = Double(direction) * .pi / 4
-                        context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(outlineColor),
-                                     at: CGPoint(x: (glyph.center.x - left) * scale + cos(angle) * stroke,
-                                                 y: (glyph.center.y - top) * yScale + sin(angle) * stroke))
+            var ink = context
+            if scale > 0 { ink.scaleBy(x: 1, y: yScale / scale) }
+            for run in presentation.runs {
+                let layout = run.layout
+                let size = layout.fontSize * scale
+                let font = layout.fontName.map { Font.custom($0, fixedSize: size) } ?? .system(size: size, weight: .medium)
+                let stroke = max(0.5, layout.fontSize * 0.055) * scale
+                for glyph in layout.glyphs {
+                    let center = CGPoint(x: (glyph.center.x - left) * scale, y: (glyph.center.y - top) * scale)
+                    let character = Text(glyph.text).font(font)
+                    if presentation.background != nil {
+                        let outline = ink.resolve(character.foregroundColor(outlineColor))
+                        for direction in 0..<8 {
+                            let angle = Double(direction) * .pi / 4
+                            ink.draw(outline, at: CGPoint(x: center.x + cos(angle) * stroke,
+                                                         y: center.y + sin(angle) * stroke))
+                        }
                     }
+                    ink.draw(character.foregroundColor(textColor), at: center)
                 }
-                context.draw(Text(glyph.text).font(.system(size: presentation.layout.fontSize * scale, weight: .medium)).foregroundColor(textColor),
-                             at: CGPoint(x: (glyph.center.x - left) * scale, y: (glyph.center.y - top) * yScale))
             }
             if selected { context.stroke(contour, with: .color(selectionColor), lineWidth: 2) }
         }

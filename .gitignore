@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 .DS_Store
 macos/.venv
+.koma-typesetting.json
 core/target/
 
 # Keep local test suites and their outputs out of Git.
