@@ -6,7 +6,9 @@ Koma recognizes Japanese text in manga, translates it and typesets Chinese on th
 
 This guide covers the current source build. The macOS build is still named `Koma Rust 候选版.app` and depends on the checkout and its local runtime. The pre-migration Python reader is available at `stable/pre-rust-20261108`.
 
-**November 18, 2026 · macOS reader update.** Build from `main` to adjust typography for individual dialogue boxes, reflow a page using saved translations, and drag the divider to resize the dialogue sidebar. [Update notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
+**v0.21 · November 18, 2026 · macOS reader**
+
+Set the font, size and text direction for individual dialogue boxes. Reflow a page using saved translations, including manual edits. Drag the divider to resize the dialogue sidebar. The reader remembers its width the next time you open it. This version also fixes a background color shift when exporting Display P3 pages to PNG. [v0.21 release notes and source](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [Typesetting guide and validation notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
 
 ## Architecture
 

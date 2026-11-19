@@ -1,6 +1,6 @@
-# macOS 阅读器更新 · 2026-11-18
+# Koma v0.21 · macOS 阅读器更新 · 2026-11-18
 
-对白排版和可调宽对白栏已合入 GitHub 的 `main` 分支。已配置构建环境的用户可以拉取最新源码，在仓库根目录运行 `./macos/scripts/build_and_run.sh --verify`，重新构建并打开阅读器。首次构建请参阅 [macOS 安装说明](../macos/README.md)。
+v0.21 支持逐框排版、本页重排和对白栏调宽。使用本版源码并配置好构建环境后，在仓库根目录运行 `./macos/scripts/build_and_run.sh --verify` 即可重新构建并打开阅读器。[v0.21 发布页面](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [macOS 安装说明](../macos/README.md)
 
 ## 给单条对白调整排版
 

@@ -6,7 +6,9 @@ Koma 在本机识别日文漫画、翻译并在原页回填中文。`main` 中�
 
 本页说明当前源码构建。macOS 的构建产物仍名为 `Koma Rust 候选版.app`，依赖仓库目录与本机运行环境。重构前的 Python 版可在 `stable/pre-rust-20261108` 找到。
 
-**2026-11-18 · macOS 阅读器更新**　从 `main` 构建的阅读器支持逐框调整对白排版、用已有译文重排本页，以及拖动调整对白栏宽度。[更新说明与验证记录](docs/macos-typesetting-2026-11-18.md)
+**v0.21 · 2026-11-18 · macOS 阅读器**
+
+可以为单条对白调整字体、字号和横竖排，也可以用已保存的译文重排本页，保留手改内容。拖动漫画与对白栏之间的分隔线即可调整栏宽，下次打开会恢复上次设置。本版还修复了 Display P3 彩页导出 PNG 时的底色偏移。[v0.21 发布说明与源码](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [排版操作与验证记录](docs/macos-typesetting-2026-11-18.md)
 
 ## 当前架构
 
