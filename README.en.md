@@ -8,7 +8,9 @@ This guide covers the current source build. The macOS build is still named `Koma
 
 **v0.21 · November 18, 2026 · macOS reader**
 
-Set the font, size and text direction for individual dialogue boxes. Reflow a page using saved translations, including manual edits. Drag the divider to resize the dialogue sidebar. The reader remembers its width the next time you open it. This version also fixes a background color shift when exporting Display P3 pages to PNG. [v0.21 release notes and source](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [Typesetting guide and validation notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
+Set the font, size and text direction for individual dialogue boxes. Reflow a page using saved translations, including manual edits. Drag the divider to resize the dialogue sidebar. The reader remembers its width the next time you open it. This version also fixes a background color shift when exporting Display P3 pages to PNG. [v0.21 release notes](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [Typesetting guide and validation notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
+
+**Download for Mac**　On Apple Silicon with macOS 14 or later, unzip the download and open `Koma.app` to read manga or use MetalFX upscaling. For Japanese OCR, background restoration or Real-CUGAN, quit the app and run the bundled `准备组件.command` setup script. [Download the v0.21 Mac app](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/Koma-0.21-macOS-arm64.zip) · [SHA-256 checksum](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/SHA256SUMS.txt)
 
 ## Architecture
 

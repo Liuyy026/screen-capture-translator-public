@@ -233,7 +233,7 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
             Text("支持 WebP、PNG、JPG。\n识别日文，翻译并回填到漫画页。")
                 .multilineTextAlignment(.center).foregroundStyle(ReaderPalette.secondary)
             Button("打开漫画文件夹") { reader.chooseFolder() }.buttonStyle(ReaderPrimaryButtonStyle())
-            Button("先试试内置测试页") { reader.loadFolder(reader.root.appendingPathComponent("samples")) }
+            Button("先试试内置测试页") { reader.loadFolder(reader.samplesDirectory) }
                 .buttonStyle(.link)
         }.padding(24)
     }

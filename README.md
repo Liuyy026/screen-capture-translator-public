@@ -8,7 +8,9 @@ Koma 在本机识别日文漫画、翻译并在原页回填中文。`main` 中�
 
 **v0.21 · 2026-11-18 · macOS 阅读器**
 
-可以为单条对白调整字体、字号和横竖排，也可以用已保存的译文重排本页，保留手改内容。拖动漫画与对白栏之间的分隔线即可调整栏宽，下次打开会恢复上次设置。本版还修复了 Display P3 彩页导出 PNG 时的底色偏移。[v0.21 发布说明与源码](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [排版操作与验证记录](docs/macos-typesetting-2026-11-18.md)
+可以为单条对白调整字体、字号和横竖排，也可以用已保存的译文重排本页，保留手改内容。拖动漫画与对白栏之间的分隔线即可调整栏宽，下次打开会恢复上次设置。本版还修复了 Display P3 彩页导出 PNG 时的底色偏移。[v0.21 发布说明](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [排版操作与验证记录](docs/macos-typesetting-2026-11-18.md)
+
+**下载 Mac 应用**　Apple Silicon、macOS 14 及以上可直接下载 ZIP，解压后打开 `Koma.app`。阅读和 MetalFX 超分可直接使用；需要日文 OCR、背景修补或 Real-CUGAN 时，先退出应用，再运行同目录的 `准备组件.command`。[下载 v0.21 Mac 应用](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/Koma-0.21-macOS-arm64.zip) · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/SHA256SUMS.txt)
 
 ## 当前架构
 

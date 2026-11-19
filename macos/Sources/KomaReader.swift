@@ -106,13 +106,16 @@ private struct NativeLoadedPage: Decodable {
     private(set) var configurationLoadError: String?
     private var localOllamaProbes: Set<UUID> = []
     let root: URL
+    private let runtimeRoot: URL?
     var platformRoot: URL { root.appendingPathComponent("macos") }
+    var samplesDirectory: URL { root.appendingPathComponent("samples", isDirectory: true) }
     let cacheDir: URL
     private lazy var nativeCore: NativeCoreService = {
         let seed = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/KomaReader/pages")
         return NativeCoreService(root: root, cache: cacheDir,
                                  assets: cacheDir.deletingLastPathComponent().appendingPathComponent("reading-native-v1"),
-                                 seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil)
+                                 seed: FileManager.default.fileExists(atPath: seed.path) ? seed : nil,
+                                 runtimeRoot: runtimeRoot)
     }()
 
     // The candidate bundle identifier already isolates .standard. Foundation
@@ -121,8 +124,13 @@ private struct NativeLoadedPage: Decodable {
          defaults: UserDefaults = .standard,
          configurationStore: TranslationLocalConfigStore? = nil) {
         let configured = Bundle.main.object(forInfoDictionaryKey: "ProjectRoot") as? String
-        self.root = root ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
-        self.cacheDir = cacheDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/" + ((Bundle.main.object(forInfoDictionaryKey: "CacheNamespace") as? String) ?? "KomaReaderRust") + "/pages")
+        let resourceFolder = Bundle.main.object(forInfoDictionaryKey: "KomaRuntimeFolder") as? String
+        let bundled = resourceFolder.flatMap { Bundle.main.resourceURL?.appendingPathComponent($0, isDirectory: true) }
+        let namespace = (Bundle.main.object(forInfoDictionaryKey: "CacheNamespace") as? String) ?? "KomaReaderRust"
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/" + namespace)
+        self.root = root ?? bundled ?? URL(fileURLWithPath: configured ?? FileManager.default.currentDirectoryPath)
+        self.cacheDir = cacheDir ?? support.appendingPathComponent("pages")
+        self.runtimeRoot = root == nil && bundled != nil ? support.appendingPathComponent("runtime") : nil
         self.defaults = defaults
         self.connectionConfigStore = configurationStore ?? TranslationLocalConfigStore(url: self.cacheDir.deletingLastPathComponent().appendingPathComponent("config.json"))
         if configurationStore == nil, !defaults.bool(forKey: "stableReaderSettingsImported") {
@@ -237,7 +245,11 @@ private struct NativeLoadedPage: Decodable {
             Task { @MainActor in _ = await self?.refreshModels() }
         }
         if let folder = defaults.string(forKey: "folder") {
-            loadFolder(URL(fileURLWithPath: folder), restore: true)
+            // Older releases stored the full path to the copy of Koma.app that was last opened.
+            let sampleSuffix = ".app/Contents/Resources/" + root.lastPathComponent + "/samples"
+            let bundledSample = runtimeRoot != nil && (folder == "samples" || folder.hasSuffix(sampleSuffix))
+            let url = bundledSample ? samplesDirectory : URL(fileURLWithPath: folder)
+            loadFolder(url, restore: true)
         }
     }
 
@@ -315,6 +327,11 @@ private struct NativeLoadedPage: Decodable {
         if panel.runModal() == .OK, let url = panel.url { loadFolder(url) }
     }
 
+    private func isBundledSampleDirectory(_ url: URL) -> Bool {
+        guard runtimeRoot != nil else { return false }
+        return url.resolvingSymlinksInPath().standardizedFileURL.path == samplesDirectory.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     func loadFolder(_ url: URL, restore: Bool = false) {
         guard !busy else { return }
         let request = UUID()
@@ -338,9 +355,10 @@ private struct NativeLoadedPage: Decodable {
                 }
                 pageProcessingErrors.removeAll()
                 files = images; folderName = url.lastPathComponent
-                defaults.set(url.path, forKey: "folder")
-                let last = defaults.string(forKey: "lastPage")
-                let initial = restore ? (images.first { $0.path == last } ?? images[0]) : images[0]
+                let bundledSample = isBundledSampleDirectory(url)
+                defaults.set(bundledSample ? "samples" : url.path, forKey: "folder")
+                let last = defaults.string(forKey: "lastPage").map { bundledSample ? URL(fileURLWithPath: $0).lastPathComponent : $0 }
+                let initial = restore ? (images.first { (bundledSample ? $0.lastPathComponent : $0.path) == last } ?? images[0]) : images[0]
                 select(initial)
             } catch {
                 if request == folderRequest {
@@ -362,7 +380,11 @@ private struct NativeLoadedPage: Decodable {
         effectiveImage = nil; layoutImage = nil
         selected = url; selectedBlock = nil; error = nil
         originalPixelWidth = ChapterTypography.originalWidth(at: url)
-        let styleFile = url.deletingLastPathComponent().appendingPathComponent(ChapterTypography.filename)
+        let folder = url.deletingLastPathComponent()
+        let bundledSample = isBundledSampleDirectory(folder)
+        let styleFile = bundledSample
+            ? cacheDir.deletingLastPathComponent().appendingPathComponent("sample-typesetting.json")
+            : folder.appendingPathComponent(ChapterTypography.filename)
         if typographyURL != styleFile {
             typographyURL = styleFile
             do { typography = try ChapterTypography.read(from: styleFile) }
@@ -375,7 +397,7 @@ private struct NativeLoadedPage: Decodable {
         if image == nil { error = "无法解码这张图片：\(url.lastPathComponent)" }
         page = nil; cacheURL = nil; pageRevision = nil
         reloadPage(updateMessage: !busy)
-        defaults.set(url.path, forKey: "lastPage")
+        defaults.set(bundledSample ? url.lastPathComponent : url.path, forKey: "lastPage")
     }
 
     private func resetReadingRegions() {
@@ -637,7 +659,7 @@ private struct NativeLoadedPage: Decodable {
     func defaultChapterExportOptions() -> ChapterExport.Options {
         ChapterExport.Options(pages: IndexSet(integersIn: 1..<(files.count + 1)),
                               folderName: (try? ChapterExport.validatedFolderName(folderName)) ?? "漫画",
-                              directory: ChapterExport.defaultDirectory(project: root, defaults: defaults))
+                              directory: ChapterExport.defaultDirectory(project: runtimeRoot ?? root, defaults: defaults))
     }
 
     func exportChapter(_ options: ChapterExport.Options) {
@@ -658,7 +680,7 @@ private struct NativeLoadedPage: Decodable {
             return
         }
         let directory = options.directory.standardizedFileURL
-        let isCustomDirectory = directory.path != ChapterExport.defaultDirectory(project: root, defaults: defaults).path
+        let isCustomDirectory = directory.path != ChapterExport.defaultDirectory(project: runtimeRoot ?? root, defaults: defaults).path
         let pages = options.pages.map { (number: $0, file: files[$0 - 1]) }
         let exportTypography = typography
         let digits = max(3, String(files.count).count)

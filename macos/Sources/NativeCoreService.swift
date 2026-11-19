@@ -15,6 +15,7 @@ import Darwin
     private let executable: URL
     private let arguments: [String]
     private let logURL: URL
+    private let realcuganDirectory: URL?
     private var child: Process?
     private var input: FileHandle?
     private var log: FileHandle?
@@ -23,20 +24,23 @@ import Darwin
     private let writer = DispatchQueue(label: "KomaRust.requests")
     private var closed = false
 
-    init(root: URL, cache: URL, assets: URL, seed: URL? = nil) {
+    init(root: URL, cache: URL, assets: URL, seed: URL? = nil, runtimeRoot: URL? = nil) {
+        let runtime = runtimeRoot ?? root
         executable = root.appendingPathComponent("core/target/release/koma-core")
         arguments = ["serve", "--cache-root", cache.path, "--assets-root", assets.path,
-                     "--python", root.appendingPathComponent("macos/.venv/bin/python").path,
+                     "--python", runtime.appendingPathComponent("macos/.venv/bin/python").path,
                      "--worker", root.appendingPathComponent("core/python/model_worker.py").path,
-                     "--weights", root.appendingPathComponent(".models").path,
-                     "--ollama", root.appendingPathComponent("macos/.runtime/ollama/ollama").path]
+                     "--weights", runtime.appendingPathComponent(".models").path,
+                     "--ollama", runtime.appendingPathComponent("macos/.runtime/ollama/ollama").path]
             + (seed.map { ["--seed-root", $0.path] } ?? [])
         logURL = assets.deletingLastPathComponent().appendingPathComponent("native-core.log")
+        realcuganDirectory = runtimeRoot?.appendingPathComponent(".runtime/super-resolution/realcugan")
     }
 
     // Also used by the transport harness with a private scripted peer.
     init(executable: URL, arguments: [String], logURL: URL) {
         self.executable = executable; self.arguments = arguments; self.logURL = logURL
+        realcuganDirectory = nil
     }
 
     private func start() throws {
@@ -52,6 +56,13 @@ import Darwin
         process.executableURL = executable; process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "KOMA_TRANSLATION_API_KEY")
+        if let realcuganDirectory {
+            let fast = realcuganDirectory.appendingPathComponent("fast-png")
+            let release = realcuganDirectory.appendingPathComponent("realcugan-ncnn-vulkan-20220728-macos")
+            let fastInstalled = FileManager.default.isExecutableFile(atPath: fast.appendingPathComponent("realcugan-ncnn-vulkan").path)
+            environment["KOMA_REALCUGAN_ROOT"] = environment["KOMA_REALCUGAN_ROOT"] ?? (fastInstalled ? fast : release).path
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        }
         process.environment = environment
         process.standardInput = incoming; process.standardOutput = outgoing
         try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
