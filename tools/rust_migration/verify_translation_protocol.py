@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Compare native translation protocols against the current Python workers.
+"""Compare native translation protocols against the pinned pre-split Python workers.
 
 Uses generated page fixtures and a loopback fake HTTP server only. No live inference,
 real credentials, original cache writes, or model lifecycle requests.
 """
 import argparse
+from baseline import prepare_baseline
 from fixtures import make_pages, core_binary
 import copy
 import hashlib
@@ -29,11 +30,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    baseline = Path(__file__).resolve().parents[2]
     root = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     binary = core_binary(root)
+    baseline = prepare_baseline(output / 'baseline')
     sys.path.insert(0, str(baseline))
     from backend import worker as old
     from backend.translation_service import TranslationService, TranslationServiceError, normalize_base_url

@@ -95,7 +95,7 @@ core/target/release/koma-core translate \
 
 `verify_vision_pipeline.py` 以本地模拟服务对照完整图片请求、源文保护、建议、缓存初始化和保存快照。`vision-probe` 仅作为这些开发验证的传输入口。
 
-公开检出可用 `python scripts/check_regressions.py` 运行 `core/python/` 下的模型进程测试。原生差分回归需要本地 `tests/`、`macos/tests/` 中的 Python 断言，使用自动生成的素材及模拟 HTTP。准备好本地用例后，可构建并运行下列检查。各选项见 [开发说明](../docs/development.md)。
+公开检出可用 `python scripts/check_regressions.py` 运行 `core/python/` 下的模型进程测试。原生差分检查从固定的 Git 历史中提取 Python 参照实现和测试断言，在临时目录完成比较。完整 Git 克隆可以离线运行下列检查。各选项见 [开发说明](../docs/development.md)。
 
 ```sh
 python3 tools/rust_migration/cargo.py build

@@ -6,6 +6,7 @@ import Darwin
 @MainActor final class NativeCoreService {
     struct Failure: LocalizedError {
         let message: String
+        var code: String? = nil
         var errorDescription: String? { message }
     }
     private struct Pending {
@@ -156,7 +157,8 @@ import Darwin
             catch { request.continuation.resume(throwing: Failure(message: "处理服务返回了无效结果。")) }
         case "error":
             pending.removeValue(forKey: id)
-            request.continuation.resume(throwing: Failure(message: object["error"] as? String ?? "处理失败。"))
+            request.continuation.resume(throwing: Failure(message: object["error"] as? String ?? "处理失败。",
+                                                          code: object["code"] as? String))
         case "cancelled":
             pending.removeValue(forKey: id)
             request.continuation.resume(throwing: CancellationError())

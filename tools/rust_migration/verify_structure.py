@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Differential checks against current Python, never touching original caches.
+"""Differential checks against the pinned pre-split Python implementation, never touching original caches.
 
 Runs synthetic pages through cold reconstruction, cached reuse and no-image reuse;
 then executes baseline behavior tests through the native implementation. Python
 is the test oracle only, not part of the native processing path.
 """
 import argparse
+from baseline import prepare_baseline
 from fixtures import make_pages, core_binary
 import copy
 import hashlib
@@ -22,9 +23,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    baseline = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    baseline = prepare_baseline(output / 'baseline')
     sys.path.insert(0, str(baseline))
     import cv2
     from backend import panels, structure

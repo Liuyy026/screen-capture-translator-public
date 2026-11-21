@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-APP_BUNDLE='dist/Koma Rust 候选版.app'
+APP_BUNDLE="${KOMA_BUILD_APP:-dist/Koma Rust 候选版.app}"
 python3 ../tools/rust_migration/cargo.py build --release
 mkdir -p .build
 xcrun swiftc -O -target arm64-apple-macosx14.0 tools/MetalFXUpscaler.swift -o .build/koma-sr-metalfx -framework Metal -framework MetalFX -framework CoreImage -framework ImageIO

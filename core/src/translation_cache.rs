@@ -61,8 +61,7 @@ impl Store {
 
     fn pin_path(path: &Path) -> PathBuf { path.with_extension("json.pin") }
 
-    // Caller holds Activity. Stable sidecar lock survives atomic JSON rewrites.
-    pub fn pin(&self, path: &Path) -> Result<File> {
+    fn open_sidecar(&self, path: &Path, sidecar: &Path) -> Result<File> {
         ensure!(self.known_path(path), "无效译文缓存路径");
         let parent = path.parent().unwrap();
         let mut directory = self.root.clone();
@@ -79,10 +78,51 @@ impl Store {
                 }
             }
         }
-        let file = open_lock(&Self::pin_path(path))?;
+        let file = open_lock(sidecar)?;
         ensure!(file.metadata()?.len() == 0, "译文缓存锁含未知内容，已保留");
+        Ok(file)
+    }
+
+    // Caller holds Activity. Stable sidecar locks survive atomic JSON rewrites.
+    pub fn pin(&self, path: &Path) -> Result<File> {
+        let file = self.open_sidecar(path, &Self::pin_path(path))?;
         ensure!(try_lock(&file, false)?, "译文缓存正在清理，请重试");
         Ok(file)
+    }
+
+    fn write_lock_file(&self, path: &Path) -> Result<File> {
+        self.open_sidecar(path, &path.with_extension("json.write-lock"))
+    }
+
+    pub fn try_lock_page(&self, path: &Path) -> Result<Option<File>> {
+        let file = self.write_lock_file(path)?;
+        Ok(try_lock(&file, true)?.then_some(file))
+    }
+
+    pub async fn lock_page(&self, path: &Path) -> Result<File> {
+        let file = self.write_lock_file(path)?;
+        while !try_lock(&file, true)? {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(file)
+    }
+
+    // The old enhancement namespace stores only an output hash. Its identity
+    // sidecar is the remaining link from these records to the source image.
+    pub fn has_legacy_pages(&self, key: &std::ffi::OsStr) -> Result<bool> {
+        let root = self.root.join("enhanced-v1");
+        let text = root.join(key);
+        if !plain_dir(&root) || !plain_dir(&text) { return Ok(false); }
+        for directory in [&text, &text.join("vision-v1")] {
+            if !plain_dir(directory) { continue; }
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() && self.known_path(&entry.path()) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn directories(&self) -> Result<Vec<PathBuf>> {
@@ -115,11 +155,12 @@ impl Store {
                 if self.known_path(&path) {
                     let metadata = item.metadata()?;
                     entries.push(Entry { path, bytes: metadata.len(), used: metadata.modified()? });
-                } else if path.extension().is_some_and(|e| e == "pin") {
+                } else if path.extension().is_some_and(|e| e == "pin" || e == "write-lock") {
                     let page = path.with_extension("");
-                    // Reclaim unused zero-length locks from pages opened but
-                    // never processed. A live viewer holds the shared lock.
-                    if self.known_path(&page) && !page.exists() && item.metadata()?.len() == 0 {
+                    // A writer and all waiters hold Activity until their file is
+                    // dropped. The exclusive sweep can reclaim their sidecars.
+                    let writing = path.extension().is_some_and(|e| e == "write-lock");
+                    if self.known_path(&page) && (writing || !page.exists()) && item.metadata()?.len() == 0 {
                         if let Ok(pin) = open_lock(&path) {
                             if try_lock(&pin, true).unwrap_or(false) { let _ = fs::remove_file(path); }
                         }

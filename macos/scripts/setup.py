@@ -12,7 +12,7 @@ import time
 platform_root = Path(__file__).resolve().parents[1]
 root = platform_root.parent
 if sys.platform != 'darwin':
-    raise SystemExit('此安装脚本仅用于 macOS；Windows 请参考 windows/README.md。')
+    raise SystemExit('此安装脚本需要在 macOS 上运行。')
 os.chdir(platform_root)
 env = dict(os.environ)
 for kind, proxy in urllib.request.getproxies().items():

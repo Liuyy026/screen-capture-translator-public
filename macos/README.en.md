@@ -93,7 +93,7 @@ Koma sends JPEG images with a maximum long edge of 1775 pixels and uses existing
 
 ## Processing and layout
 
-Swift talks to the persistent Rust service through JSONL pipes. Rust owns task queues, cancellation, OCR page assembly, structure analysis, translation HTTP, codecs, persistence, contours, cleanup and background compositing. Python only runs installed CTD/Manga OCR/LaMa inference with required preprocessing. Swift retains Chinese layout and drawing. The old `backend/` and `macos/backend/` workers remain references, not candidate business entry points.
+Swift talks to the persistent Rust service through JSONL pipes. Rust owns task queues, cancellation, OCR page assembly, structure analysis, translation HTTP, codecs, persistence, contours, cleanup and background compositing. Python only runs installed CTD/Manga OCR/LaMa inference with required preprocessing. Swift retains Chinese layout and drawing. Differential checks read the historical Python implementation from a pinned Git revision. The reader builds and runs from the Mac sources in this repository.
 
 Automatic layout normally uses horizontal Chinese text and measures glyph widths against each line's contour. It can choose vertical text for tall, narrow regions. The dialogue editor lets you set the direction explicitly. Connected bubbles, irregular shapes and narration receive bounded layouts. Pixel masks limit cleanup and local restoration; broad white strips are no longer used. Installed LaMa supports complex backgrounds; native fallback restoration is weaker. Reconstructed texture may contain artifacts and is not exact recovery of the original drawing.
 

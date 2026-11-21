@@ -406,7 +406,7 @@ private struct NativeLoadedPage: Decodable {
         readingRegions = nil; readingPreserved = [:]; readingLayoutError = nil
     }
 
-    func reloadPage(updateMessage: Bool = false, useOriginalImage: Bool = false) {
+    func reloadPage(updateMessage: Bool = false, useOriginalImage: Bool = false, retryChangedRevision: Bool = true) {
         pageTask?.cancel()
         pageRequest = UUID()
         resetReadingRegions()
@@ -433,7 +433,9 @@ private struct NativeLoadedPage: Decodable {
                 enhancementWarning = result.enhancement_warning.map { "超分失败，当前显示原图。\($0)" }
                 cacheURL = URL(fileURLWithPath: result.cache); pageRevision = result.revision
                 page = result.page
-                if page != nil { prepareReadingRegions(cache: cacheURL!) }
+                if page != nil {
+                    prepareReadingRegions(cache: cacheURL!, useOriginalImage: useOriginalImage, retryChangedRevision: retryChangedRevision)
+                }
                 if updateMessage, !busy, message == loadingMessage {
                     if let page {
                         let review = page.blocks.filter(\.needsOCRReview).count
@@ -524,11 +526,11 @@ private struct NativeLoadedPage: Decodable {
         return page.blocks.filter { $0.needsReadingOverlay && !shown.contains($0.id) && readingPreserved[$0.id] == nil }.count
     }
 
-    private func prepareReadingRegions(cache: URL) {
+    private func prepareReadingRegions(cache: URL, useOriginalImage: Bool = false, retryChangedRevision: Bool = true) {
         guard let layoutImage, let revision = pageRevision else { return }
-        let key = layoutImage.path + ":" + revision
+        let key = cache.path + ":" + revision
         if let saved = readingCache[key] { readingRegions = saved.regions; readingPreserved = saved.preserved ?? [:]; return }
-        let request = readingRequest
+        let request = readingRequest, selected = self.selected
         readingTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -539,7 +541,12 @@ private struct NativeLoadedPage: Decodable {
                 readingRegions = regions.regions
                 readingPreserved = regions.preserved ?? [:]
             } catch {
-                guard !Task.isCancelled, request == readingRequest else { return }
+                guard !Task.isCancelled, request == readingRequest, selected == self.selected, revision == pageRevision else { return }
+                if retryChangedRevision, (error as? NativeCoreService.Failure)?.code == "page_revision_changed" {
+                    // A new checkpoint landed between the page and overlay requests.
+                    reloadPage(useOriginalImage: useOriginalImage, retryChangedRevision: false)
+                    return
+                }
                 readingLayoutError = "回填失败：\(error.localizedDescription)"
             }
         }
@@ -699,6 +706,11 @@ private struct NativeLoadedPage: Decodable {
                 try Task.checkCancellation()
                 let staging = try ChapterExport.stage(in: directory)
                 defer { try? FileManager.default.removeItem(at: staging) }
+                let exportID = UUID().uuidString
+                defer {
+                    // A cancelled export must still release its last enhanced image.
+                    Task { try? await nativeCore.request("release_export", values: ["export_id": exportID]) }
+                }
                 var omitted = 0
                 for (index, entry) in pages.enumerated() {
                     try Task.checkCancellation()
@@ -707,7 +719,7 @@ private struct NativeLoadedPage: Decodable {
                     currentPage = input
                     message = "正在导出第 \(pageNumber) 页（\(input.lastPathComponent)）…"
                     let data = try await nativeCore.request("chapter_export_page", values: ["image": input.path,
-                        "mode": mode, "super_resolution": enhancement, "prefer_original": useOriginal])
+                        "mode": mode, "super_resolution": enhancement, "prefer_original": useOriginal, "export_id": exportID])
                     try Task.checkCancellation()
                     let page = try JSONDecoder().decode(ChapterExport.Page.self, from: data)
                     let number = String(pageNumber)

@@ -20,7 +20,9 @@ child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'])
 (p/'pids.json').write_text(json.dumps([os.getpid(),child.pid]))
 time.sleep(120)
 ''');helper.chmod(0o755)
-    client=Client(root,out/'daemon',root/'.models',worker)
+    weights = fixture / 'weights'
+    weights.mkdir()
+    client=Client(root,out/'daemon',weights,worker)
     try:
         settings=dict(engine='metalfx',target=1440,axis='long_edge',preset='standard')
         job=client.send('load_page',image=str(a.image.resolve()),super_resolution=settings)

@@ -3,6 +3,7 @@
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs::{self, File, FileTimes, OpenOptions},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
@@ -32,6 +33,7 @@ pub struct Manager {
     translations: crate::translation_cache::Store,
     gate: Arc<RwLock<()>>,
     viewed: Mutex<(u64, Vec<File>)>,
+    export_images: Mutex<HashMap<String, File>>,
     serial: AtomicU64,
     last: Mutex<Option<Report>>,
     last_translations: Mutex<Option<Report>>,
@@ -94,7 +96,8 @@ impl Manager {
         for root in [&sr, &display] { ensure!(!root.starts_with(&translations) && !translations.starts_with(root), "译文与图片缓存目录不能重叠"); }
         ensure!(!sr.starts_with(&display) && !display.starts_with(&sr), "缓存目录不能重叠");
         Ok(Arc::new(Self { sr, display, translations: crate::translation_cache::Store { root: translations }, gate: Arc::new(RwLock::new(())),
-            viewed: Mutex::new((0, Vec::new())), serial: AtomicU64::new(0), last: Mutex::new(None), last_translations: Mutex::new(None) }))
+            viewed: Mutex::new((0, Vec::new())), export_images: Mutex::new(HashMap::new()),
+            serial: AtomicU64::new(0), last: Mutex::new(None), last_translations: Mutex::new(None) }))
     }
 
     fn locks(&self, exclusive: bool) -> Result<Option<Vec<File>>> {
@@ -118,24 +121,56 @@ impl Manager {
 
     pub fn view_ticket(&self) -> u64 { self.serial.fetch_add(1, Ordering::Relaxed) + 1 }
 
-    // Called inside Activity, before returning an effective-image path to Swift.
-    // An entry lock outlives the request, protecting the visible image even in
-    // another process's eviction pass. Older, slow requests cannot replace it.
-    pub fn pin_view(&self, ticket: u64, image: &Path, cache: Option<&Path>) -> Result<()> {
-        let mut viewed = self.viewed.lock().unwrap();
-        if ticket < viewed.0 { return Ok(()); }
-        let pin = if let Some(dir) = image.parent().filter(|dir|
+    // Callers hold Activity. Use a filesystem lock so that the revision check,
+    // read/modify/write and all checkpoints are serialized across daemons.
+    pub async fn lock_page(&self, path: &Path) -> Result<File> {
+        self.translations.lock_page(path).await
+    }
+
+    pub fn try_lock_page(&self, path: &Path) -> Result<Option<File>> {
+        self.translations.try_lock_page(path)
+    }
+
+    pub fn pin_page(&self, path: &Path) -> Result<File> {
+        self.translations.pin(path)
+    }
+
+    // Acquire inside Activity. The file lock protects the path across processes
+    // until the reader has finished using it, even after the request returns.
+    fn pin_image(&self, image: &Path) -> Result<Option<File>> {
+        if let Some(dir) = image.parent().filter(|dir|
             dir.parent() == Some(self.sr.as_path()) && image.file_name().is_some_and(|n| n == "effective.png")
             && dir.file_name().and_then(|n| n.to_str()).is_some_and(hex_key)) {
             ensure!(plain_dir(dir), "增强缓存目录不可用");
             let file = open_lock(&dir.join(".in-use"))?;
             ensure!(try_lock(&file, false)?, "增强缓存正在清理，请重试");
-            Some(file)
-        } else { None };
-        let mut pins: Vec<_> = pin.into_iter().collect();
+            return Ok(Some(file));
+        }
+        Ok(None)
+    }
+
+    pub fn pin_view(&self, ticket: u64, image: &Path, cache: Option<&Path>) -> Result<()> {
+        let mut viewed = self.viewed.lock().unwrap();
+        if ticket < viewed.0 { return Ok(()); }
+        let mut pins: Vec<_> = self.pin_image(image)?.into_iter().collect();
         if let Some(cache) = cache { pins.push(self.translations.pin(cache)?); }
         *viewed = (ticket, pins);
         Ok(())
+    }
+
+    pub fn pin_export(&self, session: &str, image: &Path) -> Result<()> {
+        let mut exports = self.export_images.lock().unwrap();
+        if let Some(pin) = self.pin_image(image)? {
+            ensure!(exports.contains_key(session) || exports.len() < 64, "同时导出的任务过多");
+            exports.insert(session.to_owned(), pin);
+        } else {
+            exports.remove(session);
+        }
+        Ok(())
+    }
+
+    pub fn release_export(&self, session: &str) {
+        self.export_images.lock().unwrap().remove(session);
     }
 
     pub fn status(&self) -> serde_json::Value {
@@ -230,10 +265,28 @@ impl Manager {
                     Err(_) => { report.failed_entries += 1; continue; },
                 }
             } else { None };
-            let removed = if entry.directory { fs::remove_dir_all(&entry.path) } else { fs::remove_file(&entry.path) };
+            let removed = if entry.directory {
+                let keep_identity = match self.translations.has_legacy_pages(entry.path.file_name().unwrap()) {
+                    Ok(value) => value && entry.path.join("identity.json").is_file(),
+                    Err(_) => { report.failed_entries += 1; continue; }
+                };
+                if keep_identity {
+                    // Legacy page JSON does not contain the original source hash.
+                    // Keep the sidecar needed for import, but evict the large pixels.
+                    report.protected_entries += 1;
+                    let pixels = entry.path.join("effective.png");
+                    match fs::metadata(&pixels) {
+                        Ok(metadata) => fs::remove_file(pixels).map(|()| metadata.len()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    fs::remove_dir_all(&entry.path).map(|()| entry.bytes)
+                }
+            } else { fs::remove_file(&entry.path).map(|()| entry.bytes) };
             drop(pin);
-            if removed.is_ok() {
-                report.bytes_after = report.bytes_after.saturating_sub(entry.bytes);
+            if let Ok(bytes) = removed {
+                report.bytes_after = report.bytes_after.saturating_sub(bytes);
                 report.removed_entries += 1;
                 if expired { report.expired_entries += 1; }
             } else { report.failed_entries += 1; }
@@ -333,6 +386,29 @@ mod tests {
     }
 
     #[test]
+    fn exports_keep_their_images_until_the_client_advances_or_releases() -> Result<()> {
+        let (_dir, manager) = setup();
+        let other = Manager::new(&manager.sr, &manager.display, &manager.translations.root)?;
+        let visible = sr(&manager, 1, 100, 1);
+        let first = sr(&manager, 2, 100, 0);
+        manager.pin_view(manager.view_ticket(), &visible, None)?;
+        manager.pin_export("first chapter", &first)?;
+        manager.pin_export("second chapter", &first)?;
+
+        // Even the newest page would be removed to reach the low-water mark.
+        assert_eq!(sweep(&other, 150, 90).protected_entries, 2);
+        let next = sr(&manager, 3, 100, 0);
+        manager.pin_export("first chapter", &next)?;
+        manager.release_export("second chapter");
+        sweep(&other, 150, 90);
+        assert!(visible.exists() && next.exists() && !first.exists());
+        manager.release_export("first chapter");
+        sweep(&other, 150, 90);
+        assert!(visible.exists() && !next.exists());
+        Ok(())
+    }
+
+    #[test]
     fn unknown_files_and_symlinks_never_expand_deletion_scope() {
         let (dir, manager) = setup();
         let unknown = sr(&manager, 1, 10, 60);
@@ -369,6 +445,28 @@ mod tests {
         assert!(!file.exists());
     }
 
+    #[tokio::test]
+    async fn independent_runtimes_serialize_updates_to_the_same_page() -> Result<()> {
+        let (_dir, first) = setup();
+        let second = Manager::new(&first.sr, &first.display, &first.translations.root)?;
+        let cache = first.translations.root.join(format!("{:064x}.json", 1));
+        let activity = first.activity().await?;
+        let other_activity = second.activity().await?;
+        let writer = first.lock_page(&cache).await?;
+        crate::persistence::atomic_json(&cache, &serde_json::json!({"manual": "edit"}))?;
+        assert!(tokio::time::timeout(Duration::from_millis(80), second.lock_page(&cache)).await.is_err());
+        let different_page = cache.with_file_name(format!("{:064x}.json", 2));
+        drop(second.lock_page(&different_page).await?);
+        drop(writer);
+        let reader = tokio::time::timeout(Duration::from_secs(2), second.lock_page(&cache)).await??;
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(&cache)?)?["manual"], "edit");
+        drop((reader, activity, other_activity));
+        first.maintain().await?;
+        assert!(cache.exists());
+        assert!(!cache.with_extension("json.write-lock").exists());
+        Ok(())
+    }
+
     #[test]
     fn exact_limit_and_future_timestamps_do_not_trigger_eviction() {
         let (_dir, manager) = setup();
@@ -377,5 +475,27 @@ mod tests {
             .set_modified(SystemTime::now() + Duration::from_secs(86400))).unwrap();
         assert_eq!(sweep(&manager, 100, 90).removed_entries, 0);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn evict_pixels_but_keep_source_identity_for_unmigrated_legacy_translations() {
+        let (_dir, manager) = setup();
+        let pixels = sr(&manager, 1, 400, 40);
+        let sr_dir = pixels.parent().unwrap();
+        let identity = sr_dir.join("identity.json");
+        fs::write(&identity, b"legacy source mapping").unwrap();
+        age(&identity, 40);
+        let old = manager.translations.root.join("enhanced-v1").join(sr_dir.file_name().unwrap())
+            .join("vision-v1").join(format!("{:064x}.json", 12));
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, r#"{"translation":"以前的手改"}"#).unwrap();
+        let report = sweep(&manager, 1, 0);
+        assert!(!pixels.exists() && old.exists());
+        assert_eq!(fs::read(&identity).unwrap(), b"legacy source mapping");
+        assert_eq!(report.bytes_before - report.bytes_after, 400);
+        assert_eq!(sweep(&manager, 1, 0).removed_entries, 0);
+        fs::remove_file(old).unwrap();
+        assert_eq!(sweep(&manager, 1, 0).removed_entries, 1);
+        assert!(!sr_dir.exists());
     }
 }

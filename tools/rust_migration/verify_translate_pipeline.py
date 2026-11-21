@@ -5,6 +5,7 @@ Compares requests, page state, every checkpoint, progress and sanitized metrics.
 Model output is deterministic test data; original pages/caches remain read-only.
 """
 import argparse
+from baseline import prepare_baseline
 from fixtures import make_pages, core_binary
 import copy
 import hashlib
@@ -120,10 +121,11 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    baseline,output=Path(__file__).resolve().parents[2],args.output.resolve()
+    output=args.output.resolve()
     output.mkdir(parents=True,exist_ok=False)
     root=Path(__file__).resolve().parents[2]
     binary=core_binary(root)
+    baseline = prepare_baseline(output / 'baseline')
     sys.path.insert(0,str(baseline))
     from backend import worker as old
     os.environ['KOMA_TRANSLATION_API_KEY']='fake-secret'

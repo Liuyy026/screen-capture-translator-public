@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare complete native visual translation using fixed loopback responses."""
 import argparse
+from baseline import prepare_baseline
 from fixtures import make_pages, core_binary
 import copy
 import hashlib
@@ -101,8 +102,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    root=Path(__file__).resolve().parents[2];baseline=Path(__file__).resolve().parents[2]
+    root=Path(__file__).resolve().parents[2]
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
+    baseline = prepare_baseline(output / 'baseline')
     sys.path.insert(0,str(baseline))
     spec=importlib.util.spec_from_file_location('baseline_visual_worker',baseline/'macos/backend/vision_worker.py')
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)

@@ -42,6 +42,18 @@ fn previous_for_page<'a>(request: &'a Value, image: &str, total: usize) -> Resul
     value.map(|v| v.as_str().map(Path::new).context("上一页参照路径无效。")).transpose()
 }
 
+#[cfg(test)]
+#[test]
+fn chapter_references_follow_the_supplied_mapping_for_sparse_queues() -> Result<()> {
+    let request = json!({"images":["/p1", "/p7"], "previous_images":{"/p7":"/p6"}});
+    assert_eq!(previous_for_page(&request, "/p1", 2)?, None);
+    assert_eq!(previous_for_page(&request, "/p7", 2)?, Some(Path::new("/p6")));
+    let single = json!({"previous_image":"/p6"});
+    assert_eq!(previous_for_page(&single, "/p7", 1)?, Some(Path::new("/p6")));
+    assert!(previous_for_page(&single, "/p7", 2).is_err());
+    Ok(())
+}
+
 async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_gate:&Semaphore)->Result<Value>{
     let r=&job.request;
     match required(r,"op")?{
@@ -73,10 +85,19 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
         "chapter_export_page"=>{
             let _permit=display_gate.acquire().await?;
             let _activity=runtime.cache_policy.activity().await?;
+            // Legacy clients export sequentially without a session identifier.
+            let session = r["export_id"].as_str().unwrap_or("");
+            ensure!(session.len() <= 128, "无效导出任务编号");
             let settings:crate::super_resolution::Settings=serde_json::from_value(r["super_resolution"].clone())?;
             ensure!(settings.engine != "off", "请选择超分引擎");
-            runtime.chapter_export_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text"),
-                &settings).await
+            let reply = runtime.chapter_export_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text"),
+                &settings).await?;
+            runtime.cache_policy.pin_export(session, Path::new(required(&reply, "effective_image")?))?;
+            Ok(reply)
+        },
+        "release_export"=>{
+            runtime.cache_policy.release_export(required(r, "export_id")?);
+            Ok(json!({"released": true}))
         },
         "edit"=>{
             let _activity=runtime.cache_policy.activity().await?;
@@ -91,11 +112,12 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             } else {
                 let service = service(r)?;
                 let options = ProcessOptions {
-                    previous_image: None, operation, mode: r["mode"].as_str().unwrap_or("text"),
+                    operation, mode: r["mode"].as_str().unwrap_or("text"),
                     model: required(r, "model")?, block_id: r["block_id"].as_str(),
                     unit: r["unit"].as_str().unwrap_or("blocks"),
                     batch_size: r["batch_size"].as_u64().unwrap_or(8) as usize,
                     retry: r["retry"].as_bool().unwrap_or(false),
+                    reuse_ocr: false, previous_image: None,
                 };
                 Some((options, service))
             };
@@ -120,10 +142,10 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                                 (source.to_owned(), Some(warning))
                             },
                         };
-                        let previous_image = if options.mode == "vision" && matches!(operation, "both" | "translate") {
-                            previous_for_page(r, image, images.len())?
-                        } else { None };
-                        let options = ProcessOptions { previous_image, ..*options };
+                        let mut options = options.for_queue_page(index, images.len(), &settings.engine);
+                        if options.mode == "vision" && matches!(options.operation, "both" | "translate") {
+                            options.previous_image = previous_for_page(r, image, images.len())?;
+                        }
                         let mut result = runtime.process_page(source, &effective, &cache, &options, service, &mut events).await?;
                         if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
                         Ok(result)
@@ -131,7 +153,9 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                         Ok(json!({"skipped":enhanced? == source}))
                     }
                 }.await;
-                runtime.maintain_cache().await;
+                if page_result.is_err() && operation == "both" {
+                    cleanup_ocr(runtime).await;
+                }
                 let result=match page_result{
                     Ok(value)=>json!({"image":image,"ok":true,"result":value}),
                     Err(error) => {
@@ -144,10 +168,17 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                 };
                 let _=output.send(json!({"id":job.id,"event":"page_finished","done":index+1,"total":images.len(),"page":result})).await;
                 results.push(result);
+                runtime.maintain_cache().await;
             }
             Ok(json!({"pages":results}))
         },
         _=>bail!("unknown operation"),
+    }
+}
+
+async fn cleanup_ocr(runtime: &Runtime) {
+    if let Err(error) = runtime.release_ocr().await {
+        eprintln!("清理 OCR 工作进程时发生错误：{error}");
     }
 }
 
@@ -164,7 +195,9 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
             Some(Err(error))=>{
                 let mut message=error.to_string();
                 if let Some(key)=job.request["key"].as_str().filter(|k|!k.is_empty()){message=message.replace(key,"[已隐藏]");}
-                json!({"id":job.id,"event":"error","error":message})
+                let mut reply=json!({"id":job.id,"event":"error","error":message});
+                if error.is::<crate::runtime::PageRevisionChanged>() {reply["code"]=json!("page_revision_changed");}
+                reply
             },
             None=>cancelled(&job.id),
         }}
@@ -172,7 +205,7 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
     // Release owned OCR allocations before another translation job; a cancelled
     // model call also discards its poisoned channel and private array workspace.
     if job.request["op"] == "process" && job.request["operation"] != "enhance" {
-        let _ = runtime.release_ocr().await;
+        cleanup_ocr(&runtime).await;
     }
     runtime.maintain_cache().await;
     registry.lock().await.remove(&job.id);

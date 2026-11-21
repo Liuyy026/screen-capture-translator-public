@@ -136,13 +136,13 @@ def package(version, native, destination):
     ]
     existing = env.get("CARGO_ENCODED_RUSTFLAGS")
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(([existing] if existing else []) + remap)
-    run("zsh", MACOS / "scripts/build.sh", env=env)
 
     with tempfile.TemporaryDirectory(prefix="koma-package-", dir=destination) as temporary:
         directory = Path(temporary)
         payload = directory / name
         app = payload / "Koma.app"
-        candidate = MACOS / "dist/Koma Rust 候选版.app"
+        candidate = directory / "build/Koma.app"
+        run("zsh", MACOS / "scripts/build.sh", env={**env, "KOMA_BUILD_APP": str(candidate)})
         for path in ("Contents/Info.plist", "Contents/MacOS/KomaRustReader", "Contents/Resources/AppIcon.icns"):
             install_file(candidate / path, app / path)
         info_file = app / "Contents/Info.plist"
@@ -150,7 +150,8 @@ def package(version, native, destination):
             info = plistlib.load(stream)
         info.pop("ProjectRoot")
         info.update(CFBundleName="Koma", CFBundleDisplayName="Koma 漫画翻译",
-                    CFBundleShortVersionString=version.split("-")[0], KomaRuntimeFolder="KomaRuntime",
+                    CFBundleShortVersionString=version.split("-")[0], CFBundleVersion=version.split("-")[0],
+                    KomaRuntimeFolder="KomaRuntime",
                     NSDesktopFolderUsageDescription="读取您从桌面选择的漫画图片。")
         info_file.write_bytes(plistlib.dumps(info))
         runtime = app / "Contents/Resources/KomaRuntime"

@@ -9,6 +9,35 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const VERSION: u32 = 1;
+// Bump when the original/legacy canvas reconstruction or BGR-to-gray conversion changes.
+const CANVAS_VERSION: u32 = 1;
+
+fn block_inputs(page: &Value) -> Vec<Value> {
+    array(&page["blocks"]).iter().map(|b| json!([b["id"], b["box"], b["source"]])).collect()
+}
+
+fn source_receipt(page: &Value, source_sha256: &str) -> Value {
+    let signature = digest(&json!([source_sha256, page["width"], page["height"],
+        page["layout_provenance"], block_inputs(page), page["ocr_review_signature"]]), false);
+    json!({"review_version": VERSION, "canvas_version": CANVAS_VERSION, "signature": signature})
+}
+
+/// The caller has verified the encoded file's digest. Its pixels need not be
+/// decoded again while all inputs to the original review still match.
+pub fn source_current(page: &Value, source_sha256: &str) -> bool {
+    page.get("ocr_review_cache").is_some_and(|receipt| *receipt == source_receipt(page, source_sha256))
+}
+
+pub fn ensure_for_source(page: &mut Value, source_sha256: &str,
+    load_gray: impl FnOnce(&Value) -> Result<Mat>) -> Result<bool> {
+    if source_current(page, source_sha256) { return Ok(false); }
+    let gray = load_gray(page)?;
+    // A legacy pixel signature can still prove the review valid after decoding.
+    // Add the source receipt even when no block needed to be reviewed again.
+    ensure(page, &gray)?;
+    page["ocr_review_cache"] = source_receipt(page, source_sha256);
+    Ok(true)
+}
 
 pub fn suppressed(block: &Value) -> bool {
     block["ocr_review"]["status"] == "suspect"
@@ -44,7 +73,7 @@ pub fn ensure(page: &mut Value, gray: &Mat) -> Result<bool> {
     ensure!(page["blocks"].is_array() && array(&page["blocks"]).iter().all(Value::is_object), "invalid OCR blocks");
     let signature = digest(&json!([VERSION, page["width"], page["height"],
         format!("{:x}", Sha256::digest(gray.data_bytes()?)),
-        array(&page["blocks"]).iter().map(|b| json!([b["id"], b["box"], b["source"]])).collect::<Vec<_>>()]), false);
+        block_inputs(page)]), false);
     if page["ocr_review_signature"] == signature { return Ok(false); }
 
     let scale = f64::from(gray.cols().min(gray.rows())) / 1280.;
@@ -98,6 +127,52 @@ pub fn ensure(page: &mut Value, gray: &Mat) -> Result<bool> {
 mod tests {
     use super::*;
     use opencv::core::{Point, Rect, Scalar};
+
+    #[test]
+    fn legacy_review_migrates_once_and_only_matching_inputs_skip_decode() -> Result<()> {
+        let gray = blank(64, 32, 255)?;
+        let mut page = json!({"width":64,"height":32,"blocks":[
+            {"id":"1","box":[4,4,18,20],"source":"こんにちは","translation":"旧译文",
+             "edited":true,"ocr_confirmed":true,"keep_original":true}]});
+        ensure(&mut page, &gray)?;
+        let legacy_page = page.clone();
+        let source = "a".repeat(64);
+        let changed_source = "b".repeat(64);
+        assert!(!source_current(&page, &source));
+        assert!(ensure_for_source(&mut page, &source, |_| Ok(gray.clone()))?);
+        let mut migrated = page.clone();
+        migrated.as_object_mut().unwrap().remove("ocr_review_cache");
+        assert_eq!(migrated, legacy_page);
+
+        page["blocks"][0]["translation"] = json!("新译文");
+        page["blocks"][0]["ocr_confirmed"] = json!(false);
+        page["blocks"][0]["edited"] = json!(false);
+        page["blocks"][0]["keep_original"] = json!(false);
+        assert!(!ensure_for_source(&mut page, &source, |_| panic!("decoded a reviewed page"))?);
+        assert!(!source_current(&page, &changed_source));
+
+        for (pointer, value) in [
+            ("/blocks/0/id", json!("2")), ("/blocks/0/box/0", json!(5)),
+            ("/blocks/0/source", json!("さようなら")), ("/width", json!(65)),
+            ("/height", json!(33)), ("/ocr_review_cache/review_version", json!(0)),
+            ("/ocr_review_cache/canvas_version", json!(0)), ("/ocr_review_signature", json!("stale")),
+        ] {
+            let mut changed = page.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(!source_current(&changed, &source), "failed to invalidate {pointer}");
+        }
+        // The layout can change at the same dimensions. Its provenance also
+        // identifies the reconstruction settings used for an imported page.
+        page["layout_provenance"] = json!({"version":1,"source_sha256":source,"settings":{"target":64}});
+        assert!(ensure_for_source(&mut page, &source, |_| Ok(gray.clone()))?);
+        assert!(source_current(&page, &source));
+        page["layout_provenance"]["source_sha256"] = json!(changed_source);
+        assert!(!source_current(&page, &source));
+        page["layout_provenance"]["source_sha256"] = json!(source);
+        page["layout_provenance"]["settings"]["target"] = json!(128);
+        assert!(!source_current(&page, &source));
+        Ok(())
+    }
 
     #[test]
     fn dotted_art_is_reversible_and_real_ink_survives() -> Result<()> {

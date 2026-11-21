@@ -1,20 +1,14 @@
-# Koma · Local Manga Translation
+# Koma for macOS
 
 [简体中文](README.md) | English
 
-Koma recognizes Japanese text in manga, translates it and typesets Chinese on the original page. The macOS reader on `main` uses a Rust core and a SwiftUI interface. Python runs the detection, OCR and background-restoration models. The Windows reader uses the original Python backend.
+Koma recognizes Japanese dialogue on an Apple Silicon Mac, translates it and typesets Chinese on the original manga page. This repository maintains the Mac reader, Rust core and Python model adapter. The legacy Windows source lives separately in `Koma-Windows-Legacy`.
 
-This guide covers the current source build. The macOS build is still named `Koma Rust 候选版.app` and depends on the checkout and its local runtime. The pre-migration Python reader is available at `stable/pre-rust-20261108`.
+**Local version 0.22** runs on Apple Silicon and macOS 14 or later. Unzip and open `Koma.app` to read a chapter or try the sample pages. Quit the app and run the included `准备组件.command` to install OCR, restoration and Real-CUGAN components. The release app continues to use existing settings and caches in `KomaReaderRelease`.
 
-**v0.21 · November 21, 2026 · macOS visual assistance**
+The reader reuses the OCR model within chapter jobs and protects manual edits and cached pages during navigation, export and cancellation. Visual assistance can use the preceding image starting on page 3. Per-bubble typography, selected-page export and both upscalers remain available. [Mac reader guide](macos/README.en.md)
 
-Pages 1 and 2 send only the current page image. Starting on page 3, visual assistance also sends the previous page's original image from the same chapter to help follow dialogue and resolve references. It translates only the current page. Each batch disables model reasoning, enforces a JSON schema and caps output at 8,192 tokens. Use an oMLX service and vision model that support multiple images, disabling reasoning and structured output. Text-only translation continues to use the existing workflow. [Visual assistance guide](macos/README.en.md#visual-assistance-omlx)
-
-**v0.21 · November 18, 2026 · macOS reader**
-
-Set the font, size and text direction for individual dialogue boxes. Reflow a page using saved translations, including manual edits. Drag the divider to resize the dialogue sidebar. The reader remembers its width the next time you open it. This version also fixes a background color shift when exporting Display P3 pages to PNG. [v0.21 release notes](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [Typesetting guide and validation notes (Chinese)](docs/macos-typesetting-2026-11-18.md)
-
-**Download for Mac**　On Apple Silicon with macOS 14 or later, unzip the download and open `Koma.app` to read manga or use MetalFX upscaling. For Japanese OCR, background restoration or Real-CUGAN, quit the app and run the bundled `准备组件.command` setup script. [Download the v0.21 Mac app](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/Koma-0.21-macOS-arm64.zip) · [SHA-256 checksum](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/SHA256SUMS.txt)
+The local build is placed in `dist/v0.22/`. The previous public download remains on the [v0.21 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21).
 
 ## Architecture
 
@@ -63,7 +57,6 @@ Open an image folder, configure the endpoint, optional API key and model, and pr
 
 Candidate data lives under `~/Library/Application Support/KomaReaderRust/`: `config.json`, `pages/`, `pages/vision-v1/` and `reading-native-v1/`. Stable configuration/pages may be copied read-only into independent candidate files on first use. Keys can be saved in the local plaintext config with mode `0600`; Keychain is not accessed. If key persistence is disabled, the key is session-only. Configs, images, weights and private evaluation artifacts are not committed.
 
-For Windows, use the existing [Windows guide](windows/README.en.md); the Rust migration and measurements do not apply to that client.
 
 ## Features
 
@@ -107,13 +100,11 @@ See the [validation report](docs/rust-core-validation.md), [migration record](do
 
 Parity on 35 pages does not establish universal correctness. OCR omissions, handwriting, names/dates and translation semantics still need review; restoration may leave texture artifacts. This migration preserved existing source text and translations without content corrections.
 
-Windows continues to use the original reader. Manual box editing, cross-page character memory, glossaries, ZIP/PDF input and recursive subfolders remain outside the current feature set.
+Manual box editing, cross-page character memory, glossaries, ZIP/PDF input and recursive subfolders remain outside the current feature set.
 
 ```text
 core/                   Rust core, native bridge and Python model adapter
 macos/                  Swift UI, candidate build and model environment
-windows/                Original Python Windows reader
-backend/                Original backend retained for stable/reference use
 tools/rust_migration/    Build tools and offline core regressions
 scripts/                Model preparation, cache migration and regression runner
 docs/                   Architecture, migration and validation

@@ -120,7 +120,7 @@ pub fn translation_error(value: &Value) -> String {
         return "模型返回了空译文".into();
     };
     let placeholders: Vec<String> =
-        serde_json::from_str(include_str!("../../backend/translation_placeholders.json"))
+        serde_json::from_str(include_str!("../resources/translation_placeholders.json"))
             .expect("bundled placeholders");
     let value = normalized(value, true);
     if placeholders.iter().any(|p| normalized(p, true) == value) {

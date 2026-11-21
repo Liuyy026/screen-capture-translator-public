@@ -134,10 +134,11 @@ class Models:
                 sys.modules['torch'].mps.empty_cache()
             return {'loaded': []}
         if operation == 'release_ocr':
-            self.loaded.pop('ocr', None)
-            gc.collect()
-            if 'torch' in sys.modules and sys.modules['torch'].backends.mps.is_available():
-                sys.modules['torch'].mps.empty_cache()
+            if 'ocr' in self.loaded:
+                del self.loaded['ocr']
+                gc.collect()
+                if 'torch' in sys.modules and sys.modules['torch'].backends.mps.is_available():
+                    sys.modules['torch'].mps.empty_cache()
             return {'loaded': sorted(self.loaded)}
         if operation == 'detect':
             image = self.read_array(request['image'])

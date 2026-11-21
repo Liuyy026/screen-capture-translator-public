@@ -5,6 +5,7 @@ Only test transport uses Python; the old reading_regions function is replaced
 by Rust calls, including the old CLI test. No model weights are loaded.
 """
 import argparse
+from baseline import prepare_baseline
 from fixtures import core_binary
 import importlib.util
 import json
@@ -19,9 +20,9 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    baseline = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     output.mkdir(parents=True,exist_ok=False)
+    baseline = prepare_baseline(output / 'baseline')
     sys.path.insert(0,str(baseline))
     import cv2
     import numpy as np

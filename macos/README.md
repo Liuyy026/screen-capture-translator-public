@@ -86,7 +86,7 @@ open 'macos/dist/Koma Rust 候选版.app'
 
 ## 开发、数据与验证
 
-Swift 的 `NativeCoreService.swift` 通过 JSONL 管道连接 `core/target/release/koma-core serve`。Rust 负责队列、缓存、翻译请求、页面分析及背景合成；`core/python/model_worker.py` 仅运行 CTD/Manga OCR/LaMa 推理；Swift 保留排版与绘制。旧 `backend/` 和 `macos/backend/` 是稳定实现及差分参照，不是候选阅读器的业务执行入口。
+Swift 的 `NativeCoreService.swift` 通过 JSONL 管道连接 `core/target/release/koma-core serve`。Rust 负责队列、缓存、翻译请求、页面分析及背景合成；`core/python/model_worker.py` 仅运行 CTD/Manga OCR/LaMa 推理；Swift 保留排版与绘制。历史差分检查从固定的 Git 提交读取旧 Python 实现，应用构建和运行只使用本仓 Mac 源码。
 
 | 路径 | 用途 |
 | --- | --- |
@@ -160,7 +160,7 @@ macos/.build/connection-config-tests
 
 视觉结果保存到 `~/Library/Application Support/KomaReaderRust/pages/vision-v1/`，普通结果仍在 `pages/`。两种模式单独保存编辑；首次建立视觉结果时，可复用普通模式已有 OCR 和手动译文，后续修改不自动跨模式同步。图片长边最多 1775 像素；当前仍依赖 OCR 找框，漏检文字、拟声词不会自动补框。视觉模式不保证比普通翻译更准确，也不保证模型不会拒译。
 
-候选版实现位于 `core/src/vision_pipeline.rs`、`vision_image.rs` 和 `vision_decode.rs`，由 Rust 完成请求、编码及保存；Windows 未迁移。[早期真实模型试用记录](../docs/macos-vision-1209806-2026-11-07.md)保留当时的 Python/钥匙串/白底方案，不代表当前实现。Rust 迁移使用确定的模拟回复做流程对照，没有重新进行真实语言模型质量评测。
+候选版实现位于 `core/src/vision_pipeline.rs`、`vision_image.rs` 和 `vision_decode.rs`，由 Rust 完成请求、编码及保存。[早期真实模型试用记录](../docs/macos-vision-1209806-2026-11-07.md)保留当时的 Python/钥匙串/白底方案，不代表当前实现。Rust 迁移使用确定的模拟回复做流程对照，没有重新进行真实语言模型质量评测。
 
 ## 中文气泡排版
 
@@ -182,7 +182,7 @@ python3 macos/scripts/setup_reading_model.py
 
 旧缓存中的白色矩形不会直接作为回退覆盖；打开页面时重新检查背景和文字范围。译文不完整、排版空间不足或背景不可靠时保留原图，底部状态区提示译文暂未覆盖，可在右侧对白栏阅读完整译文。此项改善显示，不自动修正 OCR 或翻译语义，也不保证手写字、复杂背景、漏检文字和所有异形气泡都能覆盖。
 
-候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。`macos/backend/reading_overlay.py` 保留作行为参照；原生回归通过实际 Rust CLI 复用其合成输入断言。
+候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。历史基线中的 Python 排版代码提供对照行为，原生回归通过实际 Rust CLI 复用其合成输入断言。
 
 已有本地测试文件时，可通过 `macos/.venv/bin/python scripts/check_regressions.py --local --native --swift` 运行共用、macOS Python、Rust 差分和 Swift 回归。各选项所需的用例见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
 

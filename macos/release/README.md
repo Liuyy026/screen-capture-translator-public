@@ -1,4 +1,4 @@
-# Koma v0.21 · macOS 使用说明
+# Koma · macOS 使用说明
 
 适用于搭载 Apple 芯片的 Mac，部署目标为 macOS 14.0。解压下载的 ZIP，打开 `Koma.app`，点击「先试试内置测试页」或选择自己的漫画文件夹。阅读原图和使用 MetalFX 超分可以直接开始。
 
@@ -14,4 +14,4 @@
 
 ## 首次打开与下载校验
 
-本版采用临时签名，未经 Apple 公证。在下载目录执行 `shasum -a 256 Koma-0.21-macOS-arm64.zip`，将输出与发布页列出的 SHA-256 对照。如果首次打开时系统提示无法验证开发者，请先确认下载来源和校验值，再按 Apple 指引操作。[在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)
+本版采用临时签名，未经 Apple 公证。将 ZIP 和随附的 `SHA256SUMS.txt` 放在同一目录，在该目录执行 `shasum -a 256 -c SHA256SUMS.txt`，应显示 `OK`。解压后的 `版本.txt` 记录了版本和源码提交。如果首次打开时系统提示无法验证开发者，请先确认下载来源和校验值，再按 Apple 指引操作。[在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)

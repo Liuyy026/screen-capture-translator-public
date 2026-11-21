@@ -14,11 +14,11 @@ use std::{
 
 pub struct ImageModels {
     worker: Option<ModelWorker>,
+    ocr_requested: bool,
     workspace: tempfile::TempDir,
     python: PathBuf,
     script: PathBuf,
     weights: PathBuf,
-    serial: u64,
 }
 
 impl ImageModels {
@@ -26,6 +26,7 @@ impl ImageModels {
         if self.worker.as_ref().is_some_and(ModelWorker::interrupted){
             // Reap the old process before reusing GPU memory or deleting files
             // it may still be accessing after cancellation.
+            self.ocr_requested = false;
             if let Some(worker)=self.worker.take(){worker.shutdown().await?;}
             self.workspace=tempfile::tempdir()?;
         }
@@ -34,11 +35,11 @@ impl ImageModels {
     pub fn new(python: &Path, script: &Path, weights: &Path) -> Result<Self> {
         Ok(Self {
             worker: None,
+            ocr_requested: false,
             workspace: tempfile::tempdir()?,
             python: python.into(),
             script: script.into(),
             weights: weights.into(),
-            serial: 0,
         })
     }
 
@@ -127,77 +128,73 @@ impl ImageModels {
             .await
     }
 
-    pub async fn restore(&mut self, image: &Mat, mask: &Mat) -> Result<Mat> {
+    // A cancelled worker may still be reading or writing. Leave its directory in
+    // place until prepare_request has reaped it. Ordinary model errors can clean up now.
+    async fn with_job_files<T>(&mut self, operation: impl AsyncFnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.prepare_request().await?;
+        let job = self.workspace.path().join("job");
+        if job.try_exists()? {
+            std::fs::remove_dir_all(&job)?;
+        }
+        std::fs::create_dir(&job)?;
+        let result = operation(self).await;
+        if !self.worker.as_ref().is_some_and(ModelWorker::interrupted) {
+            std::fs::remove_dir_all(job).context("clean up model job files")?;
+        }
+        result
+    }
+
+    pub async fn restore(&mut self, image: &Mat, mask: &Mat) -> Result<Mat> {
         ensure!(
             image.size()? == mask.size()? && mask.typ() == CV_8UC1,
             "restoration mask size mismatch"
         );
-        self.serial += 1;
-        let prefix = format!("restore-{}", self.serial);
-        let image_name = format!("{prefix}-image.bin");
-        let mask_name = format!("{prefix}-mask.bin");
-        let output_name = format!("{prefix}-output.bin");
-        let input = self.write_array(&image_name, image)?;
-        let mask_input = self.write_array(&mask_name, mask)?;
-        let reply = self
-            .call(json!({"op":"restore","image":input,"mask":mask_input,"output":output_name}))
-            .await
-            .context("restore background model")?;
-        let output = self.read_array(
-            &reply["image"],
-            &output_name,
-            image.cols(),
-            image.rows(),
-            image.channels(),
-        )?;
-        for name in [&image_name, &mask_name, &output_name] {
-            std::fs::remove_file(self.workspace.path().join(name))?;
-        }
-        Ok(output)
+        self.with_job_files(async |models| {
+            let input = models.write_array("job/image.bin", image)?;
+            let mask_input = models.write_array("job/mask.bin", mask)?;
+            let output = "job/output.bin";
+            let reply = models.call(json!({"op":"restore","image":input,"mask":mask_input,"output":output}))
+                .await.context("restore background model")?;
+            models.read_array(&reply["image"], output, image.cols(), image.rows(), image.channels())
+        }).await
     }
 
     pub async fn detect(&mut self, image: &Mat) -> Result<Mat> {
-        self.prepare_request().await?;
-        self.serial += 1;
-        let prefix = format!("detect-{}", self.serial);
-        let image_name = format!("{prefix}-image.bin");
-        let raw_name = format!("{prefix}-raw.bin");
-        let refined_name = format!("{prefix}-refined.bin");
-        let input = self.write_array(&image_name, image)?;
-        let reply = self.call(json!({"op":"detect","image":input,"raw_output":raw_name,"refined_output":refined_name})).await.context("detect text model")?;
-        let raw = self.read_array(&reply["raw"], &raw_name, image.cols(), image.rows(), 1)?;
-        let mut refined = self.read_array(
-            &reply["refined"],
-            &refined_name,
-            image.cols(),
-            image.rows(),
-            1,
-        )?;
-        for (v, &r) in refined.data_bytes_mut()?.iter_mut().zip(raw.data_bytes()?) {
-            *v = if *v > 0 || r > 160 { 255 } else { 0 };
-        }
-        for name in [&image_name, &raw_name, &refined_name] {
-            std::fs::remove_file(self.workspace.path().join(name))?;
-        }
-        Ok(refined)
+        self.with_job_files(async |models| {
+            let input = models.write_array("job/image.bin", image)?;
+            let raw_name = "job/raw.bin";
+            let refined_name = "job/refined.bin";
+            let reply = models.call(json!({"op":"detect","image":input,"raw_output":raw_name,"refined_output":refined_name}))
+                .await.context("detect text model")?;
+            let raw = models.read_array(&reply["raw"], raw_name, image.cols(), image.rows(), 1)?;
+            let mut refined = models.read_array(&reply["refined"], refined_name, image.cols(), image.rows(), 1)?;
+            for (value, &r) in refined.data_bytes_mut()?.iter_mut().zip(raw.data_bytes()?) {
+                *value = if *value > 0 || r > 160 { 255 } else { 0 };
+            }
+            Ok(refined)
+        }).await
     }
 
-    pub async fn ocr(&mut self,image:&Path)->Result<Value>{
-        self.prepare_request().await?;
-        self.serial+=1;
-        let extension=image.extension().and_then(|s|s.to_str()).unwrap_or("image");
-        let name=format!("ocr-{}.{}",self.serial,extension);
-        let temporary=self.workspace.path().join(&name);
-        std::fs::copy(image,&temporary).context("copy OCR input into model workspace")?;
-        let result=self.call(json!({"op":"ocr","image_path":name})).await.context("recognize Japanese text model");
-        let _=std::fs::remove_file(temporary);
-        result
+    pub async fn ocr(&mut self, image: &Path) -> Result<Value> {
+        self.with_job_files(async |models| {
+            let extension = image.extension().and_then(|s| s.to_str()).unwrap_or("image");
+            let name = format!("job/input.{extension}");
+            std::fs::copy(image, models.workspace.path().join(&name)).context("copy OCR input into model workspace")?;
+            // The worker can load weights and then fail on the image.
+            models.ocr_requested = true;
+            models.call(json!({"op":"ocr","image_path":name})).await.context("recognize Japanese text model")
+        }).await
     }
 
     pub async fn release_ocr(&mut self)->Result<()>{
         self.prepare_request().await?;
-        if self.worker.is_some(){self.call(json!({"op":"release_ocr"})).await?;}
+        if self.ocr_requested && self.worker.is_some() {
+            if let Err(error) = self.call(json!({"op":"release_ocr"})).await {
+                self.stop().await.context("stop worker after OCR release failed")?;
+                return Err(error);
+            }
+        }
+        self.ocr_requested = false;
         Ok(())
     }
 
@@ -206,9 +203,45 @@ impl ImageModels {
     }
 
     pub async fn stop(&mut self)->Result<()>{
+        self.ocr_requested = false;
         if let Some(worker) = self.worker.take() {
             worker.shutdown().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_model_jobs_leave_no_partial_arrays() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("model.py");
+        std::fs::write(&script, r#"
+import json, pathlib, sys
+workspace = pathlib.Path(sys.argv[sys.argv.index('--workspace') + 1])
+for line in sys.stdin:
+    request = json.loads(line)
+    op = request['op']
+    reply = {'id': request['id'], 'ok': True, 'result': {'protocol': 1}}
+    if op == 'detect':
+        (workspace / request['raw_output']).write_bytes(b'partial')
+        reply.update(ok=False, error='detection failed')
+    elif op == 'restore':
+        (workspace / request['output']).write_bytes(b'partial')
+        reply['result'] = {'image': {'path': request['output'], 'shape': [1, 1]}}
+    print(json.dumps(reply), flush=True)
+    if op == 'shutdown':
+        break
+"#)?;
+        let mut models = ImageModels::new(Path::new("python3"), &script, directory.path())?;
+        let image = Mat::new_rows_cols_with_default(2, 2, CV_8UC1, Scalar::all(0.0))?;
+        assert!(models.detect(&image).await.is_err());
+        assert_eq!(models.workspace.path().read_dir()?.count(), 0);
+        assert!(models.restore(&image, &image).await.is_err());
+        assert_eq!(models.workspace.path().read_dir()?.count(), 0);
+        models.shutdown().await
     }
 }

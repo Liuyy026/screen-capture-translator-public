@@ -279,3 +279,136 @@ pub async fn probe(request: &Value) -> Result<Value> {
         json!({"page":page,"saves":trace.saves,"progress":trace.progress,"metrics":trace.metrics,"error":result.err().map(|e|service.safe_error(e))}),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vision_request_enforces_schema_for_current_batch_with_thinking_off() {
+        let batch = [json!({"id":"7"}), json!({"id":"12"})];
+        let page = json!({"blocks":[batch[0], batch[1], {"id":"not-requested"}]});
+        let payload = translation::vision_payload("test-model", &page, &batch, "data:", None);
+        assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(payload.get("reasoning_effort").is_none());
+        assert_eq!(payload["max_tokens"], 8192);
+        let schema = &payload["structured_outputs"]["json"];
+        assert_eq!(schema["required"], json!(["translations", "source_suggestions"]));
+        assert_eq!(schema["additionalProperties"], false);
+        for name in ["translations", "source_suggestions"] {
+            let fields = &schema["properties"][name];
+            assert_eq!(fields["properties"], json!({"7":{"type":"string"}, "12":{"type":"string"}}));
+            assert_eq!(fields["required"], json!(["7", "12"]));
+            assert_eq!(fields["additionalProperties"], false);
+        }
+    }
+
+    #[test]
+    fn vision_response_rejects_out_of_batch_fields_before_saving_translations() {
+        let ids = ["7".to_owned()];
+        let good = json!({"translations":{"7":"你好"},"source_suggestions":{"7":""}});
+        assert!(parse_vision_response(&good.to_string(), &ids).is_ok());
+        let mut reply = good.clone();
+        reply["source_suggestions"] = json!({"8":""});
+        assert!(parse_vision_response(&reply.to_string(), &ids).is_err());
+        reply["source_suggestions"] = json!({"7":null});
+        assert!(parse_vision_response(&reply.to_string(), &ids).is_err());
+        reply = good;
+        reply["unexpected"] = json!(true);
+        assert!(parse_vision_response(&reply.to_string(), &ids).is_err());
+    }
+
+    #[test]
+    fn reference_precedes_the_current_image_and_only_current_ids_are_targets() {
+        let block = json!({"id":"a","source":"ありがとう","translation":"private edit"});
+        let page = json!({"image":"/private/chapter/page.png","blocks":[block]});
+        let payload = translation::vision_payload("test", &page, &[block], "data:current", Some("data:previous"));
+        let parts = payload["messages"][1]["content"].as_array().unwrap();
+        let targets: Value = serde_json::from_str(parts[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(targets["target_ids"], json!(["a"]));
+        assert_eq!(targets["page"][0]["ja"], "ありがとう");
+        assert_eq!(parts.len(), 5);
+        assert!(parts[1]["text"].as_str().unwrap().contains("上一页"));
+        assert_eq!(parts[2]["image_url"]["url"], "data:previous");
+        assert!(parts[3]["text"].as_str().unwrap().contains("当前页"));
+        assert_eq!(parts[4]["image_url"]["url"], "data:current");
+        assert!(!payload.to_string().contains("private"));
+    }
+
+    #[tokio::test]
+    async fn contextual_cache_uses_reference_bytes_and_failed_changes_preserve_translations() -> Result<()> {
+        let folder = tempfile::tempdir()?;
+        let previous = folder.path().join("page2.pgm");
+        let encoded = b"P5\n1 1\n255\n\x00";
+        std::fs::write(&previous, encoded)?;
+        let mut page = json!({"width":100,"height":100,"blocks":[
+            {"id":"a","source":"ありがとう","translation":"谢谢","box":[10,10,40,40]},
+            {"id":"b","source":"えっ","edited":true,"translation":"手改","box":[60,10,90,40]}]});
+        let service = TranslationService::new("omlx", Some("http://127.0.0.1:1/v1"), None)?;
+        page["translation_config"] = json!({"mode":"vision","version":1,"prompt_revision":4,
+            "previous_image_sha256":format!("{:x}", Sha256::digest(encoded)),
+            "model":"offline","enable_thinking":false,"strict_json":true,
+            "max_tokens":translation::VISION_MAX_TOKENS,"image_edge":vision_image::IMAGE_EDGE,"batch_size":8,
+            "ocr":structure::ocr_signature(&page),"provider":service.provider,"base_url":service.base_url});
+        let mut trace = Trace::default();
+        let current = Path::new("cached-current-image");
+        translate(&mut page, current, None, Some(&previous), "offline", &service, None, &mut trace).await?;
+        assert!(trace.metrics.is_empty());
+        assert_eq!(page["blocks"][0]["translation"], "谢谢");
+        let saved = page.clone();
+        // Same path, different pixels must require a new translation.
+        std::fs::write(&previous, b"P5\n1 1\n255\n\xff")?;
+        let error = translate(&mut page, current, None, Some(&previous), "offline", &service, None, &mut trace).await.unwrap_err();
+        assert!(error.to_string().contains("无法连接"));
+        assert_eq!(page, saved);
+        std::fs::write(&previous, b"broken")?;
+        let error = translate(&mut page, current, None, Some(&previous), "offline", &service, None, &mut trace).await.unwrap_err();
+        assert!(error.to_string().contains("无法解码上一页"));
+        std::fs::remove_file(&previous)?;
+        let error = translate(&mut page, current, None, Some(&previous), "offline", &service, None, &mut trace).await.unwrap_err();
+        assert!(error.to_string().contains("无法读取上一页"));
+        assert_eq!(page, saved);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepted_shared_word_is_complete_on_offline_resume() -> Result<()> {
+        let warning = translation::SHARED_HANZI_WARNING;
+        let mut page = json!({"width":100,"height":100,"model":"offline","blocks":[
+            {"id":"1","source":"当然","translation":"当然","quality_warnings":[warning],
+             "error":translation::ECHO_ERROR,"box":[10,10,40,40]}]});
+        let service = TranslationService::new("omlx", Some("http://127.0.0.1:1/v1"), None)?;
+        page["translation_config"] = json!({"mode":"vision","version":1,"prompt_revision":3,
+            "model":"offline","enable_thinking":false,"strict_json":true,
+            "max_tokens":translation::VISION_MAX_TOKENS,"image_edge":vision_image::IMAGE_EDGE,"batch_size":8,
+            "ocr":structure::ocr_signature(&page),"provider":service.provider,"base_url":service.base_url});
+        let mut trace = Trace::default();
+        translate(&mut page, Path::new("unused.png"), None, None, "offline", &service, None, &mut trace).await?;
+        assert_eq!(page["blocks"][0]["error"], "");
+        assert_eq!(page["diagnostics"]["translation"]["translated_blocks"], 1);
+        assert!(trace.progress.is_empty() && trace.metrics.is_empty());
+        assert_eq!(trace.saves.last().unwrap()["blocks"][0]["error"], "");
+        Ok(())
+    }
+
+    #[test]
+    fn shared_words_respect_mode_and_duplicate_response_ids() -> Result<()> {
+        let ids = vec!["a".into(), "b".into()];
+        let sources = json!({"a":"当然","b":"そうだ"});
+        for reply in [
+            json!({"translations":{"a":"当然","b":"そうだ"}}),
+            json!({"translations":[{"id":"a","text":"当然"},{"id":"b","text":"そうだ"}]}),
+        ] {
+            let (vision, errors) = translation::parse_rows(&reply, &ids, Some(&sources), true)?;
+            assert_eq!(vision["a"], "当然");
+            assert_eq!(errors["b"], translation::ECHO_ERROR);
+            let (_, errors) = translation::parse_rows(&reply, &ids, Some(&sources), false)?;
+            assert_eq!(errors["a"], translation::ECHO_ERROR);
+        }
+        let repeated = json!({"translations":[{"id":"a","text":"当然"},{"id":"a","text":"当然"}]});
+        let (vision, errors) = translation::parse_rows(&repeated, &ids, Some(&sources), true)?;
+        assert!(vision["a"].is_null());
+        assert!(errors["a"].as_str().unwrap().contains("重复"));
+        Ok(())
+    }
+}

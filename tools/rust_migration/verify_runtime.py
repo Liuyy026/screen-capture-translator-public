@@ -151,8 +151,17 @@ def main():
         loaded = [client.call('load_page', image=p['image'], mode='vision') for p in pages]
         for p, result in zip(pages, loaded):
             imported = json.loads(Path(result['cache']).read_bytes())
-            assert imported.pop('ocr_review_signature')
-            assert imported == json.loads(Path(p['cache']).read_bytes())
+            review_signature = imported.pop('ocr_review_signature')
+            assert len(review_signature) == 64
+            original = json.loads(Path(p['cache']).read_bytes())
+            inputs = [[b['id'], b['box'], b['source']] for b in original['blocks']]
+            receipt_inputs = [p['image_hash'], original['width'], original['height'],
+                              original.get('layout_provenance'), inputs, review_signature]
+            signature = hashlib.sha256(json.dumps(receipt_inputs, ensure_ascii=False,
+                                                  sort_keys=True).encode()).hexdigest()
+            assert imported.pop('ocr_review_cache') == {
+                'canvas_version': 1, 'review_version': 1, 'signature': signature}
+            assert imported == original
             assert Path(result['cache']).stat().st_mode & 0o777 == 0o600
         assert not (weights/'calls.jsonl').exists()
         passed('Synthetic imports preserve original data and add OCR review metadata without inference', pages=len(loaded))

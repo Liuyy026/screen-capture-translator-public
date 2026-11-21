@@ -1,20 +1,14 @@
-# Koma · 本地漫画翻译
+# Koma for macOS
 
 简体中文 | [English](README.en.md)
 
-Koma 在本机识别日文漫画、翻译并在原页回填中文。`main` 中的 macOS 阅读器采用 Rust 核心和 SwiftUI 界面，Python 负责检测、OCR 和背景修补模型推理。Windows 继续使用 Python 后端。
+Koma 在 Apple 芯片 Mac 上识别日文漫画、翻译对白并将中文排回原页。这个仓库维护 Mac 阅读器、Rust 核心和必要的 Python 模型适配器。Windows 旧版独立保存在 `Koma-Windows-Legacy`。
 
-本页说明当前源码构建。macOS 的构建产物仍名为 `Koma Rust 候选版.app`，依赖仓库目录与本机运行环境。重构前的 Python 版可在 `stable/pre-rust-20261108` 找到。
+**本地版本 0.22** 适用于 Apple Silicon 和 macOS 14 及以上。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。正式应用继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
 
-**v0.21 · 2026-11-21 · macOS 视觉辅助翻译**
+0.22 可以在同一整章任务中复用 OCR 模型，并在切页、编辑、导出和取消时保护页面缓存与手改内容。视觉辅助从第 3 页起同时参考同章上一页，只翻译当前页；逐框排版、选择页码导出和两种超分继续可用。[Mac 操作手册](macos/README.md)
 
-第 1、2 页只发送本页图像。从第 3 页起，视觉辅助会同时发送同章上一页原图，帮助理解对话承接和人物指代，仍只翻译本页。每批关闭模型思考、强制按 JSON 结构返回结果，输出上限为 8192 token。请使用支持多图输入、关闭思考和结构化输出的 oMLX 服务及视觉模型。普通翻译继续使用原有文本流程。[视觉辅助使用说明](macos/README.md#视觉辅助翻译omlx)
-
-**v0.21 · 2026-11-18 · macOS 阅读器**
-
-可以为单条对白调整字体、字号和横竖排，也可以用已保存的译文重排本页，保留手改内容。拖动漫画与对白栏之间的分隔线即可调整栏宽，下次打开会恢复上次设置。本版还修复了 Display P3 彩页导出 PNG 时的底色偏移。[v0.21 发布说明](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) · [排版操作与验证记录](docs/macos-typesetting-2026-11-18.md)
-
-**下载 Mac 应用**　Apple Silicon、macOS 14 及以上可直接下载 ZIP，解压后打开 `Koma.app`。阅读和 MetalFX 超分可直接使用；需要日文 OCR、背景修补或 Real-CUGAN 时，先退出应用，再运行同目录的 `准备组件.command`。[下载 v0.21 Mac 应用](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/Koma-0.21-macOS-arm64.zip) · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.21/SHA256SUMS.txt)
+本地构建包位于 `dist/v0.22/`。已公开的上一版仍可从 [v0.21 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) 下载。
 
 ## 当前架构
 
@@ -65,7 +59,6 @@ open 'macos/dist/Koma Rust 候选版.app'
 
 候选数据位于 `~/Library/Application Support/KomaReaderRust/`：`config.json` 保存连接配置，`pages/` 保存普通结果，`pages/vision-v1/` 保存视觉结果，`reading-native-v1/` 保存显示资产。首次可只读复制稳定版的配置和页面到独立副本。Key 可保存在权限 `0600` 的本地明文配置中，不访问钥匙串；不勾选保存 Key 时仅供本次运行使用。配置、原图、模型及私人评测工件不提交到 Git。
 
-Windows 使用方法仍见 [Windows 说明](windows/README.md)，不能将其功能与性能视为已经迁入 Rust。
 
 ## 功能与显示效果
 
@@ -109,15 +102,13 @@ Windows 使用方法仍见 [Windows 说明](windows/README.md)，不能将其功
 
 35 页一致性验收证明重构保留这组输入的效果，不能证明所有漫画均正确。OCR 漏字、手写字、姓名/日期错误与翻译语义问题仍需核对；背景修补也可能留有纹理痕迹。本轮保留原识别与译文，未混入内容校正。
 
-Windows 继续使用原有阅读器。手动补框和拆框、跨页人物记忆、术语表、ZIP/PDF 输入与递归子目录仍待实现。
+手动补框和拆框、跨页人物记忆、术语表、ZIP/PDF 输入与递归子目录仍待实现。
 
 ## 目录与许可证
 
 ```text
 core/                   Rust 核心、原生桥与 Python 模型适配器
 macos/                  Swift 界面、候选构建及模型环境
-windows/                原 Python Windows 阅读器
-backend/                原 Python 后端，保留作稳定版/差分参照
 tools/rust_migration/   Rust 构建及离线核心回归
 scripts/                模型准备、缓存迁移及回归入口
 docs/                   架构、迁移和验收记录

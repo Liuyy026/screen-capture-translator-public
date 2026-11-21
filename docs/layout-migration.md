@@ -1,5 +1,7 @@
 # 平台目录整理 / Platform layout migration
 
+> 本文记录 2026-11-07 的双端目录。0.22 起主仓专用于 Mac，当前路径和命令见[开发说明](development.md)。
+
 日期：2026-11-07。macOS 与 Windows 专用内容分目录维护，共享后端保留一份。保留完整仓库，各平台目录不能单独复制运行。
 
 ## 新旧路径 / Path mapping
