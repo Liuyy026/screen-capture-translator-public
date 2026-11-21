@@ -2,13 +2,19 @@
 
 简体中文 | [English](README.en.md)
 
-Koma 在 Apple 芯片 Mac 上识别日文漫画、翻译对白并将中文排回原页。这个仓库维护 Mac 阅读器、Rust 核心和必要的 Python 模型适配器。Windows 旧版独立保存在 `Koma-Windows-Legacy`。
+Koma 在 Apple 芯片 Mac 上识别日文漫画、翻译对白并将中文排回原页。这个仓库维护 Mac 阅读器、Rust 核心和必要的 Python 模型适配器。
 
-**本地版本 0.22** 适用于 Apple Silicon 和 macOS 14 及以上。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。正式应用继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
+## 下载
+
+**[下载 Koma v0.22（macOS ZIP）](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/Koma-0.22-macOS-arm64.zip)** · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/SHA256SUMS.txt) · [v0.22 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22)
+
+适用于 Apple 芯片 Mac，要求 macOS 14 或更新版本。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。正式应用继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
 
 0.22 可以在同一整章任务中复用 OCR 模型，并在切页、编辑、导出和取消时保护页面缓存与手改内容。视觉辅助从第 3 页起同时参考同章上一页，只翻译当前页；逐框排版、选择页码导出和两种超分继续可用。[Mac 操作手册](macos/README.md)
 
-本地构建包位于 `dist/v0.22/`。已公开的上一版仍可从 [v0.21 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) 下载。
+旧版可从 [macOS v0.21 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) 下载。源码构建见[从源码运行](#从源码运行)。
+
+Windows 旧版源码及运行说明见 [Koma-Windows-Legacy](https://github.com/Liuyy026/Koma-Windows-Legacy) 和 [Windows 实机验证指南](https://github.com/Liuyy026/Koma-Windows-Legacy/blob/main/Windows%E5%AE%9E%E6%9C%BA%E9%AA%8C%E8%AF%81.md)。
 
 ## 当前架构
 
@@ -37,7 +43,7 @@ flowchart TD
 
 Rust 按需启动和复用 Python 推理进程，并管理自己启动的本地 Ollama。已有 Ollama 和 oMLX 服务由用户管理。详细边界见 [核心说明](core/README.md)。
 
-## 运行方式
+## 从源码运行
 
 要求 Apple Silicon、macOS 14+、Swift 编译工具、Rust/Cargo、原生 OpenCV 4.11.0，以及已准备好的 `macos/.venv` 和 `.models/`。**首次准备请按 [macOS 运行指南](macos/README.md) 完成依赖和模型安装**。
 

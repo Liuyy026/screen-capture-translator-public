@@ -2,13 +2,19 @@
 
 [简体中文](README.md) | English
 
-Koma recognizes Japanese dialogue on an Apple Silicon Mac, translates it and typesets Chinese on the original manga page. This repository maintains the Mac reader, Rust core and Python model adapter. The legacy Windows source lives separately in `Koma-Windows-Legacy`.
+Koma recognizes Japanese dialogue on an Apple Silicon Mac, translates it and typesets Chinese on the original manga page. This repository maintains the Mac reader, Rust core and Python model adapter.
 
-**Local version 0.22** runs on Apple Silicon and macOS 14 or later. Unzip and open `Koma.app` to read a chapter or try the sample pages. Quit the app and run the included `准备组件.command` to install OCR, restoration and Real-CUGAN components. The release app continues to use existing settings and caches in `KomaReaderRelease`.
+## Download
+
+**[Download Koma v0.22 for macOS (ZIP)](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/Koma-0.22-macOS-arm64.zip)** · [SHA-256 checksum](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/SHA256SUMS.txt) · [v0.22 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22)
+
+Requires Apple Silicon and macOS 14 or later. Unzip and open `Koma.app` to read a chapter or try the sample pages. Quit the app and run the included `准备组件.command` to install OCR, restoration and Real-CUGAN components. The release app continues to use existing settings and caches in `KomaReaderRelease`. [Package instructions (Chinese)](macos/release/README.md)
 
 The reader reuses the OCR model within chapter jobs and protects manual edits and cached pages during navigation, export and cancellation. Visual assistance can use the preceding image starting on page 3. Per-bubble typography, selected-page export and both upscalers remain available. [Mac reader guide](macos/README.en.md)
 
-The local build is placed in `dist/v0.22/`. The previous public download remains on the [v0.21 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21).
+The previous download remains on the [macOS v0.21 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21). See [Run from source](#run-from-source) for build instructions.
+
+Find the legacy Windows source and setup instructions in [Koma-Windows-Legacy](https://github.com/Liuyy026/Koma-Windows-Legacy) and the [Windows validation guide (Chinese)](https://github.com/Liuyy026/Koma-Windows-Legacy/blob/main/Windows%E5%AE%9E%E6%9C%BA%E9%AA%8C%E8%AF%81.md).
 
 ## Architecture
 
@@ -37,7 +43,7 @@ flowchart TD
 
 Rust starts the Python inference adapter on demand and reuses it. It manages any local Ollama processes it starts. Users manage existing Ollama and oMLX services. See [core documentation](core/README.md).
 
-## Run
+## Run from source
 
 Requires Apple Silicon, macOS 14+, Swift build tools, Rust/Cargo, native OpenCV 4.11.0, a prepared `macos/.venv`, and installed weights under `.models/`. Follow the [macOS setup guide](macos/README.en.md) for first-time preparation.
 
