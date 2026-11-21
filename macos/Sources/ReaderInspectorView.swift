@@ -118,7 +118,7 @@ struct ReaderInspectorView: View {
                     Text(detail)
                         .font(.system(size: 11)).foregroundStyle(ReaderPalette.secondary).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading)
-                if !block.keepsOriginal && !block.error.isEmpty {
+                if !block.keepsOriginal && block.translationIssue != nil {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).font(.caption)
                 }
             }.padding(.horizontal, 6).padding(.vertical, 7)
@@ -146,7 +146,7 @@ private struct ReaderSelectedBlockEditor: View {
     private var warnings: [String] {
         var values: [String] = []
         if !block.keepsOriginal {
-            if !block.error.isEmpty { values.append(block.error) }
+            if let issue = block.translationIssue { values.append(issue) }
             values += (block.quality_warnings ?? []).filter { $0.hasPrefix("原文与译文相同") }
             if let note = reader.readingPreserved[block.id] { values.append(note) }
             else if block.needsOCRReview, let reason = block.ocr_review?.reason { values.append(reason) }

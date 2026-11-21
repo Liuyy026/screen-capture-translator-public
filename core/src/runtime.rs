@@ -5,7 +5,7 @@ use crate::{compat::{array,keeps_original,truth},display_cache,model_images::Ima
 use anyhow::{Result,ensure,Context};
 use serde_json::{Value,json};
 use sha2::{Digest,Sha256};
-use std::{path::{Path,PathBuf},sync::Arc};
+use std::{io::Write,path::{Path,PathBuf},sync::Arc};
 use tokio::sync::Mutex;
 
 #[path = "runtime_page_source.rs"]
@@ -28,8 +28,40 @@ mod ocr_residency;
 pub struct ProcessOptions<'a>{
     pub operation:&'a str,pub mode:&'a str,pub model:&'a str,pub block_id:Option<&'a str>,
     pub previous_image: Option<&'a Path>,
+    pub expected_page: Option<PageVersion<'a>>,
     pub unit:&'a str,pub batch_size:usize,pub retry:bool,
     pub reuse_ocr: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct PageVersion<'a> {
+    pub cache: &'a Path,
+    pub revision: &'a str,
+}
+
+impl PageVersion<'_> {
+    // The caller holds the page writer lock. A missing page must not be
+    // re-created from a seed for a request bound to a previously viewed page.
+    fn verified_bytes(&self, cache: &Path) -> Result<Vec<u8>> {
+        ensure!(self.cache == cache, PageRevisionChanged);
+        let bytes = match std::fs::read(cache) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(PageRevisionChanged.into()),
+            result => result?,
+        };
+        ensure!(format!("{:x}", Sha256::digest(&bytes)) == self.revision, PageRevisionChanged);
+        Ok(bytes)
+    }
+
+    fn open(&self, source: &Path, cache: &Path) -> Result<(Value, tempfile::NamedTempFile)> {
+        let page = persistence::parse_page(&self.verified_bytes(cache)?)?;
+        let image = read_page_image(source, cache)?;
+        // Enhancement and visual translation reopen paths after awaiting other
+        // work. Keep their inputs bound to these verified bytes until commit.
+        let suffix = source.extension().and_then(|s| s.to_str()).map(|s| format!(".{s}")).unwrap_or_default();
+        let mut snapshot = tempfile::Builder::new().prefix("koma-retry-").suffix(&suffix).tempfile()?;
+        snapshot.write_all(&image)?;
+        Ok((page, snapshot))
+    }
 }
 
 impl ProcessOptions<'_> {
@@ -45,27 +77,15 @@ impl ProcessOptions<'_> {
 // replacement is ready, its cleared working copy must never reach disk.
 struct Checkpoints<'a, O> {
     observer: &'a mut O,
-    deferred: bool,
+    retry_source: Option<&'a Path>,
 }
 
 impl<O: Observer> Observer for Checkpoints<'_, O> {
+    fn source_image(&self) -> Option<&Path> { self.retry_source }
     fn progress(&mut self, message: &str) -> Result<()> { self.observer.progress(message) }
     fn metrics(&mut self, event: &Value) -> Result<()> { self.observer.metrics(event) }
     fn save(&mut self, page: &Value) -> Result<()> {
-        if self.deferred { Ok(()) } else { self.observer.save(page) }
-    }
-}
-
-fn apply_display_warnings(page: &mut Value) {
-    if let Some(blocks) = page["blocks"].as_array_mut() {
-        for block in blocks {
-            if !truth(&block["edited"]) && !keeps_original(block) && !crate::ocr_review::suppressed(block) {
-                let reason = crate::translation::translation_error(&block["translation"]);
-                if reason == "模型返回了占位文字，没有提供实际译文" {
-                    block["error"] = json!(reason);
-                }
-            }
-        }
+        if self.retry_source.is_some() { Ok(()) } else { self.observer.save(page) }
     }
 }
 
@@ -76,8 +96,7 @@ fn cache_source_digest(cache: &Path) -> Result<&str> {
 fn read_page_image(image: &Path, cache: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(image)?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    ensure!(cache_source_digest(cache)? == digest,
-        "漫画页面已更新，请重新打开后再操作。");
+    ensure!(cache_source_digest(cache)? == digest, PageRevisionChanged);
     Ok(bytes)
 }
 
@@ -97,37 +116,35 @@ pub struct PageRevisionChanged;
 
 impl std::fmt::Display for PageRevisionChanged {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        out.write_str("页面已更新，请重试。")
+        out.write_str("页面已更新，请重新载入后再试。")
     }
 }
 
 impl std::error::Error for PageRevisionChanged {}
 
-fn upgrade_original_selections(page: &mut Value, image: &Path, cache: &Path) -> Result<()> {
+fn upgrade_original_selections(page: &mut Value, image: &Path, cache: &Path) -> Result<bool> {
     let ids = preserved_bubbles::legacy_ids(page);
-    if ids.is_empty() { return Ok(()); }
+    if ids.is_empty() { return Ok(false); }
     let original = read_page_image(image, cache)?;
     let image = page_source::source_canvas(page, &original)?;
     for id in ids { preserved_bubbles::set(page, &id, true, &image, &[])?; }
     crate::translation_cache::mark_manual(page);
-    persistence::atomic_json(cache, page)
+    Ok(true)
 }
 
 fn ocr_review_current(page: &Value, cache: &Path) -> bool {
     cache_source_digest(cache).is_ok_and(|digest| crate::ocr_review::source_current(page, digest))
 }
 
-fn review_ocr(page: &mut Value, image: &Path, cache: &Path) -> Result<()> {
+fn review_ocr(page: &mut Value, image: &Path, cache: &Path) -> Result<bool> {
     // Processing can spend time on OCR and structure analysis. Verify the
     // current file before trusting a receipt, even when its path is unchanged.
     let original = read_page_image(image, cache)?;
-    let changed = crate::ocr_review::ensure_for_source(page, cache_source_digest(cache)?, |page| {
+    crate::ocr_review::ensure_for_source(page, cache_source_digest(cache)?, |page| {
         let pixels = page_source::source_canvas(page, &original)?;
         let color = crate::imaging::decode_bytes(&pixels, opencv::imgcodecs::IMREAD_COLOR)?;
         crate::imaging::color_to_gray(&color)
-    })?;
-    if changed { persistence::atomic_json(cache, page)?; }
-    Ok(())
+    })
 }
 
 impl Runtime{
@@ -204,8 +221,9 @@ impl Runtime{
                 // won the race after the optimistic read.
                 if waited { read_page_image(image, &cache)?; }
                 if let Some(mut page) = self.seed_page(image, effective, mode, &cache)? {
-                    upgrade_original_selections(&mut page, image, &cache)?;
-                    review_ocr(&mut page, image, &cache)?;
+                    let upgraded = upgrade_original_selections(&mut page, image, &cache)?;
+                    let reviewed = review_ocr(&mut page, image, &cache)?;
+                    if upgraded || reviewed { persistence::atomic_json(&cache, &page)?; }
                 }
                 break committed_page(&cache)?;
             }
@@ -218,45 +236,60 @@ impl Runtime{
         if waited { read_page_image(image, &cache)?; }
         let (mut page, revision) = snapshot.unzip();
         if let Some(page) = page.as_mut() {
-            apply_display_warnings(page);
+            if crate::translation::audit_cache(page, None) { structure::sync(page)?; }
             let _ = crate::cache_policy::touch(&cache);
         }
         Ok(json!({"cache":cache,"page":page,"revision":revision,"layout_image":image}))
     }
 
-    pub async fn process_page(&self, source: &Path, effective: &Path, cache: &Path,
+    pub async fn process_page(&self, source: &Path, settings: &crate::super_resolution::Settings, cache: &Path,
         options: &ProcessOptions<'_>, service: &TranslationService, observer: &mut impl Observer) -> Result<Value> {
         ensure!(["ocr","translate","both"].contains(&options.operation),"未知处理操作");
         let _guard = self.cache_policy.lock_page(cache).await?;
-        let existing = self.seed_page(source, effective, options.mode, cache)?;
+        let target = if options.block_id.is_some() || options.retry {
+            ensure!(options.operation != "ocr", "单句重试需要翻译操作");
+            let id = options.block_id.context("单句重试缺少对白编号")?;
+            let version = options.expected_page.ok_or(PageRevisionChanged)
+                .context("单句重译缺少页面缓存或版本，请重新载入后再试。")?;
+            Some((id, version))
+        } else { None };
+        let (opened_page, snapshot) = target.map(|(_, version)| version.open(source, cache)).transpose()?.unzip();
+        let input = snapshot.as_ref().map_or(source, |file| file.path());
+        let (effective, warning) = match self.sr.prepare(input, settings).await {
+            Ok(image) => (image, None),
+            Err(error) => {
+                let warning = service.safe_error(error);
+                observer.progress(&format!("超分失败，使用原图继续处理：{warning}"))?;
+                (input.to_owned(), Some(warning))
+            }
+        };
+        let existing = match opened_page {
+            Some(page) => Some(page),
+            None => self.seed_page(input, &effective, options.mode, cache)?,
+        };
         let fresh_ocr = existing.is_none();
         // A legacy import retains its established segmentation and dialogue layout.
         let layout_image = if existing.as_ref().is_some_and(|page| page["layout_provenance"]["version"] == 1) {
             None
-        } else { Some(source) };
+        } else { Some(input) };
         let mut page = if let Some(mut page) = existing {
-            upgrade_original_selections(&mut page, source, cache)?;
+            upgrade_original_selections(&mut page, input, cache)?;
             if options.mode == "text" {
-                let changed = match layout_image {
-                    Some(image) => overlay::ensure(&mut page, Some(image))?,
-                    None => false,
-                };
-                let before = page["structure"].clone();
+                if layout_image.is_some() { overlay::ensure(&mut page, layout_image)?; }
                 structure::ensure(&mut page, layout_image)?;
-                if changed || before != page["structure"] { persistence::atomic_json(cache, &page)?; }
             }
             page
         } else {
             observer.progress("正在自动寻找文字并识别日文，首次处理会稍慢…")?;
             let mut models = self.models.lock().await;
-            let mut page = if source == effective {
-                ocr::recognize(source, &mut models).await?
+            let mut page = if input == effective {
+                ocr::recognize(input, &mut models).await?
             } else {
-                let raw = models.ocr(effective).await?;
+                let raw = models.ocr(&effective).await?;
                 let mut page = ocr::assemble(&raw)?;
-                page_source::rebase_ocr(&mut page, source)?;
-                overlay::ensure(&mut page, Some(source))?;
-                structure::ensure(&mut page, Some(source))?;
+                page_source::rebase_ocr(&mut page, input)?;
+                overlay::ensure(&mut page, Some(input))?;
+                structure::ensure(&mut page, Some(input))?;
                 page
             };
             ensure!(self.cache_for(source, options.mode)? == cache, "识别期间原文件发生变化，请重试");
@@ -264,10 +297,8 @@ impl Runtime{
             persistence::atomic_json(cache, &page)?;
             page
         };
-        review_ocr(&mut page, source, cache)?;
-        let retry_id = if options.retry{
-            ensure!(options.operation != "ocr", "单句重试需要翻译操作");
-            let id=options.block_id.context("单句重试缺少对白编号")?;
+        review_ocr(&mut page, input, cache)?;
+        if let Some((id, _)) = target.filter(|_| options.retry) {
             let block=page["blocks"].as_array_mut().context("invalid page blocks")?.iter_mut().find(|b|b["id"]==id).context("缓存中没有找到这条对白")?;
             ensure!(!keeps_original(block), "请恢复这个对话框的翻译后再重试。");
             ensure!(!crate::ocr_review::suppressed(block), "这处疑似非文字，请核对原图并确认为文字后再翻译。");
@@ -277,16 +308,16 @@ impl Runtime{
                 block["ocr_confirmed"] = json!(true);
             }
             block["translation"]=json!("");block["error"]=json!("");block["edited"]=json!(false);
-            Some(id)
-        } else { None };
-        let mut checkpoints = Checkpoints { observer, deferred: retry_id.is_some() };
+            block.as_object_mut().unwrap().remove("retranslation_error");
+        }
+        let mut checkpoints = Checkpoints { observer, retry_source: target.map(|_| source) };
         // The observer owns checkpointing for the destination selected above.
         checkpoints.save(&page)?;
         if options.operation != "ocr" {
             self.translate_with_ocr_policy(options.reuse_ocr && fresh_ocr, async {
                 if array(&page["blocks"]).iter().any(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)) {
                     if options.mode == "vision" {
-                        vision_pipeline::translate(&mut page,effective,layout_image,options.previous_image,
+                        vision_pipeline::translate(&mut page,&effective,layout_image,options.previous_image,
                             options.model,service,options.block_id,&mut checkpoints).await?;
                     } else {
                         translate_pipeline::translate(&mut page,service,&translate_pipeline::Options{
@@ -296,15 +327,25 @@ impl Runtime{
                 Ok(())
             }).await?;
         }
-        if let Some(id) = retry_id {
+        if let Some((id, version)) = target {
             let block = array(&page["blocks"]).iter().find(|b| b["id"] == id).context("重译目标已丢失")?;
-            if let Some(error) = block["error"].as_str().filter(|s| !s.is_empty()) {
+            if let Some(error) = ["error", "retranslation_error"].iter()
+                .filter_map(|key| block[*key].as_str()).find(|s| !s.is_empty()) {
                 anyhow::bail!("{error}");
             }
             ensure!(block["translation"].as_str().is_some_and(|s| !s.trim().is_empty()), "未生成有效的新译文");
+            // The writer lock serializes Koma edits. The image and cache can
+            // still be replaced externally while waiting for the model.
+            read_page_image(source, cache)?;
+            version.verified_bytes(cache)?;
             observer.save(&page)?;
         }
-        Ok(json!({"cache":cache,"blocks":array(&page["blocks"]).len(),"issues":array(&page["blocks"]).iter().filter(|b|!keeps_original(b) && !crate::ocr_review::suppressed(b) && truth(&b["error"])).count()}))
+        let blocks = array(&page["blocks"]);
+        let issues = blocks.iter().filter(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)
+            && crate::compat::has_translation_issue(b)).count();
+        let mut result = json!({"cache":cache,"blocks":blocks.len(),"issues":issues});
+        if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
+        Ok(result)
     }
     pub async fn display_page(&self,image:&Path,cache:&Path,revision:Option<&str>)->Result<Value>{
         let cache=cache.canonicalize()?;
@@ -365,6 +406,7 @@ impl Runtime{
             }
             if fields.contains_key("source") || fields.contains_key("translation") {
                 block["ocr_confirmed"] = json!(true);
+                block.as_object_mut().unwrap().remove("retranslation_error");
             }
         }
         let config = page["translation_config"].clone();
@@ -380,7 +422,7 @@ impl Runtime{
         }
         crate::translation_cache::mark_manual(&mut page);
         persistence::atomic_json(&cache,&page)?;
-        apply_display_warnings(&mut page);
+        if crate::translation::audit_cache(&mut page, None) { structure::sync(&mut page)?; }
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
     }
     pub async fn maintain_cache(&self) {
@@ -511,11 +553,10 @@ mod tests {
                 {"id":"a","keep_original":true,"translation":"旧机翻"},
                 {"id":"b","keep_original":true,"translation":"手改","edited":true}]}))?;
         let edited = runtime.edit(&cache, "a", &json!({"keep_original":false}), None, None).await?;
-        let mut page = edited["page"].clone();
+        let page = &edited["page"];
         assert_eq!(page["blocks"][0]["translation"], "旧机翻");
         assert_eq!(page["blocks"][0].get("translation_config_override"), Some(&Value::Null));
-        translate_pipeline::prepare_config(&mut page, &config, false, None);
-        assert_eq!(page["blocks"][0]["translation"], "");
+        assert!(translate_pipeline::needs_translation(&page["blocks"][0], &config, false));
         assert_eq!(page["blocks"][1]["translation"], "手改");
         Ok(())
     }
@@ -559,7 +600,7 @@ mod tests {
         let cache = runtime.cache_for(&image, "text")?;
         let service = TranslationService::new("ollama", None, None)?;
         let options = ProcessOptions { operation:"ocr", mode:"text", model:"unused", block_id:None,
-            previous_image:None, unit:"blocks", batch_size:8, retry:false, reuse_ocr:false };
+            previous_image:None, expected_page:None, unit:"blocks", batch_size:8, retry:false, reuse_ocr:false };
         let vision_cache = runtime.cache_for(&image, "vision")?;
         for invalid in [
             json!("invalid page"),
@@ -571,10 +612,54 @@ mod tests {
             persistence::atomic_json(&cache, &invalid)?;
             let before = std::fs::read(&cache)?;
             let mut writer = persistence::FileObserver { destination:&cache, status:None, metrics:None };
-            assert!(runtime.process_page(&image, &image, &cache, &options, &service, &mut writer).await.is_err());
+            assert!(runtime.process_page(&image, &Default::default(), &cache, &options, &service, &mut writer).await.is_err());
             assert!(runtime.load_page(&image, &image, "vision").await.is_err());
             assert!(!vision_cache.exists());
             assert_eq!(std::fs::read(&cache)?, before);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_block_retry_rechecks_the_view_after_acquiring_the_writer_lock() -> Result<()> {
+        use tokio::time::{sleep, Duration};
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let runtime = isolated_runtime(root)?;
+        let image = root.join("page.pgm");
+        let pixels = [b"P5\n32 32\n255\n".as_slice(), &[255; 1024]].concat();
+        let page = json!({"width":32,"height":32,"blocks":[{"id":"1","source":"原文",
+            "translation":"人工译文","edited":true}]});
+        let service = TranslationService::new("ollama", None, None)?;
+        for replace_image in [false, true] {
+            std::fs::write(&image, &pixels)?;
+            let cache = runtime.cache_for(&image, "text")?;
+            persistence::atomic_json(&cache, &page)?;
+            let revision = format!("{:x}", Sha256::digest(std::fs::read(&cache)?));
+            let options = ProcessOptions { operation:"translate", mode:"text", model:"unused", block_id:Some("1"),
+                previous_image:None, expected_page:Some(PageVersion { cache:&cache, revision:&revision }),
+                unit:"blocks", batch_size:8, retry:true, reuse_ocr:false };
+            let mut observer = persistence::FileObserver { destination:&cache, status:None, metrics:None };
+            let guard = runtime.cache_policy.lock_page(&cache).await?;
+            let settings = crate::super_resolution::Settings::default();
+            let processing = runtime.process_page(&image, &settings, &cache, &options, &service, &mut observer);
+            tokio::pin!(processing);
+            tokio::select! {
+                result = &mut processing => anyhow::bail!("retry bypassed writer lock: {result:?}"),
+                _ = sleep(Duration::from_millis(20)) => (),
+            }
+            if replace_image {
+                std::fs::write(&image, b"a different file at the same path")?;
+            } else {
+                let mut edited = page.clone();
+                edited["blocks"][0]["translation"] = json!("刚保存的人工译文");
+                persistence::atomic_json(&cache, &edited)?;
+            }
+            let expected = std::fs::read(&cache)?;
+            drop(guard);
+            assert!(processing.await.unwrap_err().is::<PageRevisionChanged>());
+            assert_eq!(std::fs::read(&cache)?, expected);
         }
         Ok(())
     }
@@ -596,14 +681,16 @@ mod tests {
             persistence::atomic_json(&cache, &page)?;
             let mut writer = persistence::FileObserver { destination: &cache, status: None, metrics: None };
             let mut options = ProcessOptions { operation: "ocr", mode, model: "unused", block_id: None,
-                previous_image: None, unit: "blocks", batch_size: 8, retry: false, reuse_ocr: false };
-            runtime.process_page(&image, &image, &cache, &options, &service, &mut writer).await?;
+                previous_image: None, expected_page: None, unit: "blocks", batch_size: 8, retry: false, reuse_ocr: false };
+            runtime.process_page(&image, &Default::default(), &cache, &options, &service, &mut writer).await?;
             let before = std::fs::read(&cache)?;
             options.operation = "translate";
             options.block_id = Some("1");
             options.retry = true;
+            let revision = format!("{:x}", Sha256::digest(&before));
+            options.expected_page = Some(PageVersion { cache: &cache, revision: &revision });
             options.unit = "invalid"; // ordinary-mode setup fails, vision rejects Ollama.
-            let error = runtime.process_page(&image, &image, &cache, &options, &service, &mut writer).await.unwrap_err();
+            let error = runtime.process_page(&image, &Default::default(), &cache, &options, &service, &mut writer).await.unwrap_err();
             assert!(error.to_string().contains(if mode == "text" { "翻译单位" } else { "oMLX" }));
             assert_eq!(std::fs::read(&cache)?, before);
         }

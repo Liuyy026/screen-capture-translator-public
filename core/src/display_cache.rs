@@ -22,7 +22,7 @@ impl Store{
         for code in [include_bytes!("reading.rs").as_slice(),include_bytes!("ink.rs").as_slice(),include_bytes!("geometry.rs").as_slice(),
             include_bytes!("background.rs").as_slice(),include_bytes!("texture.rs").as_slice(),include_bytes!("raster.rs").as_slice(),
             include_bytes!("preserved_bubbles.rs").as_slice(),
-            include_bytes!("ocr_review.rs").as_slice(),
+            include_bytes!("ocr_review.rs").as_slice(),include_bytes!("translation.rs").as_slice(),
             include_bytes!("imaging.rs").as_slice(),include_bytes!("display_cache.rs").as_slice(),include_bytes!("compat.rs").as_slice(),
             include_bytes!("model_images.rs").as_slice(),include_bytes!("../python/model_worker.py").as_slice()]{digest.update(code);}
         for name in ["comictextdetector.pt","anime-manga-big-lama.pt"]{model_identity(&mut digest,&self.weights.join(name))?;}
@@ -70,6 +70,7 @@ pub async fn generate(image_bytes:&[u8],page:&Value,source:Option<Mat>,mut model
     let gray=imaging::color_to_gray(&color)?;
     let mut reviewed = page.clone();
     crate::ocr_review::ensure(&mut reviewed, &gray)?;
+    if crate::translation::audit_cache(&mut reviewed, None) { crate::structure::sync(&mut reviewed)?; }
     let page = &reviewed;
     let has_color=color.data_bytes()?.chunks_exact(3).any(|p|p.iter().max().unwrap()-p.iter().min().unwrap()>8);
     let mut source=source;

@@ -14,12 +14,13 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from unittest.mock import patch
-from verify_translate_pipeline import clear_pending_warnings
+from verify_translate_pipeline import assert_mixed_replacement, expect_retranslation
 
 
 class Server:
     def __init__(self):
         self.mode='good';self.calls=[]
+        self.translation='测试中文'
         owner=self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
@@ -35,7 +36,7 @@ class Server:
                 else:
                     data=json.loads(payload['messages'][1]['content'][0]['text'])
                     ids=data['target_ids'];sources={b['id']:b['ja'] for b in data['page']}
-                    rows={key:'测试中文' for key in ids};suggestions={key:'' for key in ids}
+                    rows={key:owner.translation for key in ids};suggestions={key:'' for key in ids}
                     if owner.mode=='partial':rows.pop(ids[0])
                     if owner.mode=='echo':rows={key:sources[key] for key in ids}
                     if owner.mode=='placeholder':rows[ids[0]]='待翻译'
@@ -86,18 +87,6 @@ def expected_vision_context(calls, page):
             message['text'] = json.dumps(prompt, ensure_ascii=False)
 
 
-def expect_model_change(page, trace):
-    if not trace['saves'] or page.get('translation_config') == trace['page'].get('translation_config'):
-        return
-    previous_blocks = {block['id']: block for block in page['blocks']}
-    # The first checkpoint resets the previous model's records before the
-    # first new response. Later checkpoints also recalculate diagnostic totals.
-    for index, snapshot in enumerate(trace['saves']):
-        clear_pending_warnings(snapshot, previous_blocks, refresh_diagnostics=index != 0)
-    for dialogue in trace['saves'][0].get('dialogues', []):
-        dialogue.pop('quality_warnings', None)
-
-
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
@@ -110,6 +99,8 @@ def main():
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
     from backend.translation_service import TranslationService
     from PIL import Image
+    def sync(page):
+        old.shared._structure.sync_dialogue_translations(page, block_validator=old.valid_vision_block)
     binary=core_binary(root)
     os.environ['KOMA_TRANSLATION_API_KEY']='fake-secret'
     manifest=make_pages(output/'fixtures')
@@ -140,7 +131,8 @@ def main():
             if mode == 'missing-model':
                 # Model validation must preserve the caller's existing data.
                 expected.update(page=copy.deepcopy(page), saves=[])
-            expect_model_change(page, expected)
+            expect_retranslation(page, expected, sync=sync, block_id=block_id, vision=True,
+                                 refresh_overlay=lambda snapshot: old.shared._overlay.ensure_page_overlays(snapshot, image=image))
             expected_vision_context(expected_calls, expected['page'])
             request={'page':page,'image':str(image),'model':model,'provider':provider,'base_url':endpoint.url,'block_id':block_id,'key':'fake-secret'}
             actual,prefix=native(request)
@@ -190,6 +182,15 @@ def main():
         run(failed,image,block_id='2')
         run(failed,image,block_id='unknown')
         run(failed,image,block_id='1')
+        small_image = output/'replacement.png'
+        Image.new('RGB',(300,300),'white').save(small_image)
+        small_page = {**page, 'width':300, 'height':300, 'blocks':page['blocks'][:3]}
+        previous = run(small_page, small_image, mode='suggestion')
+        server.translation = '另一个模型的译文'
+        mixed = run(previous, small_image, model='other-model', mode='placeholder')
+        assert_mixed_replacement(previous, mixed, server.translation,
+                                 '模型返回了占位文字，没有提供实际译文')
+        server.translation = '测试中文'
         run(page,image,provider='ollama')
         run({'blocks':[]},image)
         history=copy.deepcopy(page);history['vision_runs']=[{'old':i,'wall_seconds':0.5} for i in range(60)]

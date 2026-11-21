@@ -1,16 +1,20 @@
 //! Image-grounded translation; original OCR and ordinary caches stay intact.
 use crate::{
-    compat::{array, keeps_original, text, truth},
+    compat::{array, text, truth},
     persistence,
     service::TranslationService,
     structure,
-    translate_pipeline::{Observer, Trace, prepare_config, remove, save_results},
+    translate_pipeline::{
+        BlockReplacements, Observer, Trace, accept_block, allowed, finish_config,
+        invalidate_dialogues, needs_translation, record_failure, remove, save_results,
+    },
     translation, vision_image,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     path::Path,
     time::{Duration, Instant},
 };
@@ -33,7 +37,7 @@ pub fn from_text(mut page: Value) -> Value {
             if !truth(&b["edited"]) {
                 b["translation"] = json!("");
                 b["error"] = json!("");
-                remove(b, &["translation_config_override", "quality_warnings", "vision_source"]);
+                remove(b, &["translation_config_override", "quality_warnings", "vision_source", "retranslation_error"]);
             }
         }
     }
@@ -91,6 +95,10 @@ pub async fn translate(
     let page = &mut prepared;
     let audit_changed = translation::audit_cache(page, block_id);
     structure::ensure(page, layout_image)?;
+    if !array(&page["blocks"]).iter().any(|b| allowed(b, block_id)) {
+        *current_page = prepared;
+        return Ok(());
+    }
     let mut config = json!({"mode":"vision","version":1,"prompt_revision":3,"model":model,
         "enable_thinking":false,"strict_json":true,"max_tokens":translation::VISION_MAX_TOKENS,
         "image_edge":vision_image::IMAGE_EDGE,"batch_size":8,"ocr":structure::ocr_signature(page),
@@ -106,17 +114,10 @@ pub async fn translate(
         config["previous_image_sha256"] = json!(format!("{:x}", Sha256::digest(bytes)));
     }
     let page_changed = page["translation_config"] != config;
-    let changed = prepare_config(page, &config, page_changed, block_id);
     let mut pending: Vec<_> = (0..array(&page["blocks"]).len())
         .filter(|&i| {
             let b = &page["blocks"][i];
-            !truth(&b["edited"])
-                && !keeps_original(b)
-                && !crate::ocr_review::suppressed(b)
-                && b["overlay"] != "skip"
-                && b["text_kind"] != "noise"
-                && block_id.is_none_or(|id| text(&b["id"]) == id)
-                && (!truth(&b["translation"]) || truth(&b["error"]))
+            allowed(b, block_id) && needs_translation(b, &config, page_changed)
         })
         .collect();
     pending.sort_by(|&a, &b| {
@@ -125,7 +126,10 @@ pub async fn translate(
             .unwrap_or(1e9)
             .total_cmp(&page["blocks"][b]["reading_order"].as_f64().unwrap_or(1e9))
     });
+    let mut replacements = BlockReplacements::new(page, &pending);
+    let mut all_succeeded = replacements.protect_uncovered(page, &mut pending, block_id)?;
     if pending.is_empty() {
+        let changed = !all_succeeded || finish_config(page, &config, page_changed, block_id);
         if changed || audit_changed { structure::sync(page)?; observer.save(page)?; }
         *current_page = prepared;
         return Ok(());
@@ -144,14 +148,13 @@ pub async fn translate(
     let encoded = vision_image::encode(image)?;
     *current_page = prepared;
     let page = current_page;
-    if changed { observer.save(page)?; }
     let count = pending.len().div_ceil(8);
     for (index, indices) in pending.chunks(8).enumerate() {
         observer.progress(&format!("正在结合画面翻译第 {} / {} 组…", index + 1, count))?;
         let started = Instant::now();
         let members: Vec<_> = indices.iter().map(|&i| page["blocks"][i].clone()).collect();
         let ids: Vec<_> = members.iter().map(|b| text(&b["id"])).collect();
-        let mut event = json!({"mode":"vision","model":model,"image":image,"batch_ids":ids,
+        let mut event = json!({"mode":"vision","model":model,"image":observer.source_image().unwrap_or(image),"batch_ids":ids,
             "provider":service.provider,"base_url":service.base_url});
         let outcome: Result<()> = async {
             let payload = translation::vision_payload(model, page, &members, &encoded.url,
@@ -171,11 +174,16 @@ pub async fn translate(
             let sources = Value::Object(sources);
             let obj = parse_vision_response(content, &ids)?;
             let (translated, errors) = translation::parse_rows(&obj, &ids, Some(&sources), true)?;
+            let mut updated = HashSet::new();
             for &i in indices {
-                let b = &mut page["blocks"][i];
-                let id = text(&b["id"]);
-                b["translation"] = translated.get(&id).cloned().unwrap_or(json!(""));
-                b["error"] = errors.get(&id).cloned().unwrap_or(json!(""));
+                let id = text(&page["blocks"][i]["id"]);
+                let Some(value) = translated.get(&id) else {
+                    all_succeeded = false;
+                    record_failure(&mut page["blocks"][i], &errors[&id]);
+                    continue;
+                };
+                let mut b = page["blocks"][i].clone();
+                accept_block(&mut b, value, &config, page_changed);
                 let source = b["source"].as_str().unwrap_or("");
                 let suggestion = obj["source_suggestions"]
                     .as_object()
@@ -188,12 +196,12 @@ pub async fn translate(
                     .map(|s| s.trim_matches(whitespace))
                     .unwrap_or("");
                 b["vision_source"] = json!(suggestion);
-                let mut warnings = translation::quality_warnings(&b["source"], &b["translation"]);
-                if translation::same_as_source(&b["source"], &b["translation"]) {
-                    warnings.push(translation::SHARED_HANZI_WARNING.into());
+                if translation::same_as_source(&b["source"], value) {
+                    b["quality_warnings"].as_array_mut().unwrap().push(json!(translation::SHARED_HANZI_WARNING));
                 }
-                b["quality_warnings"] = json!(warnings);
+                replacements.accept(page, i, b, &mut updated);
             }
+            invalidate_dialogues(page, &updated);
             if let Some(usage) = response.get("usage") {
                 if let Some(usage) = usage.as_object() {
                     event["usage"] = Value::Object(
@@ -212,13 +220,11 @@ pub async fn translate(
         .await;
         if let Err(error) = outcome {
             let reason = format!("视觉翻译失败：{}", service.safe_error(error));
-            for &i in indices {
-                let b = &mut page["blocks"][i];
-                b["translation"] = json!("");
-                b["error"] = json!(reason);
-                remove(b, &["vision_source"]);
-            }
+            all_succeeded = false;
             event["error"] = json!(reason);
+            for &i in indices {
+                record_failure(&mut page["blocks"][i], &event["error"]);
+            }
         }
         event["wall_seconds"] = json!(started.elapsed().as_secs_f64());
         let mut runs = array(&page["vision_runs"]).to_vec();
@@ -228,6 +234,7 @@ pub async fn translate(
         }
         page["vision_runs"] = json!(runs);
         page["vision_input"] = json!({"width":encoded.width,"height":encoded.height});
+        if all_succeeded && index + 1 == count { finish_config(page, &config, page_changed, block_id); }
         save_results(page, layout_image, observer)?;
         observer.metrics(&event)?;
     }

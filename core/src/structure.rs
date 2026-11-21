@@ -588,7 +588,7 @@ pub fn sync(page: &mut Value) -> Result<()> {
             || array(&d["block_ids"]).iter().any(|id| {
                 by_id
                     .get(&text(id))
-                    .is_some_and(|&i| truth(&blocks[i]["error"]))
+                    .is_some_and(|&i| crate::compat::has_translation_issue(&blocks[i]))
             })
     };
     let failed_count = dialogues.iter().filter(|d| failed(d)).count();
@@ -606,7 +606,7 @@ pub fn sync(page: &mut Value) -> Result<()> {
         .count();
     let diag = &mut page["diagnostics"];
     diag["translation"] = json!({"translated_blocks": unique.iter().filter(|b| valid_block(b)).count(),
-        "errors": unique.iter().filter(|b| truth(&b["error"])).count(), "complete_dialogues": dialogues.iter().filter(|d| truth(&d["translation_complete"])).count(),
+        "errors": unique.iter().filter(|b| crate::compat::has_translation_issue(b)).count(), "complete_dialogues": dialogues.iter().filter(|d| truth(&d["translation_complete"])).count(),
         "quality_warnings": unique.iter().map(|b| array(&b["quality_warnings"]).len()).sum::<usize>(),
         "dialogue_quality_warnings": dialogues.iter().map(|d| array(&d["quality_warnings"]).len()).sum::<usize>(),
         "failed_dialogues": failed_count, "pending_dialogues": dialogues.iter().filter(|d| !truth(&d["translation_complete"]) && !failed(d)).count()});
@@ -616,7 +616,7 @@ pub fn sync(page: &mut Value) -> Result<()> {
         "fallback_dialogues": dialogues.iter().filter(|d| !truth(&d["translation_complete"])).count()});
     diag["failures"] = json!({"ocr": unique.iter().filter(|b| trim(&string_or_empty(&b["source"])).is_empty() || valid_box(&b["box"]).is_none()).count(),
         "grouping": dialogues.iter().filter(|d| !truth(&d["block_ids"])).count() + diag["grouping"]["unassigned"].as_u64().unwrap_or(0) as usize,
-        "translation": failed_count + by_id.iter().filter(|(bid, i)| !assigned.contains(*bid) && truth(&blocks[**i]["error"])).count(),
+        "translation": failed_count + by_id.iter().filter(|(bid, i)| !assigned.contains(*bid) && crate::compat::has_translation_issue(&blocks[**i])).count(),
         "layout": null, "grouping_review": dialogues.iter().filter(|d| truth(&d["needs_review"])).count()});
     diag["failure_units"] = json!({"ocr": "blocks with empty source or invalid box; not OCR accuracy",
         "grouping": "empty units plus unassigned blocks", "translation": "failed dialogue units plus unassigned error blocks, deduplicated",

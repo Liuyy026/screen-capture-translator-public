@@ -24,6 +24,10 @@ pub fn truth(value: &Value) -> bool {
     }
 }
 
+pub fn has_translation_issue(block: &Value) -> bool {
+    truth(&block["error"]) || truth(&block["retranslation_error"])
+}
+
 pub fn keeps_original(block: &Value) -> bool {
     block["keep_original"].as_bool() == Some(true)
 }

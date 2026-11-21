@@ -14,7 +14,7 @@ struct ReaderDiagnosticsView: View {
         let displayed = Set(reader.readingPresentations.flatMap(\.region.block_ids))
         return blocks.filter { !$0.keepsOriginal }.compactMap { block in
             if block.needsOCRReview { return (block, block.ocr_review?.reason ?? "疑似非文字，已暂停处理") }
-            if !block.error.isEmpty { return (block, block.error) }
+            if let issue = block.translationIssue { return (block, issue) }
             if block.overlay == "skip" || block.text_kind == "noise" || reader.readingPreserved[block.id] != nil { return nil }
             if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return (block, block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "日文识别为空" : "缺少中文译文")
@@ -96,10 +96,10 @@ struct ReaderDiagnosticsView: View {
         if reader.engineReady == false, let detail = reader.connectionError {
             return service + "\n" + detail
         }
-        let failures = candidates.filter { !$0.error.isEmpty }.count
+        let failures = candidates.filter { $0.translationIssue != nil }.count
         let kept = blocks.filter(\.keepsOriginal).count
         let cachedModel = reader.page?.model ?? ""
-        let provenance = cachedModel.isEmpty || cachedModel == model ? "" : "\n已存译文使用 \(cachedModel)"
+        let provenance = cachedModel.isEmpty || cachedModel == model ? "" : "\n页面已存的默认模型为 \(cachedModel)"
         return service + "\n已有译文 \(translated) 处 · 失败 \(failures) 处 · 保留原框 \(kept) 处" + provenance
     }
 

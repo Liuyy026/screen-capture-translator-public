@@ -23,6 +23,8 @@ class Server:
     def __init__(self):
         self.calls = []
         self.mode = 'good'
+        self.pause_completion = None
+        self.translation = '测试中文'
         owner = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -40,22 +42,36 @@ class Server:
                     models = [] if owner.mode == 'missing-model' else ['same-model','other-model']
                     obj = {'models':[{'name':m} for m in models]} if self.path == '/api/tags' else {'data':[{'id':m} for m in models]}
                 else:
-                    schema = payload.get('format') or payload['response_format']['json_schema']['schema']
+                    if owner.pause_completion:
+                        entered, release = owner.pause_completion
+                        entered.set()
+                        if not release.wait(timeout=20):
+                            raise RuntimeError('Timed out waiting for the cancellation test')
+                        return
+                    visual = 'structured_outputs' in payload
+                    schema = (payload['structured_outputs']['json'] if visual else
+                              payload.get('format') or payload['response_format']['json_schema']['schema'])
                     ids = schema['properties']['translations']['required']
-                    context = json.loads(payload['messages'][1]['content'].removesuffix('\n/no_think'))
+                    message = payload['messages'][1]['content']
+                    context = json.loads(message[0]['text'] if visual else message.removesuffix('\n/no_think'))
                     sources = {b['id']:b['ja'] for b in context['page']}
-                    translations = {key:'测试中文' for key in ids}
+                    translations = {key:owner.translation for key in ids}
                     if owner.mode == 'partial':
                         translations.pop(ids[0],None)
                     elif owner.mode == 'placeholder':
                         translations[ids[0]] = '待翻译'
                     elif owner.mode == 'echo':
                         translations[ids[0]] = sources[ids[0]]
+                    elif owner.mode == 'punctuation-echo':
+                        translations[ids[0]] = '「' + sources[ids[0]] + '！」'
                     elif owner.mode == 'long':
                         translations[ids[0]] = '超长'*1000
                     elif owner.mode == 'lines':
                         translations = {key:'第一句\n第二句' for key in ids}
-                    content = json.dumps({'translations':translations},ensure_ascii=False)
+                    body = {'translations':translations}
+                    if visual:
+                        body['source_suggestions'] = {key: '' for key in ids}
+                    content = json.dumps(body, ensure_ascii=False)
                     if owner.mode == 'duplicate':
                         content = '{"translations":{' + json.dumps(ids[0])+':"第一条",'+json.dumps(ids[0])+':"第二条"}}'
                     elif owner.mode == 'duplicate-row':
@@ -89,32 +105,129 @@ class Server:
         self.thread.join()
 
 
-def clear_pending_warnings(snapshot, previous_blocks, *, refresh_diagnostics=True):
-    """Remove warnings inherited from the previous model on reset blocks."""
-    removed = 0
-    for block in snapshot['blocks']:
-        prior = previous_blocks.get(block['id'], {})
-        if (not block.get('edited') and not block.get('translation') and not block.get('error')
-                and not block.get('dialogue_translation_complete')
-                and 'quality_warnings' in prior and block.get('quality_warnings') == prior['quality_warnings']):
-            removed += len(block.pop('quality_warnings'))
-    if refresh_diagnostics and removed:
-        snapshot['diagnostics']['translation']['quality_warnings'] -= removed
+def copy_fields(target, source, fields):
+    for field in fields:
+        if field in source:
+            target[field] = copy.deepcopy(source[field])
+        else:
+            target.pop(field, None)
 
 
-def expect_model_change(page, trace):
-    if not trace['saves'] or page.get('translation_config') == trace['page'].get('translation_config'):
+def sync_retranslation_diagnostics(page, sync):
+    sync(page)
+    blocks = {block['id']: block for block in page['blocks']}
+    failed = {key for key, block in blocks.items() if block.get('error') or block.get('retranslation_error')}
+    dialogues = page.get('dialogues', [])
+    issues = [d for d in dialogues if d.get('translation_error') or failed.intersection(d['block_ids'])]
+    assigned = {key for d in dialogues for key in d['block_ids']}
+    diagnostics = page['diagnostics']
+    diagnostics['translation'].update(errors=len(failed), failed_dialogues=len(issues),
+        pending_dialogues=sum(not d['translation_complete'] and d not in issues for d in dialogues))
+    diagnostics['failures']['translation'] = len(issues) + len(failed - assigned)
+
+
+def expect_retranslation(page, trace, *, sync, block_id, refresh_overlay=None, vision=False):
+    """Apply the new commit rules to the baseline's independently generated responses."""
+    events = trace['metrics']
+    if not events:
+        if trace['error'] is None and trace['page'].get('structure'):
+            sync_retranslation_diagnostics(trace['page'], sync)
         return
-    previous_blocks = {block['id']: block for block in page['blocks']}
-    previous_dialogues = {dialogue['id']: dialogue for dialogue in page.get('dialogues', [])}
-    for snapshot in [*trace['saves'], trace['page']]:
-        clear_pending_warnings(snapshot, previous_blocks)
+
+    final = trace['page']
+    wanted = final.get('translation_config')
+    if vision and block_id is not None:
+        selected = next(block for block in final['blocks'] if block['id'] == block_id)
+        wanted = selected.get('translation_config_override', wanted)
+    assert wanted is not None
+    changing = page.get('translation_config') != wanted
+    # The baseline emitted a destructive reset before the first response. Its
+    # per-response snapshots and final ordinary save still describe the replies.
+    batch_count = len(events)
+    save_count = batch_count + (0 if vision else 1)
+    assert len(trace['saves']) in (save_count, save_count + 1)
+    trace['saves'] = trace['saves'][-save_count:]
+    batches = trace['saves'][:batch_count]
+    before = {b['id']: b for b in page['blocks']}
+    prior_dialogues = {d['id']: d for d in page.get('dialogues', [])}
+    translation_fields = ('translation', 'error', 'quality_warnings', 'vision_source',
+                          'translation_config_override', 'retranslation_error')
+
+    responses = {}
+    for event, snapshot in zip(events, batches):
+        ids = set(event['batch_ids'])
+        if event.get('unit') == 'dialogues':
+            ids = {key for d in snapshot['dialogues'] if d['id'] in ids for key in d['block_ids']}
+        for block in snapshot['blocks']:
+            if block['id'] in ids:
+                responses[block['id']] = block.get('error') or ''
+    finished = block_id is None and all(not reason for reason in responses.values())
+
+    received = set()
+    replaced_as_blocks = set()
+    for index, snapshot in enumerate([*trace['saves'], final]):
+        if index < batch_count:
+            event = events[index]
+            if event.get('unit') == 'dialogues':
+                received.update(key for d in snapshot['dialogues'] if d['id'] in event['batch_ids']
+                                for key in d['block_ids'])
+            else:
+                received.update(event['batch_ids'])
+                replaced_as_blocks.update(key for key in event['batch_ids'] if not responses[key])
+        promoted = finished and index >= (batch_count - 1 if vision else batch_count)
+        if not promoted:
+            copy_fields(snapshot, page, ('model', 'translation_config'))
+        for block in snapshot['blocks']:
+            key = block['id']
+            prior = before[key]
+            if key not in received:
+                copy_fields(block, prior, translation_fields)
+            elif reason := responses[key]:
+                copy_fields(block, prior, translation_fields)
+                field = 'retranslation_error' if prior.get('translation') and not prior.get('error') else 'error'
+                block[field] = reason
+            else:
+                block.pop('retranslation_error', None)
+                block.pop('translation_config_override', None)
+                if changing and not promoted:
+                    block['translation_config_override'] = wanted
         for dialogue in snapshot.get('dialogues', []):
-            warnings = dialogue.get('quality_warnings')
-            prior = previous_dialogues.get(dialogue['id'], {})
-            if warnings and not dialogue.get('full_translation') and warnings == prior.get('quality_warnings'):
-                snapshot['diagnostics']['translation']['dialogue_quality_warnings'] -= len(warnings)
-                dialogue['quality_warnings'] = []
+            if replaced_as_blocks.intersection(dialogue['block_ids']):
+                for field in ('full_translation', 'mapping', 'mapping_status', 'translation_error',
+                              'translation_config', 'quality_warnings'):
+                    dialogue.pop(field, None)
+            elif dialogue.get('translation_error') and any(
+                    before[key].get('translation') and not before[key].get('error')
+                    for key in dialogue['block_ids'] if key in received):
+                copy_fields(dialogue, prior_dialogues.get(dialogue['id'], {}), ('translation_error',))
+        if refresh_overlay is not None:
+            refresh_overlay(snapshot)
+        sync_retranslation_diagnostics(snapshot, sync)
+
+
+def assert_mixed_replacement(previous, result, replacement_text, reason):
+    """Check a mixed reply against the original cached text and actual producer."""
+    assert result['model'] == previous['model'] == 'same-model'
+    assert result['translation_config'] == previous['translation_config']
+    states = {'manual': 0, 'failed': 0, 'replaced': 0}
+    for before, after in zip(previous['blocks'], result['blocks'], strict=True):
+        assert before['id'] == after['id'] and before['source'] == after['source']
+        if before.get('edited'):
+            states['manual'] += 1
+            assert after['translation'] == before['translation']
+            assert after.get('translation_config_override') == before.get('translation_config_override')
+            assert 'retranslation_error' not in after
+        elif after.get('retranslation_error'):
+            states['failed'] += 1
+            assert after['retranslation_error'] == reason
+            for field in ('translation', 'error', 'quality_warnings', 'vision_source', 'translation_config_override'):
+                assert before.get(field) == after.get(field)
+        else:
+            states['replaced'] += 1
+            assert after['translation'] == replacement_text != before['translation']
+            assert after['error'] == ''
+            assert after['translation_config_override'] == {**previous['translation_config'], 'model': 'other-model'}
+    assert states == {'manual': 1, 'failed': 1, 'replaced': 1}
 
 
 def main():
@@ -167,7 +280,9 @@ def main():
             if mode == 'missing-model':
                 # Validation fails before publishing any changes to the page.
                 expected['page'] = copy.deepcopy(page)
-            expect_model_change(page, expected)
+            refresh_overlay = None if image is None else lambda snapshot: old._overlay.ensure_page_overlays(snapshot, image=image)
+            expect_retranslation(page, expected, sync=old._structure.sync_dialogue_translations,
+                                 block_id=block_id, refresh_overlay=refresh_overlay)
             endpoint.calls=[]
             proc=subprocess.run([str(binary),'translation-probe','--requests',str(path)],capture_output=True,text=True,timeout=90)
             prefix.with_suffix('.stderr.log').write_text(proc.stderr)
@@ -228,9 +343,16 @@ def main():
         current=run(current,provider='omlx',endpoint=other,model='other-model',unit='dialogues')
         run(current,provider='omlx',endpoint=other,model='other-model',unit='blocks')
         failed=run(simple,mode='partial')
-        run(failed,block_id='1')
+        failed_id = next(b['id'] for b in failed['blocks'] if b.get('retranslation_error'))
+        run(failed,block_id=failed_id)
         run(failed,block_id='unknown')
         run(failed,block_id='2')
+        previous = run({**simple, 'blocks': simple['blocks'][:3]})
+        server.translation = '另一个模型的译文'
+        mixed = run(previous, model='other-model', mode='placeholder')
+        assert_mixed_replacement(previous, mixed, server.translation,
+                                 '模型返回了占位文字，没有提供实际译文')
+        server.translation = '测试中文'
         run({'blocks':[]})
         run({'blocks':[{'id':'1','source':'ん','translation':'','overlay':'skip'}]})
         run({'blocks':[{'id':'1','source':'私','translation':'我','edited':True}]})

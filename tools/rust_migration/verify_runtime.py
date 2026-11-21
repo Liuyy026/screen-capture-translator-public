@@ -199,7 +199,15 @@ def main():
         assert shown['blocks'][0]['error'] == '模型返回了占位文字，没有提供实际译文'
         assert warning_path.read_bytes() == stored
         warning_path.write_bytes(before)
-        passed('placeholder display warning preserves stored OCR and translation')
+        for block in value['blocks']:
+            block['translation'] = '「' + block['source'] + '！」'
+        warning_path.write_text(json.dumps(value))
+        stored = warning_path.read_bytes()
+        shown = client.call('load_page', image=pages[1]['image'], mode='vision')['page']['blocks']
+        assert '原样返回' in shown[0]['error'] and not shown[1]['error']
+        assert warning_path.read_bytes() == stored
+        warning_path.write_bytes(before)
+        passed('display flags placeholders and punctuation echoes while preserving manual text and stored data')
         broken = client.call('process', images=[str(output/'missing.webp'), pages[1]['image']],
                              operation='ocr', mode='vision', model='unused')
         assert [p['ok'] for p in broken['pages']] == [False, True]
@@ -243,12 +251,101 @@ def main():
             translated = client.call('load_page', image=image, mode='text')['page']
             assert translated['blocks'][0]['translation'] == '测试中文'
             assert translated['blocks'][1]['translation'] == '保留手改'
-            before = len([c for c in server.calls if c['method']=='POST'])
-            assert client.call('process', **options, retry=True, block_id='1')['pages'][0]['ok']
-            assert len([c for c in server.calls if c['method']=='POST']) == before+1
+            visible = client.call('load_page', image=image, mode='text')
+            manual = client.call('edit', cache=visible['cache'], revision=visible['revision'], block_id='2',
+                                 values={'translation': '另一窗口刚保存的定稿', 'edited': True})
+            retry = dict(options, retry=True, block_id='2', cache=visible['cache'])
+            cache = Path(visible['cache'])
+            saved = cache.read_bytes()
+            server.calls.clear()
+            missing = client.call('process', **retry)['pages'][0]
+            stale = client.call('process', **retry, revision=visible['revision'])['pages'][0]
+            assert not missing['ok'] and not stale['ok'] and stale['code'] == 'page_revision_changed'
+            # The file at this path originally had the same bytes as the visible page.
+            alias = output/'replaced.png'
+            alias.write_bytes(Path(image).read_bytes())
+            original = client.call('load_page', image=str(alias), mode='text')
+            alias.write_bytes(Path(pages[1]['image']).read_bytes())
+            replacement = client.call('load_page', image=str(alias), mode='text')
+            replacement_file = Path(replacement['cache'])
+            replacement_bytes = replacement_file.read_bytes()
+            changed_image = client.call('process', **dict(retry, images=[str(alias)]),
+                                        revision=original['revision'])['pages'][0]
+            assert not changed_image['ok'] and changed_image['code'] == 'page_revision_changed'
+            assert cache.read_bytes() == saved and replacement_file.read_bytes() == replacement_bytes
+            assert not server.calls
+
+            server.mode = 'http-error'
+            failed = client.call('process', **retry, revision=manual['revision'])['pages'][0]
+            assert not failed['ok'] and cache.read_bytes() == saved
+            server.mode = 'good'
+            assert client.call('process', **retry, revision=manual['revision'])['pages'][0]['ok']
             final = client.call('load_page', image=image, mode='text')['page']
-            assert final['blocks'][1]['translation'] == '保留手改'
-        passed('loopback translation and per-block retry preserve manual edits')
+            assert final['blocks'][1]['translation'] == '测试中文' and not final['blocks'][1]['edited']
+        passed('single-block retry rejects obsolete or missing snapshots and commits only a successful explicit replacement')
+
+        with Server() as server:
+            for mode, source in [('text', image), ('vision', pages[1]['image'])]:
+                options = dict(images=[source], operation='translate', mode=mode, model='same-model',
+                               provider='omlx', base_url=server.url)
+                server.translation = '原模型的译文'
+                assert client.call('process', **options)['pages'][0]['result']['issues'] == 0
+                original = client.call('load_page', image=source, mode=mode)['page']['blocks']
+                prior = {b['id']: b['translation'] for b in original}
+                next_model = dict(options, model='other-model')
+                server.translation = '新模型的译文'
+                entered, release = threading.Event(), threading.Event()
+                server.pause_completion = entered, release
+                try:
+                    job = client.send('process', **next_model)
+                    assert entered.wait(15), 'No model request reached the loopback server'
+                    assert client.call('cancel', target=job)['cancelled']
+                    assert client.wait(job, timeout=15)['event'] == 'cancelled'
+                finally:
+                    release.set()
+                    server.pause_completion = None
+                def load_blocks():
+                    return client.call('load_page', image=source, mode=mode)['page']['blocks']
+                assert {b['id']: b['translation'] for b in load_blocks()} == prior
+                server.mode = 'http-error'
+                failed = client.call('process', **next_model)['pages'][0]
+                blocks = load_blocks()
+                assert failed['ok'] and failed['result']['issues'] == sum(not b['edited'] for b in original)
+                assert {b['id']: b['translation'] for b in blocks} == prior
+                assert all(not b['error'] and (b['edited'] or b.get('retranslation_error')) for b in blocks)
+                server.mode = 'punctuation-echo'
+                mixed = client.call('process', **next_model)['pages'][0]
+                assert mixed['ok'] and mixed['result']['issues'] == 1
+                partial = load_blocks()
+                pending = [b['id'] for b in partial if b.get('retranslation_error')]
+                assert len(pending) == 1
+                for b in partial:
+                    retained = b['id'] in pending or b['edited']
+                    assert b['translation'] == (prior[b['id']] if retained else server.translation)
+                    assert not b['error']
+                server.mode = 'good'
+                server.calls.clear()
+                retry = client.call('process', **next_model)['pages'][0]
+                assert retry['ok'] and retry['result']['issues'] == 0
+                posts = [c['payload'] for c in server.calls if c['method'] == 'POST']
+                assert len(posts) == 1
+                schema = (posts[0]['structured_outputs']['json'] if mode == 'vision'
+                          else posts[0]['response_format']['json_schema']['schema'])
+                assert schema['properties']['translations']['required'] == pending
+                for b in load_blocks():
+                    assert not b.get('retranslation_error')
+                    assert b['translation'] == (prior[b['id']] if b['edited'] else server.translation)
+                server.calls.clear()
+                assert client.call('process', **next_model)['pages'][0]['result']['issues'] == 0
+                assert not server.calls
+                if mode == 'vision':
+                    shown = client.call('load_page', image=source, mode=mode)
+                    single = client.call('process', **next_model, retry=True, block_id=pending[0],
+                                         cache=shown['cache'], revision=shown['revision'])['pages'][0]
+                    assert single['ok']
+                    stored = client.call('load_page', image=source, mode=mode)['page']
+                    assert stored['vision_runs'][-1]['image'] == source
+        passed('model changes retain readable translations through cancellation and failure, then resume in both modes')
         client.process.stdin.write('{bad json}\n'); client.process.stdin.flush()
         assert client.wait(None)['event'] == 'error'
         assert client.call('health')['protocol'] == 1

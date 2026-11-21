@@ -16,6 +16,7 @@ struct TextBlock: Codable, Identifiable {
     var source: String
     var translation: String
     var error: String
+    var retranslation_error: String?
     var vertical: Bool
     var edited: Bool
     var vision_source: String?
@@ -25,6 +26,12 @@ struct TextBlock: Codable, Identifiable {
     var text_kind: String?
     var ocr_review: OCRReview?
     var ocr_confirmed: Bool?
+
+    var translationIssue: String? {
+        if !error.isEmpty { return error }
+        if let reason = retranslation_error, !reason.isEmpty { return "重译未完成，已保留旧译文。\(reason)" }
+        return nil
+    }
 
     var keepsOriginal: Bool { keep_original == true }
     var needsOCRReview: Bool { !keepsOriginal && ocr_review?.status == "suspect" && ocr_confirmed != true && !edited }

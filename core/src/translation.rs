@@ -130,12 +130,51 @@ pub fn translation_error(value: &Value) -> String {
     }
 }
 
+fn kana(c: char) -> bool {
+    matches!(
+        c,
+        'ぁ'..='ゖ' | 'ゝ'..='ゟ' | 'ァ'..='ヺ' | 'ヽ'..='ヿ'
+            | '\u{31f0}'..='\u{31ff}'
+            | '\u{ff66}'..='\u{ff6f}' | '\u{ff71}'..='\u{ff9d}'
+            | '\u{1b000}'..='\u{1b16f}'
+    )
+}
+
+fn without_dialogue_punctuation(value: &str) -> String {
+    const SENTENCE_MARKS: &str = "、。，．！？!?,.：:；;…‥⋯︙‼⁇⁈⁉—―\"'｡､";
+    let word_character =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ');
+    let mut chars = value.nfc().filter(|&c| !whitespace(c)).peekable();
+    let mut previous = None;
+    let mut dialogue = String::new();
+    while let Some(c) = chars.next() {
+        // Keep punctuation in decimals, times, and Latin identifiers, as well as
+        // symbols that may be part of the utterance (e.g. ー, +, %, or -).
+        let next = chars.peek().copied();
+        let inside_word = previous.is_some_and(word_character) && next.is_some_and(word_character);
+        let decimal = matches!(c, '.' | '．')
+            && next.is_some_and(|c| c.is_ascii_digit() || ('０'..='９').contains(&c));
+        let quotation_or_bracket = matches!(get_general_category(c),
+            Category::OpenPunctuation | Category::ClosePunctuation |
+            Category::InitialPunctuation | Category::FinalPunctuation);
+        if inside_word || decimal || !(quotation_or_bracket || SENTENCE_MARKS.contains(c)) {
+            dialogue.push(c);
+        }
+        previous = Some(c);
+    }
+    dialogue
+}
+
 pub fn same_as_source(source: &Value, translation: &Value) -> bool {
     let (Some(source), Some(translation)) = (source.as_str(), translation.as_str()) else {
         return false;
     };
-    let source = normalized(source, false);
-    !source.is_empty() && source == normalized(translation, false)
+    let plain_source = normalized(source, false);
+    !plain_source.is_empty()
+        && (plain_source == normalized(translation, false)
+            || (source.chars().any(kana)
+                && without_dialogue_punctuation(source)
+                    == without_dialogue_punctuation(translation)))
 }
 
 pub fn quality_warnings(source: &Value, translation: &Value) -> Vec<String> {
@@ -201,23 +240,37 @@ pub fn low_impact(source: &Value, has_region: bool) -> bool {
 }
 
 fn shared_hanzi_source(source: &Value) -> bool {
-    let Some(source) = source.as_str() else { return false };
-    source.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-        && !source.chars().any(|c| ('\u{3040}'..='\u{30ff}').contains(&c))
+    let Some(source) = source.as_str() else {
+        return false;
+    };
+    source
+        .chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        && !source
+            .chars()
+            .any(|c| ('\u{3040}'..='\u{30ff}').contains(&c) || kana(c))
 }
 
 pub fn accepted_vision_echo(block: &Value) -> bool {
-    array(&block["quality_warnings"]).iter().any(|v| v == SHARED_HANZI_WARNING)
+    array(&block["quality_warnings"])
+        .iter()
+        .any(|v| v == SHARED_HANZI_WARNING)
         && shared_hanzi_source(&block["source"])
         && same_as_source(&block["source"], &block["translation"])
 }
 
+fn protected_translation(block: &Value) -> bool {
+    truth(&block["edited"]) || keeps_original(block) || crate::ocr_review::suppressed(block)
+}
+
 pub fn audit_cache(page: &mut Value, block_id: Option<&str>) -> bool {
     let mut changed = false;
-    if let Some(blocks) = page["blocks"].as_array_mut() {
+    if let Some(blocks) = page.get_mut("blocks").and_then(Value::as_array_mut) {
         for block in blocks {
             if block_id.is_none_or(|id| text(&block["id"]) == id)
-                && truth(&block["translation"]) && !truth(&block["edited"]) && !keeps_original(block) && !crate::ocr_review::suppressed(block) {
+                && truth(&block["translation"])
+                && !protected_translation(block)
+            {
                 let mut reason = translation_error(&block["translation"]);
                 if reason.is_empty() && same_as_source(&block["source"], &block["translation"]) {
                     if accepted_vision_echo(block) {
@@ -233,6 +286,26 @@ pub fn audit_cache(page: &mut Value, block_id: Option<&str>) -> bool {
                     block["error"] = json!(reason);
                     changed = true;
                 }
+            }
+        }
+    }
+    let protected_ids: HashSet<_> = array(&page["blocks"])
+        .iter()
+        .filter(|block| protected_translation(block))
+        .map(|block| text(&block["id"]))
+        .collect();
+    if let Some(dialogues) = page.get_mut("dialogues").and_then(Value::as_array_mut) {
+        for dialogue in dialogues {
+            let members = array(&dialogue["block_ids"]);
+            if block_id.is_none_or(|id| members.iter().any(|member| text(member) == id))
+                && !members
+                    .iter()
+                    .any(|member| protected_ids.contains(&text(member)))
+                && dialogue["translation_error"] != ECHO_ERROR
+                && same_as_source(&dialogue["source"], &dialogue["full_translation"])
+            {
+                dialogue["translation_error"] = json!(ECHO_ERROR);
+                changed = true;
             }
         }
     }
@@ -474,4 +547,104 @@ pub fn protocol_probe(request: &Value) -> Result<Value> {
         }
         _ => bail!("unknown translation probe"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kana_echo_ignores_dialogue_punctuation_and_whitespace() {
+        for (source, translation) in [
+            ("明日は晴れる！？", "「明日は、晴れる。」"),
+            ("こ ん に ち は", "こんにちは—"),
+            ("待って…", "［待って⁉］"),
+            ("反応は、ばっちり", "反応はは\u{3099}っちり。"),
+            ("機能はﾃｽﾄ中｡", "機能はﾃｽﾄ中。"),
+        ] {
+            assert!(
+                same_as_source(&json!(source), &json!(translation)),
+                "{source} / {translation}"
+            );
+        }
+        for (source, translation) in [
+            ("テストー", "テスト"),
+            ("ばん!", "ぱん!"),
+            ("テストA+B", "テストAB"),
+            ("テストA-1", "テストA1"),
+            ("テスト1.0", "テスト10"),
+            ("テスト.5", "テスト5"),
+            ("テスト50%", "テスト50"),
+            ("テストA。", "テストＢ。"),
+            ("テストA。", "テストa!"),
+        ] {
+            assert!(
+                !same_as_source(&json!(source), &json!(translation)),
+                "{source} / {translation}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_parsers_reject_kana_echo_with_new_punctuation() -> Result<()> {
+        let sources = json!({
+            "kana":"明日は晴れる!?",
+            "halfwidth":"試作ﾃｽﾄ",
+            "shared":"当然",
+            "punctuation":"！？",
+            "translated":"晴れですね！",
+        });
+        let expected: Vec<_> = sources.as_object().unwrap().keys().cloned().collect();
+        let response = json!({"translations":{
+            "kana":"『明日は晴れる』",
+            "halfwidth":"試作ﾃｽﾄ",
+            "shared":"当然",
+            "punctuation":"?!",
+            "translated":"今天是晴天呢！",
+        }});
+        for vision in [false, true] {
+            let (found, errors) = parse_rows(&response, &expected, Some(&sources), vision)?;
+            assert_eq!(errors["kana"], ECHO_ERROR);
+            assert_eq!(errors["halfwidth"], ECHO_ERROR);
+            assert_eq!(found["punctuation"], "?!");
+            assert_eq!(found["translated"], "今天是晴天呢！");
+            if vision {
+                assert_eq!(found["shared"], "当然");
+            } else {
+                assert_eq!(errors["shared"], ECHO_ERROR);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_flags_automatic_echoes_and_respects_scope_and_protected_content() {
+        let mut page = json!({
+            "blocks":[
+                {"id":"auto","source":"試しです。","translation":"試しです!?"},
+                {"id":"edited","source":"試しです。","translation":"試しです!?","edited":true},
+                {"id":"original","source":"試しです。","translation":"試しです!?","keep_original":true},
+                {"id":"suspect","source":"試しです。","translation":"試しです!?","ocr_review":{"status":"suspect"}},
+                {"id":"shared","source":"当然","translation":"当然","error":ECHO_ERROR,"quality_warnings":[SHARED_HANZI_WARNING]},
+                {"id":"whole"},
+            ],
+            "dialogues":[
+                {"id":"full","block_ids":["whole"],"source":"今のところ\n試しです。","full_translation":"今のところ試しです!?"},
+                {"id":"manual","block_ids":["edited","auto"],"source":"試しです。","full_translation":"試しです!?"},
+            ],
+        });
+        let original = page.clone();
+        assert!(audit_cache(&mut page, Some("whole")));
+        assert_eq!(page["dialogues"][0]["translation_error"], ECHO_ERROR);
+        assert_eq!(page["blocks"], original["blocks"]);
+
+        assert!(audit_cache(&mut page, None));
+        assert_eq!(page["blocks"][0]["error"], ECHO_ERROR);
+        assert_eq!(page["blocks"][4]["error"], "");
+        for index in 1..4 {
+            assert_eq!(page["blocks"][index], original["blocks"][index]);
+        }
+        assert_eq!(page["dialogues"][1], original["dialogues"][1]);
+        assert!(!audit_cache(&mut page, None));
+    }
 }

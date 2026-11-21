@@ -79,7 +79,12 @@ mod tests{
     async fn stop_and_cancel_only_owned_process_groups()->Result<()>{
         let dir=tempfile::tempdir()?;
         let executable=dir.path().join("fake-ollama");
-        std::fs::write(&executable,"#!/bin/sh\nsleep 60 &\necho $! > \"$OLLAMA_MODELS/runner.pid\"\nwait\n")?;
+        std::fs::write(&executable, r#"#!/bin/sh
+sleep 60 &
+echo $! > "$OLLAMA_MODELS/runner.pid.tmp"
+mv "$OLLAMA_MODELS/runner.pid.tmp" "$OLLAMA_MODELS/runner.pid"
+wait
+"#)?;
         std::fs::set_permissions(&executable,std::fs::Permissions::from_mode(0o700))?;
         for cancel in [false,true]{
             let process=OwnedProcess::spawn(&executable,dir.path())?;

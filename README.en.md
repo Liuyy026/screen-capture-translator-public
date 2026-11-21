@@ -123,14 +123,16 @@ Upstream components include [Mokuro](https://github.com/kha-white/mokuro), [Mang
 
 Japanese-to-Chinese translation on a Mac Studio (M5 Max, 64 GB) with Koma v0.22, macOS 27.0.1 and oMLX 0.7.3, tested on November 21, 2026. The two 4-bit models were `Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-MLX-4bit` (9B) and `Qwen3.8-27B-Uncensored-MLX-4bit` (27B).
 
-| Model | Images sent | Total for 10 pages | Median per page | Generation (tokens/s) | Translations delivered / 81 | Rated faithful / 79 |
+| Model | Images sent | Total for 10 pages | Median per page | Generation (tokens/s) | Delivered after recheck / 81 | Rated faithful / 79 |
 |---|---|---:|---:|---:|---:|---:|
-| 9B | Current page | 37.89 s | 3.64 s | 73.45 | 46/81 | 22/79 |
+| 9B | Current page | 37.89 s | 3.64 s | 73.45 | 34/81 | 22/79 |
 | 9B | Previous + current | 59.90 s | 5.03 s | 72.14 | 76/81 | 49/79 |
 | 27B | Current page | 93.08 s | 7.80 s | 26.75 | 81/81 | 67/79 |
 | 27B | Previous + current | 140.15 s | 10.80 s | 26.52 | 81/81 | 70/79 |
 
-With the current page alone, 9B took 59.3% less time than 27B. Koma rejected 35 of its translations because they repeated the Japanese source. Adding the previous page cost 9B an average of 2.20 s per page and reduced these rejections to five. The added cost for 27B averaged 4.71 s per page. With both images, 9B took 57.3% less time than 27B.
+**Why did the count change from 46/81 to 34/81?** In the 9B current-page run, v0.22 rejected 35 of the 81 outputs for repeating the Japanese source. We rechecked the saved outputs from all four runs with the updated validator. Of the 46 blocks originally counted as delivered in this run, 12 copied the Japanese text and changed only the punctuation. Excluding them brings the count to 34/81. All 22 blocks originally rated faithful still passed, and the delivery counts for the other three runs matched the original results. Timings, generation speeds and blind ratings all come from the original v0.22 benchmark.
+
+With the current page alone, 9B took 59.3% less time than 27B. Adding the previous page cost 9B an average of 2.20 s per page and raised delivery from 34/81 to 76/81. For 27B, the extra image cost 4.71 s per page on average, with 81/81 delivered in both modes. With both images, 9B took 57.3% less time than 27B.
 
 **Method.** All four runs used the same five pages from each of two manga, with frozen OCR, coordinates and target blocks. In the two-image mode, Koma sent the previous page first and translated only the current page. Each model was loaded separately and warmed up. Each page was timed once per mode, alternating which mode ran first. Timing included image encoding, the local model request and translation parsing. Model loading, OCR, upscaling, display layout and export were outside the timed interval. Generation speed is total output tokens divided by total decoding time. Both models had the same input-cache hit rates, 21.9% with one image and 5.1% with two.
 

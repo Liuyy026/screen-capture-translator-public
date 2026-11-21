@@ -1,6 +1,6 @@
 //! Bounded JSONL application service. Rust owns processing queues, cancellation,
 //! per-page retries, model lifetime and cache writes. No credentials are logged.
-use crate::{persistence,protocol,runtime::{Runtime,ProcessOptions},service::TranslationService,translate_pipeline::Observer};
+use crate::{persistence,protocol,runtime::{Runtime,ProcessOptions,PageVersion},service::TranslationService,translate_pipeline::Observer};
 use anyhow::{Result,Context,ensure,bail};
 use serde_json::{Value,json};
 use std::{collections::HashMap,path::{Path,PathBuf},sync::Arc};
@@ -107,16 +107,26 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let images=r["images"].as_array().context("missing images")?;
             ensure!(!images.is_empty()&&images.len()<=4096,"invalid page queue size");
             let operation = r["operation"].as_str().unwrap_or("both");
+            let block_id = r["block_id"].as_str();
+            let retry = r["retry"].as_bool().unwrap_or(false);
+            ensure!(r["block_id"].is_null() || block_id.is_some_and(|id| !id.is_empty()), "无效的单句对白编号");
+            ensure!(r["retry"].is_null() || r["retry"].is_boolean(), "无效的单句重试选项");
+            if block_id.is_some() || retry {
+                ensure!(images.len() == 1 && matches!(operation, "translate" | "both"), "单句重试需要指定一页漫画并启用翻译");
+                ensure!(block_id.is_some(), "单句重试缺少对白编号");
+            }
             let processing = if operation == "enhance" {
                 None
             } else {
                 let service = service(r)?;
                 let options = ProcessOptions {
                     operation, mode: r["mode"].as_str().unwrap_or("text"),
-                    model: required(r, "model")?, block_id: r["block_id"].as_str(),
+                    model: required(r, "model")?, block_id,
+                    expected_page: r["cache"].as_str().zip(r["revision"].as_str())
+                        .map(|(cache, revision)| PageVersion { cache: Path::new(cache), revision }),
                     unit: r["unit"].as_str().unwrap_or("blocks"),
                     batch_size: r["batch_size"].as_u64().unwrap_or(8) as usize,
-                    retry: r["retry"].as_bool().unwrap_or(false),
+                    retry,
                     reuse_ocr: false, previous_image: None,
                 };
                 Some((options, service))
@@ -130,27 +140,16 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                     let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
                     ensure!(processing.is_some() || settings.engine != "off", "请选择超分引擎");
                     let source = Path::new(image);
-                    let enhanced = runtime.sr.prepare(source, &settings).await;
                     if let Some((options, service)) = &processing {
                         let cache = runtime.cache_for(source, options.mode)?;
                         let mut events = Events { id: job.id.clone(), image: image.into(), cache: cache.clone(), output: output.clone() };
-                        let (effective, warning) = match enhanced {
-                            Ok(path) => (path, None),
-                            Err(error) => {
-                                let warning = service.safe_error(error);
-                                events.progress(&format!("超分失败，使用原图继续处理：{warning}"))?;
-                                (source.to_owned(), Some(warning))
-                            },
-                        };
                         let mut options = options.for_queue_page(index, images.len(), &settings.engine);
                         if options.mode == "vision" && matches!(options.operation, "both" | "translate") {
                             options.previous_image = previous_for_page(r, image, images.len())?;
                         }
-                        let mut result = runtime.process_page(source, &effective, &cache, &options, service, &mut events).await?;
-                        if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
-                        Ok(result)
+                        runtime.process_page(source, &settings, &cache, &options, service, &mut events).await
                     } else {
-                        Ok(json!({"skipped":enhanced? == source}))
+                        Ok(json!({"skipped":runtime.sr.prepare(source, &settings).await? == source}))
                     }
                 }.await;
                 if page_result.is_err() && operation == "both" {
@@ -159,11 +158,14 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                 let result=match page_result{
                     Ok(value)=>json!({"image":image,"ok":true,"result":value}),
                     Err(error) => {
+                        let changed = error.is::<crate::runtime::PageRevisionChanged>();
                         let message = match &processing {
                             Some((_, service)) => service.safe_error(error),
                             None => error.to_string(),
                         };
-                        json!({"image":image,"ok":false,"error":message})
+                        let mut page = json!({"image":image,"ok":false,"error":message});
+                        if changed { page["code"] = json!("page_revision_changed"); }
+                        page
                     }
                 };
                 let _=output.send(json!({"id":job.id,"event":"page_finished","done":index+1,"total":images.len(),"page":result})).await;

@@ -644,7 +644,17 @@ private struct NativeLoadedPage: Decodable {
         let jobConnection = connection
         var options: [String: Any] = ["mode": processingMode, "model": model, "provider": jobConnection.provider,
             "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
-        if let blockID { options["block_id"] = blockID; options["retry"] = true }
+        if let blockID {
+            guard !batch, let cacheURL, let pageRevision else {
+                error = "请重新载入本页，再选择要重译的对白。"
+                reloadPage()
+                return
+            }
+            options["block_id"] = blockID
+            options["retry"] = true
+            options["cache"] = cacheURL.path
+            options["revision"] = pageRevision
+        }
         defaults.set(model, forKey: "translationModel." + jobConnection.identity)
         runQueue(batch ? files : [selected], operation: operation, options: options)
     }
