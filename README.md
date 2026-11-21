@@ -122,3 +122,20 @@ docs/                   架构、迁移和验收记录
 ```
 
 使用 [Mokuro](https://github.com/kha-white/mokuro)、[Manga OCR](https://github.com/kha-white/manga-ocr)、[Comic Text Detector](https://github.com/dmMaze/comic-text-detector)、[IOPaint / Anime LaMa](https://github.com/Sanster/IOPaint)、[OpenCV](https://github.com/opencv/opencv)、[Ollama](https://github.com/ollama/ollama) 等上游组件，各自遵循其许可证。Rust 图片兼容实现的来源与 Pillow 许可见 [第三方说明](core/THIRD_PARTY.md)。模型和依赖不纳入 Git。
+
+## 漫画视觉翻译性能测试
+
+在同一台 Mac Studio（M5 Max，64 GB）上，用 Koma v0.22、macOS 27.0.1 和 oMLX 0.7.3 对两款 4-bit 模型做日译中测试。9B 为 `Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-MLX-4bit`，27B 为 `Qwen3.8-27B-Uncensored-MLX-4bit`。测试日期为 2026-11-21。
+
+| 模型 | 发送的图片 | 10 页总耗时 | 单页中位数 | 生成速度（token/秒） | 交付译文 / 81 框 | 盲评忠实 / 79 框 |
+|---|---|---:|---:|---:|---:|---:|
+| 9B | 仅本页 | 37.89 秒 | 3.64 秒 | 73.45 | 46/81 | 22/79 |
+| 9B | 前页＋本页 | 59.90 秒 | 5.03 秒 | 72.14 | 76/81 | 49/79 |
+| 27B | 仅本页 | 93.08 秒 | 7.80 秒 | 26.75 | 81/81 | 67/79 |
+| 27B | 前页＋本页 | 140.15 秒 | 10.80 秒 | 26.52 | 81/81 | 70/79 |
+
+仅本页时，9B 比 27B 少用时 59.3%，但有 35 框原样返回日文，被 Koma 判为未交付。加前页后，9B 平均每页多用 2.20 秒，原样返回降到 5 框。27B 平均每页多用 4.71 秒。双图模式下，9B 比 27B 少用时 57.3%。
+
+**测试方法。** 两部漫画各取 5 页，四组共用同一份 OCR、坐标和目标文字。双图按前页、本页顺序发送，只译本页。每个模型单独加载，预热后每页每种模式各跑一次，两种模式交替先后。计时包含图片编码、本地模型请求和译文解析。模型加载、OCR、超分、界面排版与导出均在计时范围外。生成速度按总输出 token 数除以解码秒数计算。两模型的输入缓存命中率相同，单图为 21.9%，双图为 5.1%。
+
+四组均关闭思考和 DFlash，温度 0.15，输出上限 8192 tokens。每组 14/14 批实际启用 JSON Schema 约束并正常结束，思考 token 均为 0。交付按 Koma 接受并写入的非空译文计。排除两个背景误识别框后，模型评阅者在隐藏模型与输入模式的条件下对照原图评阅 79 框，含义和指代都保留才计为忠实，未交付也计入分母。单次小样本的耗时受输入缓存命中和实际生成长度影响。
