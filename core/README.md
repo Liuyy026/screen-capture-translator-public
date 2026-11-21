@@ -87,7 +87,9 @@ core/target/release/koma-core translate \
 
 ## 视觉翻译
 
-给上述 `translate` 命令加 `--vision` 即使用视觉流程；必须提供 `--image`，服务须为 oMLX。此模式使用固定 8 块一批及最长边 1775 像素的完整页 JPEG，不使用普通模式的对白单位和批大小选项。生成的识别修正建议保存在 `vision_source`，原 `source` 不自动替换。
+给上述 `translate` 命令加 `--vision` 即使用视觉流程。必须通过 `--image` 提供当前页，服务须为 oMLX。可选的 `--previous-image /path/to/previous-page.webp` 接收同章紧邻上一页的原图绝对路径，作为画面参照。`serve` 的 `process` 请求可通过 `previous_images` 按当前页路径提供对应的上一页路径。Mac 阅读器从章节第三张起提供该参照，前两张仅发送当前页。
+
+每批最多处理 8 个当前页文字块。每张完整页 JPEG 的最长边限制为 1775 像素。视觉请求关闭思考，输出上限为 8192 个 token，并要求 oMLX 按本批文字框编号强制生成严格的 JSON。生成的识别修正建议保存在 `vision_source`，原 `source` 由用户确认后更新。
 
 `vision-image --image /path/to/page.webp` 只生成模型输入图片，返回包含 JPEG data URL 和尺寸的 JSON，不调用任何模型。解码、EXIF 方向、颜色转换、缩放和 JPEG 编码均在原生核心内执行。Rust 缩放规则对照 Pillow，许可与来源见 [第三方说明](THIRD_PARTY.md)。CMYK 解码通过一个受限 C ABI 桥调用与 OpenCV 相同的 libjpeg，桥内没有业务流程。`core/build.rs` 使用任务目录里的头文件和静态库；自定义依赖根目录时，可对 `cargo.py` 设置 `KOMA_NATIVE_DEPS`。
 

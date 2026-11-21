@@ -281,13 +281,13 @@ pub async fn probe(request: &Value) -> Result<Value> {
             request["schema"].clone(),
         )),
         "vision_payload" => Ok(crate::translation::vision_payload(
-            &service,
             request["model"].as_str().unwrap_or("model"),
             &request["page"],
             crate::compat::array(&request["batch"]),
             request["image_url"]
                 .as_str()
                 .unwrap_or("data:image/jpeg;base64,test"),
+            request["previous_image_url"].as_str(),
         )),
         "block_payload" => {
             let ids: Vec<String> = serde_json::from_value(request["ids"].clone())?;

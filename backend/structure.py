@@ -237,7 +237,7 @@ def valid_block(b):
     return bool(text) and (bool(b.get("edited")) or (not b.get("error") and text != str(b.get("source") or "").strip()))
 
 
-def sync_dialogue_translations(page):
+def sync_dialogue_translations(page, *, block_validator=valid_block):
     by_id = {str(b.get("id")): b for b in page.get("blocks", [])}
     for b in by_id.values():
         b.pop("layout_fallback", None)
@@ -253,7 +253,7 @@ def sync_dialogue_translations(page):
                         and set(mapping) == {str(b["id"]) for b in members}
                         and all(not b.get("edited") and b.get("overlay") != "skip" for b in all_members)
                         and all(not b.get("error") and mapping[str(b["id"])] == b.get("translation", "") for b in members))
-        d["translation_complete"] = full_current or bool(members) and all(valid_block(b) for b in members)
+        d["translation_complete"] = full_current or bool(members) and all(block_validator(b) for b in members)
         d["translation"] = d["full_translation"] if full_current else "\n".join(str(b.get("translation") or "").strip() for b in members)
         for b in all_members:
             b["dialogue_translation"] = d["full_translation"] if full_current else ""
@@ -269,7 +269,7 @@ def sync_dialogue_translations(page):
                 if i in by_id:
                     by_id[i]["layout_fallback"] = "block"
     diag = page.setdefault("diagnostics", {})
-    diag["translation"] = {"translated_blocks": sum(valid_block(b) for b in by_id.values()),
+    diag["translation"] = {"translated_blocks": sum(block_validator(b) for b in by_id.values()),
                             "errors": sum(bool(b.get("error")) for b in by_id.values()),
                             "complete_dialogues": sum(d["translation_complete"] for d in page.get("dialogues", [])),
                             "quality_warnings": sum(len(b.get("quality_warnings", [])) for b in by_id.values()),

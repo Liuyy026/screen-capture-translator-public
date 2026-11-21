@@ -493,7 +493,8 @@ fn valid_block(b: &Value) -> bool {
     let translation = trim(&translation);
     !translation.is_empty()
         && (truth(&b["edited"])
-            || (!truth(&b["error"]) && translation != trim(&string_or_empty(&b["source"]))))
+            || (!truth(&b["error"]) && (translation != trim(&string_or_empty(&b["source"]))
+                || crate::translation::accepted_vision_echo(b))))
 }
 
 pub fn sync(page: &mut Value) -> Result<()> {

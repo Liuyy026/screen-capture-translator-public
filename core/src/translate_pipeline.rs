@@ -519,7 +519,7 @@ mod tests {
                 let mut page = original.clone();
                 let mut trace = Trace::default();
                 let result = if vision {
-                    crate::vision_pipeline::translate(&mut page, Path::new("unused.png"), None, "new",
+                    crate::vision_pipeline::translate(&mut page, Path::new("unused.png"), None, None, "new",
                         &service, None, &mut trace).await
                 } else {
                     let options = Options { model:"new", unit:"blocks", block_id:None, batch_size:8, image:None };

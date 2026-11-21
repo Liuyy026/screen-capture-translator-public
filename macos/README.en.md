@@ -26,7 +26,7 @@ macos/.venv/bin/python scripts/prepare_models.py
 python3 macos/scripts/setup_reading_model.py
 ```
 
-These commands download OCR/detection weights and the optional Anime LaMa restoration model (about 197 MiB). Configure an image-capable model in oMLX yourself for visual assistance. Runtime inference reads installed weights offline.
+These commands download OCR/detection weights and the optional Anime LaMa restoration model (about 197 MiB). For visual assistance, configure oMLX as described in the [visual assistance guide](#visual-assistance-omlx). Runtime inference reads installed weights offline.
 
 Alternatively, after preparing OpenCV, use `python3 macos/scripts/setup.py` to install Python dependencies, OCR, a project-local Ollama and Qwen3 4B, and build the candidate. That installer may start local Ollama to download the model. It does not install Rust or build OpenCV. Then run `python3 macos/scripts/setup_reading_model.py` for restoration weights. Existing oMLX users do not need the Ollama installer.
 
@@ -83,11 +83,17 @@ Use the settings UI to persist connections. Defaults are `http://127.0.0.1:8000/
 
 Rust only manages local Ollama processes it starts at the designated endpoint with no API key. Existing services and oMLX are not taken over. Application shutdown cleans up owned inference processes; model reuse can retain memory until release or exit.
 
+## Visual assistance (oMLX)
+
+In **Processing Settings**, choose **Visual Assistance** as the translation mode. Koma sends the current page image, OCR text and text coordinates to your configured oMLX service. Pages 1 and 2 send only the current page image. Starting on page 3, Koma also sends the previous page's original image from the same chapter as a reference. Page numbers follow chapter order for single-page processing, whole-chapter processing and individual retranslation. Translations and proposed OCR corrections apply only to the current page.
+
+Each batch handles up to eight text boxes, disables model reasoning, enforces a JSON schema for translations and OCR suggestions, and caps output at 8,192 tokens. Use an oMLX service and vision model that support multiple images, disabling reasoning and structured output. Text-only translation continues to use the existing workflow.
+
+Koma sends JPEG images with a maximum long edge of 1775 pixels and uses existing OCR boxes. Review and save any suggested OCR corrections you want to apply.
+
 ## Processing and layout
 
 Swift talks to the persistent Rust service through JSONL pipes. Rust owns task queues, cancellation, OCR page assembly, structure analysis, translation HTTP, codecs, persistence, contours, cleanup and background compositing. Python only runs installed CTD/Manga OCR/LaMa inference with required preprocessing. Swift retains Chinese layout and drawing. The old `backend/` and `macos/backend/` workers remain references, not candidate business entry points.
-
-Visual assistance sends the full page (JPEG, maximum long edge 1775 pixels), existing OCR and coordinates to an image-capable oMLX model in batches of up to eight blocks. Proposed source corrections require confirmation; no new OCR boxes are added automatically. Better translation quality is not guaranteed.
 
 Automatic layout normally uses horizontal Chinese text and measures glyph widths against each line's contour. It can choose vertical text for tall, narrow regions. The dialogue editor lets you set the direction explicitly. Connected bubbles, irregular shapes and narration receive bounded layouts. Pixel masks limit cleanup and local restoration; broad white strips are no longer used. Installed LaMa supports complex backgrounds; native fallback restoration is weaker. Reconstructed texture may contain artifacts and is not exact recovery of the original drawing.
 

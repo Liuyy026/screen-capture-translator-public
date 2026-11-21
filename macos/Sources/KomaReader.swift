@@ -743,9 +743,19 @@ private struct NativeLoadedPage: Decodable {
             for url in urls { pageProcessingErrors.removeValue(forKey: url) }
         }
         var values = options
-        values["images"] = urls.map(\.path)
+        let images = urls.map(\.path)
+        values["images"] = images
         values["operation"] = operation
         values["super_resolution"] = srSettings
+        if options["mode"] as? String == "vision", operation == "both" || operation == "translate" {
+            let requested = Set(images)
+            var previousImages: [String: String] = [:]
+            // The chapter starts with a cover. Its image is never used as context.
+            for (previous, current) in zip(files.dropFirst(), files.dropFirst(2)) where requested.contains(current.path) {
+                previousImages[current.path] = previous.path
+            }
+            if !previousImages.isEmpty { values["previous_images"] = previousImages }
+        }
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
         if enhancing { message = "正在准备整章超分…" }
         let request = UUID(); operationRequest = request

@@ -78,6 +78,9 @@ enum Operation {
         destination: PathBuf,
         #[arg(long)]
         image: Option<PathBuf>,
+        /// Original preceding page from this chapter, used only as visual context.
+        #[arg(long, requires = "vision")]
+        previous_image: Option<PathBuf>,
         #[arg(long)]
         status: Option<PathBuf>,
         #[arg(long)]
@@ -287,6 +290,7 @@ async fn main() -> Result<()> {
             cache,
             destination,
             image,
+            previous_image,
             status,
             metrics,
             model,
@@ -318,6 +322,7 @@ async fn main() -> Result<()> {
                     &mut page,
                     image.as_deref().expect("clap requires image"),
                     image.as_deref(),
+                    previous_image.as_deref(),
                     &model,
                     &service,
                     block_id.as_deref(),

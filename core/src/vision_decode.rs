@@ -5,7 +5,6 @@ use opencv::{
     imgcodecs,
     prelude::*,
 };
-use std::path::Path;
 
 unsafe extern "C" {
     fn koma_jpeg_cmyk(
@@ -164,17 +163,16 @@ fn orientation(bytes: &[u8]) -> u32 {
     1
 }
 
-pub fn decode(path: &Path) -> Result<Mat> {
-    let bytes = std::fs::read(path)?;
+pub fn decode(bytes: &[u8]) -> Result<Mat> {
     let cmyk = if bytes.starts_with(b"\xff\xd8") {
-        jpeg_cmyk(&bytes)?
+        jpeg_cmyk(bytes)?
     } else {
         None
     };
     let mut color = if let Some(color) = cmyk {
         color
     } else {
-        let raw = imgcodecs::imdecode(&Vector::from_slice(&bytes), imgcodecs::IMREAD_UNCHANGED)?;
+        let raw = imgcodecs::imdecode(&Vector::from_slice(bytes), imgcodecs::IMREAD_UNCHANGED)?;
         ensure!(!raw.empty(), "image decoder returned an empty image");
         let channels = raw.channels() as usize;
         ensure!([1, 3, 4].contains(&channels), "unsupported image channels");
@@ -214,7 +212,7 @@ pub fn decode(path: &Path) -> Result<Mat> {
     };
     // OpenCV's TIFF decoder applies TIFF orientation internally even with
     // IMREAD_UNCHANGED. Other formats are oriented here from bounded metadata.
-    let turn = orientation(&bytes);
+    let turn = orientation(bytes);
     if (2..=8).contains(&turn) {
         let mut out = Mat::default();
         match turn {

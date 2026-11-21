@@ -22,7 +22,9 @@ pub struct Runtime{
     pub engine:crate::local_engine::LocalEngine,
 }
 
+#[derive(Clone, Copy)]
 pub struct ProcessOptions<'a>{
+    pub previous_image: Option<&'a Path>,
     pub operation:&'a str,pub mode:&'a str,pub model:&'a str,pub block_id:Option<&'a str>,
     pub unit:&'a str,pub batch_size:usize,pub retry:bool,
 }
@@ -224,7 +226,7 @@ impl Runtime{
         if options.operation!="ocr" && array(&page["blocks"]).iter().any(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)) {
             self.models.lock().await.release_ocr().await?;
             if options.mode=="vision"{
-                vision_pipeline::translate(&mut page,effective,layout_image,options.model,service,options.block_id,&mut checkpoints).await?;
+                vision_pipeline::translate(&mut page,effective,layout_image,options.previous_image,options.model,service,options.block_id,&mut checkpoints).await?;
             }else{
                 translate_pipeline::translate(&mut page,service,&translate_pipeline::Options{
                     model:options.model,unit:options.unit,batch_size:options.batch_size,block_id:options.block_id,image:layout_image},&mut checkpoints).await?;
@@ -422,7 +424,7 @@ mod tests {
         std::fs::write(&image, [b"P5\n32 32\n255\n".as_slice(), &[255; 1024]].concat())?;
         let cache = runtime.cache_for(&image, "text")?;
         let service = TranslationService::new("ollama", None, None)?;
-        let options = ProcessOptions { operation:"ocr", mode:"text", model:"unused", block_id:None,
+        let options = ProcessOptions { previous_image:None, operation:"ocr", mode:"text", model:"unused", block_id:None,
             unit:"blocks", batch_size:8, retry:false };
         let vision_cache = runtime.cache_for(&image, "vision")?;
         for invalid in [
@@ -459,7 +461,7 @@ mod tests {
             let cache = runtime.cache_for(&image, mode)?;
             persistence::atomic_json(&cache, &page)?;
             let mut writer = persistence::FileObserver { destination: &cache, status: None, metrics: None };
-            let mut options = ProcessOptions { operation: "ocr", mode, model: "unused", block_id: None,
+            let mut options = ProcessOptions { previous_image: None, operation: "ocr", mode, model: "unused", block_id: None,
                 unit: "blocks", batch_size: 8, retry: false };
             runtime.process_page(&image, &image, &cache, &options, &service, &mut writer).await?;
             let before = std::fs::read(&cache)?;

@@ -108,7 +108,7 @@ import Darwin
         guard let input else { throw Failure(message: "处理服务未启动。") }
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(10)
-        guard data.count <= 1024 * 1024 else { throw Failure(message: "请求过大，请减少一次处理的页数。") }
+        guard data.count <= 4 * 1024 * 1024 else { throw Failure(message: "请求过大，请减少一次处理的页数。") }
         let epoch = generation
         let payload = data
         writer.async { [weak self] in

@@ -31,6 +31,17 @@ fn service(request:&Value)->Result<TranslationService>{
     TranslationService::new(request["provider"].as_str().unwrap_or("omlx"),request["base_url"].as_str(),request["key"].as_str())
 }
 
+fn previous_for_page<'a>(request: &'a Value, image: &str, total: usize) -> Result<Option<&'a Path>> {
+    let value = if let Some(single) = request.get("previous_image").filter(|v| !v.is_null()) {
+        ensure!(total == 1 && request["previous_images"].is_null(),
+            "多页翻译请按当前页分别指定上一页参照。");
+        Some(single)
+    } else if let Some(mapping) = request.get("previous_images").filter(|v| !v.is_null()) {
+        mapping.as_object().context("上一页参照映射格式无效。")?.get(image)
+    } else { None };
+    value.map(|v| v.as_str().map(Path::new).context("上一页参照路径无效。")).transpose()
+}
+
 async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_gate:&Semaphore)->Result<Value>{
     let r=&job.request;
     match required(r,"op")?{
@@ -80,7 +91,7 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             } else {
                 let service = service(r)?;
                 let options = ProcessOptions {
-                    operation, mode: r["mode"].as_str().unwrap_or("text"),
+                    previous_image: None, operation, mode: r["mode"].as_str().unwrap_or("text"),
                     model: required(r, "model")?, block_id: r["block_id"].as_str(),
                     unit: r["unit"].as_str().unwrap_or("blocks"),
                     batch_size: r["batch_size"].as_u64().unwrap_or(8) as usize,
@@ -109,7 +120,11 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
                                 (source.to_owned(), Some(warning))
                             },
                         };
-                        let mut result = runtime.process_page(source, &effective, &cache, options, service, &mut events).await?;
+                        let previous_image = if options.mode == "vision" && matches!(operation, "both" | "translate") {
+                            previous_for_page(r, image, images.len())?
+                        } else { None };
+                        let options = ProcessOptions { previous_image, ..*options };
+                        let mut result = runtime.process_page(source, &effective, &cache, &options, service, &mut events).await?;
                         if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
                         Ok(result)
                     } else {
@@ -186,7 +201,8 @@ pub async fn serve(runtime:Runtime)->Result<()>{
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop{
         while tasks.try_join_next().is_some(){}
-        let read=protocol::line(&mut input,1024*1024);
+        // Chapter requests may contain the current and preceding paths per page.
+        let read=protocol::line(&mut input,4*1024*1024);
         tokio::pin!(read);
         let next=loop {tokio::select! {
             result=&mut read=>break result,

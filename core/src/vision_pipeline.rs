@@ -7,10 +7,10 @@ use crate::{
     translate_pipeline::{Observer, Trace, prepare_config, remove, save_results},
     translation, vision_image,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     path::Path,
     time::{Duration, Instant},
 };
@@ -55,10 +55,24 @@ pub fn from_text(mut page: Value) -> Value {
     page
 }
 
+fn parse_vision_response(content: &str, ids: &[String]) -> Result<Value> {
+    let value = translation::strict_json(content)?;
+    ensure!(value.as_object().is_some_and(|fields| fields.len() == 2),
+        "视觉回复必须包含 translations 和 source_suggestions 两个字段。");
+    for name in ["translations", "source_suggestions"] {
+        let matches_batch = value[name].as_object().is_some_and(|fields| {
+            fields.len() == ids.len() && ids.iter().all(|id| fields.get(id).is_some_and(Value::is_string))
+        });
+        ensure!(matches_batch, "视觉回复中的 {name} 与本批文字框编号或类型不符。");
+    }
+    Ok(value)
+}
+
 pub async fn translate(
     current_page: &mut Value,
     image: &Path,
     layout_image: Option<&Path>,
+    previous_image: Option<&Path>,
     model: &str,
     service: &TranslationService,
     block_id: Option<&str>,
@@ -77,9 +91,20 @@ pub async fn translate(
     let page = &mut prepared;
     let audit_changed = translation::audit_cache(page, block_id);
     structure::ensure(page, layout_image)?;
-    let config = json!({"mode":"vision","version":1,"prompt_revision":2,"model":model,
+    let mut config = json!({"mode":"vision","version":1,"prompt_revision":3,"model":model,
+        "enable_thinking":false,"strict_json":true,"max_tokens":translation::VISION_MAX_TOKENS,
         "image_edge":vision_image::IMAGE_EDGE,"batch_size":8,"ocr":structure::ocr_signature(page),
         "provider":service.provider,"base_url":service.base_url});
+    // Hash and encode the same snapshot even if the reference file is replaced
+    // during translation. A matching cache only needs the hash, never a decode.
+    let previous_bytes = previous_image.map(|path| -> Result<Vec<u8>> {
+        ensure!(path.is_absolute(), "上一页参照需要原图的完整路径。");
+        std::fs::read(path).context("无法读取上一页参照，请检查上一页原图后重试。")
+    }).transpose()?;
+    if let Some(bytes) = &previous_bytes {
+        config["prompt_revision"] = json!(4);
+        config["previous_image_sha256"] = json!(format!("{:x}", Sha256::digest(bytes)));
+    }
     let page_changed = page["translation_config"] != config;
     let changed = prepare_config(page, &config, page_changed, block_id);
     let mut pending: Vec<_> = (0..array(&page["blocks"]).len())
@@ -105,6 +130,9 @@ pub async fn translate(
         *current_page = prepared;
         return Ok(());
     }
+    let previous = previous_bytes.map(|bytes| {
+        vision_image::encode_bytes(&bytes).context("无法解码上一页参照，请检查上一页原图后重试。")
+    }).transpose()?;
     ensure!(
         service
             .list_models()
@@ -126,7 +154,8 @@ pub async fn translate(
         let mut event = json!({"mode":"vision","model":model,"image":image,"batch_ids":ids,
             "provider":service.provider,"base_url":service.base_url});
         let outcome: Result<()> = async {
-            let payload = translation::vision_payload(service, model, page, &members, &encoded.url);
+            let payload = translation::vision_payload(model, page, &members, &encoded.url,
+                previous.as_ref().map(|image| image.url.as_str()));
             let response = service
                 .request(
                     service.chat_route(),
@@ -140,30 +169,8 @@ pub async fn translate(
                 .map(|b| (text(&b["id"]), b["source"].clone()))
                 .collect();
             let sources = Value::Object(sources);
-            let (mut translated, mut errors) =
-                translation::parse_translations(content, &ids, Some(&sources))?;
-            let obj = translation::strict_json(content)?;
-            let mut unchanged = HashSet::new();
-            for id in &ids {
-                let source = sources[id].as_str().unwrap_or("");
-                let proposed = obj["translations"]
-                    .as_object()
-                    .and_then(|m| m.get(id))
-                    .and_then(Value::as_str);
-                if errors[id] == translation::ECHO_ERROR
-                    && proposed.is_some()
-                    && source
-                        .chars()
-                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-                    && !source
-                        .chars()
-                        .any(|c| ('\u{3040}'..='\u{30ff}').contains(&c))
-                {
-                    translated[id] = json!(proposed.unwrap().trim_matches(whitespace));
-                    errors.as_object_mut().unwrap().shift_remove(id);
-                    unchanged.insert(id.clone());
-                }
-            }
+            let obj = parse_vision_response(content, &ids)?;
+            let (translated, errors) = translation::parse_rows(&obj, &ids, Some(&sources), true)?;
             for &i in indices {
                 let b = &mut page["blocks"][i];
                 let id = text(&b["id"]);
@@ -182,8 +189,8 @@ pub async fn translate(
                     .unwrap_or("");
                 b["vision_source"] = json!(suggestion);
                 let mut warnings = translation::quality_warnings(&b["source"], &b["translation"]);
-                if unchanged.contains(&id) {
-                    warnings.push("原文与译文相同，可能为中日共用词，请核对".into());
+                if translation::same_as_source(&b["source"], &b["translation"]) {
+                    warnings.push(translation::SHARED_HANZI_WARNING.into());
                 }
                 b["quality_warnings"] = json!(warnings);
             }
@@ -261,6 +268,7 @@ pub async fn probe(request: &Value) -> Result<Value> {
         &mut page,
         image,
         Some(image),
+        request["previous_image"].as_str().map(Path::new),
         request["model"].as_str().unwrap_or("same-model"),
         &service,
         request["block_id"].as_str(),

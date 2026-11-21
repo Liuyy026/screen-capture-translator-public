@@ -201,7 +201,11 @@ pub fn thumbnail(color: &Mat, edge: usize) -> Result<Mat> {
 }
 
 pub fn encode(path: &Path) -> Result<EncodedImage> {
-    let original = vision_decode::decode(path)?;
+    encode_bytes(&std::fs::read(path)?)
+}
+
+pub fn encode_bytes(source: &[u8]) -> Result<EncodedImage> {
+    let original = vision_decode::decode(source)?;
     let image = thumbnail(&original, IMAGE_EDGE)?;
     let mut bytes = Vector::new();
     imgcodecs::imencode(

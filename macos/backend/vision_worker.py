@@ -18,10 +18,13 @@ from backend import worker as shared
 from backend.translation_service import TranslationService
 
 VERSION = 1
-PROMPT_REVISION = 2
+PROMPT_REVISION = 3
 IMAGE_EDGE = 1775
 BATCH_SIZE = 8
+MAX_TOKENS = 8192
 DEFAULT_MODEL = "Qwen3.8-27B-Uncensored-MLX-4bit"
+ECHO_ERROR = "模型原样返回了日文，没有提供中文译文"
+SHARED_HANZI_WARNING = "原文与译文相同，可能为中日共用词，请核对"
 
 
 def cache_path(image, cache_root=None):
@@ -39,6 +42,8 @@ def prepare_page(image, destination):
         for block in page["blocks"]:
             if not block.get("edited"):
                 block.update(translation="", error="")
+                for key in ("translation_config_override", "quality_warnings", "vision_source"):
+                    block.pop(key, None)
         for dialogue in page.get("dialogues", []):
             for key in ("full_translation", "mapping", "mapping_status", "translation_config"):
                 dialogue.pop(key, None)
@@ -58,6 +63,13 @@ def encode_image(image):
     return "data:image/jpeg;base64," + base64.b64encode(data.getvalue()).decode("ascii"), picture.size
 
 
+def excludes_vision(block):
+    review = block.get("ocr_review")
+    return block.get("keep_original") is True or (
+        isinstance(review, dict) and review.get("status") == "suspect"
+        and not (block.get("ocr_confirmed") or block.get("edited")))
+
+
 def make_payload(service, model, page, batch, image_url):
     ids = [str(b["id"]) for b in batch]
     fields = {key: {"type": "string"} for key in ids}
@@ -68,7 +80,8 @@ def make_payload(service, model, page, batch, image_url):
     context = [{"id": str(b["id"]), "ja": b["source"],
                 "box": b["box"], "vertical": bool(b.get("vertical")),
                 "reading_order": b.get("reading_order")}
-               for b in sorted(page["blocks"], key=lambda b: b.get("reading_order", 10**9))]
+               for b in sorted(page["blocks"], key=lambda b: b.get("reading_order", 10**9))
+               if not excludes_vision(b) and b.get("overlay") != "skip" and b.get("text_kind") != "noise"]
     instruction = (
         "你是一名日译中漫画译者。图片是完整漫画页，文字坐标以原图像素计。"
         "结合画面中的人物表情、动作、物品和说话场景，忠实翻译 target_ids 对应的日文，返回自然简体中文。"
@@ -78,15 +91,112 @@ def make_payload(service, model, page, batch, image_url):
         "看不清时依据提供的OCR，不能凭空猜字。若图片能明确证明某处OCR错误，在source_suggestions"
         "中填写完整日文修正建议，否则填空字符串；原文不会自动替换。"
         "translations中填写译文，无法翻译时填空字符串。仅返回符合要求的JSON。"
+        '输出格式为 {"translations":{"编号":"译文"},"source_suggestions":{"编号":"日文修正或空字符串"}}，'
+        "两个对象的键都使用 target_ids 中的实际编号，不要 Markdown。"
     )
     messages = [{"role": "system", "content": instruction}, {"role": "user", "content": [
         {"type": "text", "text": json.dumps({"image_width": page["width"], "image_height": page["height"],
             "page": context, "target_ids": ids}, ensure_ascii=False)},
         {"type": "image_url", "image_url": {"url": image_url}},
     ]}]
-    payload = service.translation_payload(model, messages, schema)
-    payload["max_tokens"] = 4096
-    return payload
+    return {"model": model, "messages": messages, "stream": False, "temperature": 0.15,
+            "chat_template_kwargs": {"enable_thinking": False}, "structured_outputs": {"json": schema},
+            "max_tokens": MAX_TOKENS}
+
+
+def parse_vision_response(content, ids):
+    def unique_object(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("模型返回了重复的 JSON 字段")
+            fields[key] = value
+        return fields
+
+    def reject_constant(_value):
+        raise ValueError("模型未返回有效 JSON")
+
+    try:
+        obj = json.loads(content, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except json.JSONDecodeError:
+        raise ValueError("模型未返回有效 JSON") from None
+    if not isinstance(obj, dict) or len(obj) != 2:
+        raise ValueError("视觉回复必须包含 translations 和 source_suggestions 两个字段。")
+    for name in ("translations", "source_suggestions"):
+        fields = obj.get(name)
+        if not isinstance(fields, dict) or fields.keys() != ids or any(not isinstance(value, str) for value in fields.values()):
+            raise ValueError(f"视觉回复中的 {name} 与本批文字框编号或类型不符。")
+    return obj
+
+
+def shared_hanzi_source(source):
+    return isinstance(source, str) and bool(re.search(r"[\u4e00-\u9fff]", source)
+                                           and not re.search(r"[\u3040-\u30ff]", source))
+
+
+def accepted_vision_echo(block):
+    warnings = block.get("quality_warnings")
+    return (isinstance(warnings, list) and SHARED_HANZI_WARNING in warnings
+            and shared_hanzi_source(block.get("source"))
+            and shared.same_as_source(block.get("source"), block.get("translation")))
+
+
+def audit_vision_cache(page, block_id):
+    changed = False
+    for block in page["blocks"]:
+        if (block_id is not None and str(block["id"]) != str(block_id)
+                or not block.get("translation") or block.get("edited") or excludes_vision(block)):
+            continue
+        translation = block["translation"]
+        reason = shared.translation_error(translation)
+        if not reason and shared.same_as_source(block.get("source"), translation):
+            if not accepted_vision_echo(block):
+                reason = ECHO_ERROR
+            elif block.get("error") == ECHO_ERROR:
+                block["error"] = ""
+                changed = True
+        if reason and block.get("error") != reason:
+            block["error"] = reason
+            changed = True
+    return changed
+
+
+def valid_vision_block(block):
+    return shared._structure.valid_block(block) or (not block.get("error") and accepted_vision_echo(block))
+
+
+def prepare_config(page, config, block_id):
+    page_changed = page.get("translation_config") != config
+    changed = False
+    reset_ids = set()
+    for block in page["blocks"]:
+        key = str(block["id"])
+        if (block_id is not None and key != str(block_id)) or block.get("edited"):
+            continue
+        if excludes_vision(block):
+            if block_id is None and page_changed and block.get("translation"):
+                block.setdefault("translation_config_override", None)
+            continue
+        if block.get("translation_config_override", page.get("translation_config")) != config:
+            block.update(translation="", error="")
+            for field in ("quality_warnings", "vision_source"):
+                block.pop(field, None)
+            reset_ids.add(key)
+        if block_id is not None and page_changed:
+            changed |= block.get("translation_config_override") != config
+            block["translation_config_override"] = config
+        elif "translation_config_override" in block:
+            del block["translation_config_override"]
+            changed = True
+    for dialogue in page.get("dialogues", []):
+        if (block_id is None and page_changed) or reset_ids.intersection(dialogue.get("block_ids", [])):
+            for key in ("full_translation", "mapping", "mapping_status", "translation_error",
+                        "translation_config", "quality_warnings"):
+                dialogue.pop(key, None)
+    if block_id is None:
+        page["translation_config"] = config
+        page["model"] = config["model"]
+    return changed or bool(reset_ids) or (block_id is None and page_changed)
 
 
 def translate(page, image, model, service, progress, save, block_id=None):
@@ -94,31 +204,35 @@ def translate(page, image, model, service, progress, save, block_id=None):
         raise ValueError("视觉辅助翻译需要 oMLX 和支持图片的模型，请在接口设置中选择。")
     if not page["blocks"]:
         return
-    shared.audit_cache(page)
-    shared._structure.ensure_dialogues(page, image=image)
+    prepared = copy.deepcopy(page)
+    audit_changed = audit_vision_cache(prepared, block_id)
+    shared._structure.ensure_dialogues(prepared, image=image)
+    if any(accepted_vision_echo(block) for block in prepared["blocks"]):
+        shared._structure.sync_dialogue_translations(prepared, block_validator=valid_vision_block)
     config = {"mode": "vision", "version": VERSION, "prompt_revision": PROMPT_REVISION, "model": model,
+              "enable_thinking": False, "strict_json": True, "max_tokens": MAX_TOKENS,
               "image_edge": IMAGE_EDGE, "batch_size": BATCH_SIZE,
-              "ocr": shared._structure.ocr_signature(page), **service.identity}
-    if page.get("translation_config") != config:
-        for block in page["blocks"]:
-            if not block.get("edited"):
-                block.update(translation="", error="")
-                block.pop("vision_source", None)
-        for dialogue in page.get("dialogues", []):
-            for key in ("full_translation", "mapping", "mapping_status", "translation_config"):
-                dialogue.pop(key, None)
-        page["translation_config"] = config
-        page["model"] = model
-        save(page)
-    pending = [b for b in sorted(page["blocks"], key=lambda b: b.get("reading_order", 10**9))
-               if not b.get("edited") and b.get("overlay") != "skip" and b.get("text_kind") != "noise"
+              "ocr": shared._structure.ocr_signature(prepared), **service.identity}
+    changed = prepare_config(prepared, config, block_id)
+    pending = [b for b in sorted(prepared["blocks"], key=lambda b: b.get("reading_order", 10**9))
+               if not b.get("edited") and not excludes_vision(b)
+               and b.get("overlay") != "skip" and b.get("text_kind") != "noise"
                and (block_id is None or str(b["id"]) == str(block_id))
                and (not b.get("translation") or b.get("error"))]
     if not pending:
+        if changed or audit_changed:
+            shared._structure.sync_dialogue_translations(prepared, block_validator=valid_vision_block)
+            save(prepared)
+        page.clear()
+        page.update(prepared)
         return
     if model not in service.list_models():
         raise ValueError("所选视觉模型不在 oMLX 模型列表中，请刷新模型列表。")
     image_url, image_size = encode_image(image)
+    page.clear()
+    page.update(prepared)
+    if changed:
+        save(page)
     jobs = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
     for index, batch in enumerate(jobs, 1):
         progress(f"正在结合画面翻译第 {index} / {len(jobs)} 组…")
@@ -129,34 +243,21 @@ def translate(page, image, model, service, progress, save, block_id=None):
             payload = make_payload(service, model, page, batch, image_url)
             response = service.request(service.chat_route, payload)
             content = service.translation_content(response)
-            sources = {str(b["id"]): b["source"] for b in batch}
-            translations, errors = shared.parse_translations(content, set(sources), sources)
-            obj = json.loads(content)
-            # Some short words (e.g. 当然) are valid in both languages. Keep
-            # unchanged Han-only results reviewable rather than dropping them.
-            rows = obj.get("translations", {})
-            unchanged = set()
-            for key, reason in list(errors.items()):
-                source = sources[key]
-                text = rows.get(key) if isinstance(rows, dict) else None
-                if (reason == "模型原样返回了日文，没有提供中文译文"
-                        and isinstance(text, str) and re.search(r"[\u4e00-\u9fff]", source)
-                        and not re.search(r"[\u3040-\u30ff]", source)):
-                    translations[key] = text.strip()
-                    errors.pop(key)
-                    unchanged.add(key)
-            suggestions = obj.get("source_suggestions", {})
-            if not isinstance(suggestions, dict):
-                suggestions = {}
+            obj = parse_vision_response(content, set(event["batch_ids"]))
             for block in batch:
                 key = str(block["id"])
-                block.update(translation=translations.get(key, ""), error=errors.get(key, ""))
-                suggestion = suggestions.get(key, "")
-                block["vision_source"] = (suggestion.strip() if isinstance(suggestion, str)
-                    and len(suggestion) <= 2000 and suggestion.strip() != block["source"].strip() else "")
-                block["quality_warnings"] = shared.translation_quality_warnings(block["source"], block["translation"])
-                if key in unchanged:
-                    block["quality_warnings"].append("原文与译文相同，可能为中日共用词，请核对")
+                source = block["source"]
+                translation = obj["translations"][key].strip()
+                reason = shared.translation_error(translation)
+                if not reason and shared.same_as_source(source, translation) and not shared_hanzi_source(source):
+                    reason = ECHO_ERROR
+                block.update(translation="" if reason else translation, error=reason)
+                suggestion = obj["source_suggestions"][key]
+                block["vision_source"] = (suggestion.strip()
+                    if len(suggestion) <= 2000 and suggestion.strip() != source.strip() else "")
+                block["quality_warnings"] = shared.translation_quality_warnings(source, block["translation"])
+                if shared.same_as_source(source, block["translation"]):
+                    block["quality_warnings"].append(SHARED_HANZI_WARNING)
             usage = response.get("usage", {})
             if isinstance(usage, dict):
                 event["usage"] = {k: v for k, v in usage.items()
@@ -172,7 +273,7 @@ def translate(page, image, model, service, progress, save, block_id=None):
         page["vision_runs"] = page["vision_runs"][-50:]
         page["vision_input"] = {"width": image_size[0], "height": image_size[1]}
         shared._overlay.ensure_page_overlays(page, image=image)
-        shared._structure.sync_dialogue_translations(page)
+        shared._structure.sync_dialogue_translations(page, block_validator=valid_vision_block)
         save(page)
         shared.record_benchmark(event)
 
