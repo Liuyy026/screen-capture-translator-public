@@ -25,6 +25,8 @@ class Server:
         self.mode = 'good'
         self.pause_completion = None
         self.translation = '测试中文'
+        self.resident_models = set()
+        self.fail_unload = False
         owner = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -38,10 +40,31 @@ class Server:
                 payload = json.loads(data) if data else None
                 owner.calls.append({'method':self.command,'path':self.path,'payload':payload,
                                     'authorization':self.headers.get('Authorization')})
-                if self.command == 'GET':
+                status = 200
+                if self.path == '/v1/models/status':
+                    obj = {'models': [{'id': m, 'loaded': m in owner.resident_models, 'is_loading': False}
+                                      for m in ['same-model', 'other-model', 'unrelated-model']]}
+                elif self.path == '/api/ps':
+                    obj = {'models': [{'name': m, 'model': m} for m in sorted(owner.resident_models)]}
+                elif self.path.endswith('/unload') or self.path == '/api/generate':
+                    if self.path == '/api/generate':
+                        assert payload['keep_alive'] == 0 and not payload.get('prompt')
+                        target = payload['model']
+                        obj = {'model': target, 'done': True, 'done_reason': 'unload'}
+                    else:
+                        target = self.path.split('/')[-2]
+                        obj = {'status': 'ok', 'model_id': target}
+                    if owner.fail_unload:
+                        status, obj = 503, {'error': 'simulated unload failure'}
+                    else:
+                        owner.resident_models.discard(target)
+                elif self.command == 'GET':
                     models = [] if owner.mode == 'missing-model' else ['same-model','other-model']
                     obj = {'models':[{'name':m} for m in models]} if self.path == '/api/tags' else {'data':[{'id':m} for m in models]}
                 else:
+                    owner.resident_models.add(payload['model'])
+                    if owner.mode == 'http-error':
+                        status = 500
                     if owner.pause_completion:
                         entered, release = owner.pause_completion
                         entered.set()
@@ -88,7 +111,7 @@ class Server:
                     if owner.mode == 'http-error':
                         obj = {'error':'private source fake-secret'}
                 data = json.dumps(obj).encode()
-                self.send_response(500 if payload and owner.mode=='http-error' else 200)
+                self.send_response(status)
                 self.send_header('Content-Length',str(len(data)))
                 self.send_header('Content-Type','application/json')
                 self.end_headers()

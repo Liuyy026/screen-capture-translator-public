@@ -1,5 +1,7 @@
 //! Translation transport. Persist endpoint identity only; credentials never
 //! enter request logs, page metadata, or server-error messages.
+mod unload;
+
 use anyhow::{Result, anyhow, bail, ensure};
 use reqwest::{
     Client,
@@ -73,11 +75,13 @@ pub fn normalize_base_url(provider: &str, base: Option<&str>) -> Result<String> 
     Ok(normalized)
 }
 
+#[derive(Clone)]
 pub struct TranslationService {
     pub provider: String,
     pub base_url: String,
     api_key: String,
     client: Client,
+    pub(crate) session: Option<std::sync::Weak<crate::model_session::ModelSession>>,
 }
 
 impl TranslationService {
@@ -115,6 +119,7 @@ impl TranslationService {
             base_url,
             api_key,
             client,
+            session: None,
         })
     }
 
@@ -149,29 +154,13 @@ impl TranslationService {
         } else {
             self.client.get(url)
         };
-        let network = || anyhow!("无法连接翻译服务或服务未返回有效 JSON，请检查地址和服务状态");
-        let mut response = request
+        let response = request
             .timeout(timeout)
             .send()
             .await
-            .map_err(|_| network())?;
-        let status = response.status().as_u16();
-        if status == 401 || status == 403 {
-            bail!("翻译服务拒绝访问，请检查 API 密钥及访问权限");
-        }
-        if !(200..300).contains(&status) {
-            bail!("翻译服务请求失败（HTTP {status}）");
-        }
-        // Bound unexpected server output without ever including it in errors.
-        let mut bytes = vec![];
-        while let Some(chunk) = response.chunk().await.map_err(|_| network())? {
-            if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
-                return Err(network());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| network())?;
-        ensure!(value.is_object(), "翻译服务返回了无效响应对象");
+            .map_err(|_| network_error())?;
+        check_status(response.status().as_u16())?;
+        let value = read_object(response).await?;
         ensure!(
             value.get("error").is_none(),
             "翻译服务返回错误，请检查所选模型及服务状态"
@@ -259,6 +248,32 @@ impl TranslationService {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow!("模型返回了空译文"))
     }
+}
+
+fn network_error() -> anyhow::Error {
+    anyhow!("无法连接翻译服务或服务未返回有效 JSON，请检查地址和服务状态")
+}
+
+fn check_status(status: u16) -> Result<()> {
+    if status == 401 || status == 403 {
+        bail!("翻译服务拒绝访问，请检查 API 密钥及访问权限");
+    }
+    ensure!((200..300).contains(&status), "翻译服务请求失败（HTTP {status}）");
+    Ok(())
+}
+
+async fn read_object(mut response: reqwest::Response) -> Result<Value> {
+    // Bound unexpected server output without ever including it in errors.
+    let mut bytes = vec![];
+    while let Some(chunk) = response.chunk().await.map_err(|_| network_error())? {
+        if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
+            return Err(network_error());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| network_error())?;
+    ensure!(value.is_object(), "翻译服务返回了无效响应对象");
+    Ok(value)
 }
 
 pub async fn probe(request: &Value) -> Result<Value> {

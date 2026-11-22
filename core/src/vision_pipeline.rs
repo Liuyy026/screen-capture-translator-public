@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     path::Path,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub fn prepare(image: &Path, destination: &Path, ordinary_root: &Path) -> Result<Option<Value>> {
@@ -159,13 +159,7 @@ pub async fn translate(
         let outcome: Result<()> = async {
             let payload = translation::vision_payload(model, page, &members, &encoded.url,
                 previous.as_ref().map(|image| image.url.as_str()));
-            let response = service
-                .request(
-                    service.chat_route(),
-                    Some(&payload),
-                    Duration::from_secs(300),
-                )
-                .await?;
+            let response = service.chat(&payload).await?;
             let content = service.translation_content(&response)?;
             let sources: Map<_, _> = members
                 .iter()

@@ -65,6 +65,17 @@ struct ReaderProcessingSettingsView: View {
                         .font(.caption).foregroundStyle(ReaderPalette.secondary)
                     Spacer()
                     Button("刷新模型") { reader.startEngine() }.disabled(reader.busy)
+                    Button("释放当前模型") { reader.releaseCurrentModel() }
+                        .disabled(reader.busy || reader.releasingModel || reader.model.isEmpty)
+                        .accessibilityIdentifier("release-translation-model")
+                    if reader.releasingModel { ProgressView().controlSize(.small) }
+                }
+                if let notice = reader.modelReleaseNotice {
+                    Text(notice).font(.caption).foregroundStyle(ReaderPalette.secondary)
+                }
+                if let failure = reader.modelReleaseError {
+                    Text(failure).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                    Button("重试释放") { reader.retryModelRelease() }.disabled(reader.busy || reader.releasingModel)
                 }
                 if let error = reader.connectionError {
                     Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)

@@ -6,7 +6,11 @@ use serde_json::{Value,json};
 use std::{collections::HashMap,path::{Path,PathBuf},sync::Arc};
 use tokio::{io::{AsyncWriteExt,BufReader},sync::{mpsc,watch,Mutex,Semaphore},task::JoinSet};
 
-type Registry=Arc<Mutex<HashMap<String,watch::Sender<bool>>>>;
+struct RegisteredJob {
+    cancel: watch::Sender<bool>,
+    finish_on_shutdown: bool,
+}
+type Registry=Arc<Mutex<HashMap<String, RegisteredJob>>>;
 struct Job {id:String,request:Value,cancel:watch::Receiver<bool>}
 
 struct Events {id:String,image:String,cache:PathBuf,output:mpsc::Sender<Value>}
@@ -76,6 +80,14 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             Ok(reply)
         },
         "models"=>Ok(json!({"models":runtime.engine.discover(&service(r)?,r["allow_local_start"].as_bool().unwrap_or(false)).await?})),
+        "unload_model"=>{
+            let model = required(r, "model")?;
+            ensure!(!model.trim().is_empty(), "请选择需要卸载的翻译模型");
+            ensure!(r["explicit"].is_null() || r["explicit"].is_boolean(), "无效的模型卸载选项");
+            let released = runtime.translation_models.unload(&service(r)?, model,
+                r["explicit"] == true, r["key"].is_string()).await?;
+            Ok(json!({"released": released}))
+        },
         "release_engine"=>{runtime.engine.release().await?;Ok(json!({"released":true}))},
         "display"=>{
             let _permit=display_gate.acquire().await?;
@@ -118,7 +130,7 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let processing = if operation == "enhance" {
                 None
             } else {
-                let service = service(r)?;
+                let service = runtime.translation_models.track(service(r)?);
                 let options = ProcessOptions {
                     operation, mode: r["mode"].as_str().unwrap_or("text"),
                     model: required(r, "model")?, block_id,
@@ -234,6 +246,7 @@ pub async fn serve(runtime:Runtime)->Result<()>{
     let mut input=BufReader::new(tokio::io::stdin());
     let mut maintenance=tokio::time::interval(std::time::Duration::from_secs(60));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut shutdown_id = None;
     loop{
         while tasks.try_join_next().is_some(){}
         // Chapter requests may contain the current and preceding paths per page.
@@ -255,10 +268,10 @@ pub async fn serve(runtime:Runtime)->Result<()>{
         match request["op"].as_str().unwrap_or(""){
             "health"=>{let active=registry.lock().await.len();let _=output.send(json!({"id":id,"event":"result","result":{"protocol":1,"active":active}})).await;continue;},
             "cancel"=>{let target=request["target"].as_str().unwrap_or("");
-                let cancelled=registry.lock().await.get(target).is_some_and(|sender|sender.send(true).is_ok());
+                let cancelled=registry.lock().await.get(target).is_some_and(|job|job.cancel.send(true).is_ok());
                 let _=output.send(json!({"id":id,"event":"result","result":{"cancelled":cancelled}})).await;continue;
             },
-            "shutdown"=>{let _=output.send(json!({"id":id,"event":"result","result":{"shutdown":true}})).await;break;},
+            "shutdown"=>{shutdown_id = Some(id); break;},
             _=>{},
         }
         let (cancel,receiver)=watch::channel(false);
@@ -268,19 +281,33 @@ pub async fn serve(runtime:Runtime)->Result<()>{
                 drop(registry);
                 let _=output.send(json!({"id":id,"event":"error","error":"重复请求编号或队列已满，请稍后重试"})).await;continue;
             }
-            registry.insert(id.clone(),cancel);
+            registry.insert(id.clone(), RegisteredJob {
+                cancel,
+                finish_on_shutdown: request["op"] == "unload_model",
+            });
         }
         let job=Job{id:id.clone(),request,cancel:receiver};
-        if job.request["op"]=="process"{
+        if matches!(job.request["op"].as_str(), Some("process" | "unload_model")){
             if queue.try_send(job).is_err(){registry.lock().await.remove(&id);
                 let _=output.send(json!({"id":id,"event":"error","error":"处理队列已满，请稍后重试"})).await;
             }
         }else{tasks.spawn(run(runtime.clone(),job,output.clone(),registry.clone(),display_gate.clone()));}
     }
-    for cancel in registry.lock().await.values(){let _=cancel.send(true);}
-    drop(queue);worker.await?;
+    for job in registry.lock().await.values() {
+        if !job.finish_on_shutdown { let _ = job.cancel.send(true); }
+    }
+    drop(queue);
+    let worker_result = worker.await;
     while tasks.join_next().await.is_some(){}
-    runtime.close().await?;
+    let unload_error = runtime.translation_models.close().await;
+    if let Some(error) = &unload_error { eprintln!("{error}"); }
+    let close_result = runtime.close().await;
+    if let Some(id) = shutdown_id {
+        let mut result = json!({"shutdown":true});
+        if let Some(error) = unload_error { result["unload_error"] = json!(error); }
+        let _ = output.send(json!({"id":id,"event":"result","result":result})).await;
+    }
     drop(output);writer.await??;
-    Ok(())
+    worker_result?;
+    close_result
 }

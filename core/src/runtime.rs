@@ -19,6 +19,7 @@ pub struct Runtime{
     pub display:display_cache::Store,
     models:Mutex<ImageModels>,
     pub engine:crate::local_engine::LocalEngine,
+    pub translation_models: Arc<crate::model_session::ModelSession>,
 }
 
 #[path = "ocr_residency.rs"]
@@ -166,6 +167,7 @@ impl Runtime{
         let cache_policy=crate::cache_policy::Manager::new(&sr.root,&assets_root,&cache_root)?;
         Ok(Self{sr,cache_policy,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
             models:Mutex::new(ImageModels::new(python,worker,weights)?),
+            translation_models: Arc::default(),
             engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
     }
     pub fn cache_for(&self,image:&Path,mode:&str)->Result<PathBuf>{

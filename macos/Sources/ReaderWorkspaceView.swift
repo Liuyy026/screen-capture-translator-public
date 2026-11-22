@@ -58,7 +58,6 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         .onChange(of: workspace.showsInspector) { _, isShown in
             if !isShown { inspectorDrag = nil }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
     }
 
     private func clampedInspectorWidth(_ width: CGFloat, windowWidth: CGFloat) -> CGFloat {

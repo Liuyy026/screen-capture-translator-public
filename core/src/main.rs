@@ -7,6 +7,7 @@ mod imaging;
 mod ink;
 mod local_engine;
 mod model_images;
+mod model_session;
 mod models;
 mod ocr;
 mod ocr_review;

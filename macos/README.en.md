@@ -81,7 +81,9 @@ Stable `KomaReader` configuration/pages can be copied read-only into candidate f
 
 Use the settings UI to persist connections. Defaults are `http://127.0.0.1:8000/v1` for oMLX and `http://127.0.0.1:11439` for Ollama. Keys can be saved in a local plaintext file with permissions `0600`; disabling key persistence keeps them session-only. The candidate does not access Keychain. Invalid configuration is reported without silently overwriting the file. Quit the app before editing it manually.
 
-Rust only manages local Ollama processes it starts at the designated endpoint with no API key. Existing services and oMLX are not taken over. Application shutdown cleans up owned inference processes; model reuse can retain memory until release or exit.
+Koma keeps the translation model in memory for the next page. Switching models or providers asks the previous service to unload the model used in this session. Closing the last reader window or quitting Koma releases any remaining translation models used in the session. To free memory while reading, click **释放当前模型** (Release current model) in processing settings. The model stays selected and loads again the next time a page needs translation. The button can also release the selected model if an older version of Koma left it loaded.
+
+oMLX and Ollama release memory for the requested model. If another client is using the same model on the same oMLX server, unloading it can interrupt that request. When Koma quits, it also stops its OCR worker and any local Ollama process it started at `127.0.0.1:11439`.
 
 ## Visual assistance (oMLX)
 

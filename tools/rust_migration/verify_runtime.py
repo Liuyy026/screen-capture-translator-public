@@ -122,6 +122,58 @@ def dead(pid):
     return False
 
 
+def check_translation_model_release(root, output, weights, worker, fixture):
+    seed = output/'release-seed'
+    seed.mkdir()
+    cache = Path(fixture['cache'])
+    (seed/cache.name).write_bytes(cache.read_bytes())
+    for provider in ('omlx', 'ollama'):
+        with Server() as server:
+            client = Client(root, output/f'release-{provider}', weights, worker, seed)
+            connection = dict(provider=provider, base_url=server.url, key='fake-secret')
+            def translate(model):
+                result = client.call('process', **connection, model=model, operation='translate',
+                                     mode='text', images=[fixture['image']])
+                assert result['pages'][0]['ok'], result
+            def unload(model, **options):
+                return client.call('unload_model', **connection, model=model, **options)
+            entered, release = threading.Event(), threading.Event()
+            try:
+                server.resident_models.update(['unrelated-model', 'same-model'])
+                assert 'same-model' in client.call('models', **connection)['models']
+                server.calls.clear()
+                assert not unload('same-model')['released'] and not server.calls
+                # An explicit click can release the selected model left by an older app.
+                unload('same-model', explicit=True)
+                assert server.resident_models == {'unrelated-model'}
+                translate('same-model')
+                assert server.resident_models == {'unrelated-model', 'same-model'}
+                server.fail_unload = True
+                failed = client.wait(client.send('unload_model', **connection, model='same-model'))
+                assert failed['event'] == 'error'
+                server.fail_unload = False
+                assert unload('same-model')['released']
+                server.resident_models.add('same-model')  # Another client loaded it.
+                server.calls.clear()
+                translate('same-model')  # Cache hit, no inference.
+                assert not unload('same-model')['released'] and not server.calls
+                # The service can load the model before sending its first token.
+                server.pause_completion = entered, release
+                active = client.send('process', **connection, model='other-model', operation='translate',
+                                     mode='text', images=[fixture['image']])
+                assert entered.wait(10)
+                assert 'other-model' in server.resident_models
+                if provider == 'omlx':
+                    assert client.call('cancel', target=active)['cancelled']
+                    assert client.wait(active)['event'] == 'cancelled'
+            finally:
+                try:
+                    client.close(eof=provider == 'ollama')
+                finally:
+                    release.set()
+            assert server.resident_models == {'same-model', 'unrelated-model'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -282,6 +334,7 @@ def main():
             assert client.call('process', **retry, revision=manual['revision'])['pages'][0]['ok']
             final = client.call('load_page', image=image, mode='text')['page']
             assert final['blocks'][1]['translation'] == '测试中文' and not final['blocks'][1]['edited']
+            assert client.call('unload_model', provider='omlx', base_url=server.url, model='same-model')['released']
         passed('single-block retry rejects obsolete or missing snapshots and commits only a successful explicit replacement')
 
         with Server() as server:
@@ -345,6 +398,8 @@ def main():
                     assert single['ok']
                     stored = client.call('load_page', image=source, mode=mode)['page']
                     assert stored['vision_runs'][-1]['image'] == source
+            for model in ('same-model', 'other-model'):
+                client.call('unload_model', provider='omlx', base_url=server.url, model=model)
         passed('model changes retain readable translations through cancellation and failure, then resume in both modes')
         client.process.stdin.write('{bad json}\n'); client.process.stdin.flush()
         assert client.wait(None)['event'] == 'error'
@@ -364,6 +419,8 @@ def main():
     assert dead(pid)
     (weights/'hang').unlink()
     passed('stdin EOF cancels running inference and exits cleanly')
+    check_translation_model_release(root, output, weights, fake, pages[0])
+    passed('explicit, switched and shutdown model release, retries and cache hits on oMLX and Ollama')
     hashes()
     report = dict(passed=True, records=records, original_inputs_unchanged=True,
                   scope='Rust daemon lifecycle, queue, private edits and cache; synthetic fixtures and simulated inference only')

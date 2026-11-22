@@ -57,7 +57,9 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 ## 常驻应用服务
 
-`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`unload_model`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+
+`unload_model` 按 `provider`、`base_url`、`model` 指定目标。切换模型时只释放本次会话实际请求过推理的模型；手动按钮传入 `explicit: true`，也可释放此前已加载的指定模型。`shutdown` 和标准输入关闭都会清理本次会话使用的翻译模型；`shutdown` 在清理结束后回执，未能确认卸载时返回 `unload_error`。
 
 Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启动的模型进程。取消后销毁并等待受中断的模型进程退出，下一次推理使用新进程和临时目录；标准输入关闭会取消任务并清理子进程。非终态进度事件在客户端过慢时可合并丢弃，终态和每页完成事件可靠发送。调用方必须持续读取输出。
 
@@ -65,7 +67,7 @@ Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启
 
 `verify_runtime.py --output <new-directory>` 自动生成两页素材，验证真实常驻服务的队列、取消、崩溃恢复、手改保护和缓存隔离；故障测试使用模拟推理与回环 HTTP，不运行真实 OCR 或修补模型。
 
-候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。本地 Ollama 启停由 Rust 的 `local_engine.rs` 管理：仅在调用方允许启动、无密钥且使用既定本地地址时启动指定安装文件；已有服务只查询，不接管。取消未完成的启动或退出时清理自有进程组及 runner。`serve --ollama <executable>` 提供安装文件，默认不启动任何服务。
+候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。本地 Ollama 启停由 Rust 的 `local_engine.rs` 管理：仅在调用方允许启动、无密钥且使用既定本地地址时启动指定安装文件；已运行的外部服务由原进程继续提供，Koma 通过服务接口卸载指定模型。取消未完成的启动或退出时清理自有进程组及 runner。`serve --ollama <executable>` 提供安装文件，默认不启动任何服务。
 
 ## 普通翻译与 OCR 区域分类
 

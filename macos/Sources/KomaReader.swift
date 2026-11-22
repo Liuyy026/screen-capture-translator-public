@@ -82,6 +82,18 @@ private struct NativeLoadedPage: Decodable {
     @Published var showConnectionSettings = false
     @Published var connectionError: String?
     @Published var engineReady = false
+    @Published private(set) var releasingModel = false
+    @Published private(set) var modelReleaseNotice: String?
+    @Published private(set) var modelReleaseError: String?
+    private struct ModelRelease {
+        let connection: TranslationConnection
+        let model: String
+        let explicit: Bool
+    }
+    private var failedModelRelease: ModelRelease?
+    private var modelReleaseTask: Task<Void, Never>?
+    private var modelReleaseRequest = UUID()
+    private var shuttingDown = false
     @Published var queueTotal = 0
     @Published var queueDone = 0
     @Published private(set) var exportingChapter = false
@@ -194,12 +206,68 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func chooseModel(_ value: String) {
-        guard !busy, availableModels.contains(value) else { return }
+        guard !shuttingDown, !busy, availableModels.contains(value), value != model else { return }
         do {
             try persistModel(value)
+            releaseModelIfChanging(to: connection, model: value)
             model = value
             defaults.set(value, forKey: "translationModel." + connection.identity)
         } catch { connectionError = error.localizedDescription }
+    }
+
+    private func releaseModelIfChanging(to next: TranslationConnection, model nextModel: String) {
+        guard connection.identity != next.identity || model != nextModel else { return }
+        modelReleaseNotice = nil
+        guard !model.isEmpty else { return }
+        enqueueModelRelease(ModelRelease(connection: connection, model: model, explicit: false))
+    }
+
+    func releaseCurrentModel() {
+        guard !shuttingDown, !busy, !releasingModel, !model.isEmpty else { return }
+        enqueueModelRelease(ModelRelease(connection: connection, model: model, explicit: true))
+    }
+
+    func retryModelRelease() {
+        guard !shuttingDown, !busy, !releasingModel, let failedModelRelease else { return }
+        enqueueModelRelease(failedModelRelease)
+    }
+
+    private func enqueueModelRelease(_ target: ModelRelease) {
+        let previous = modelReleaseTask
+        let request = UUID()
+        modelReleaseRequest = request
+        releasingModel = true
+        modelReleaseNotice = nil
+        let config = target.connection
+        let values: [String: Any] = ["provider": config.provider, "base_url": config.baseURL,
+                                     "key": config.apiKey, "model": target.model]
+        // Explicit actions are admitted only while idle. Submit now so even
+        // an immediate Quit reaches Rust after this request.
+        let explicitReply = target.explicit ? nativeCore.submitExplicitUnload(values) : nil
+        modelReleaseTask = Task {
+            await previous?.value
+            defer {
+                if request == modelReleaseRequest { releasingModel = false; modelReleaseTask = nil }
+            }
+            do {
+                if let explicitReply {
+                    struct Reply: Decodable { let released: Bool }
+                    var iterator = explicitReply.makeAsyncIterator()
+                    guard let data = try await iterator.next() else { throw CancellationError() }
+                    let released = try JSONDecoder().decode(Reply.self, from: data).released
+                    modelReleaseNotice = released ? "已释放「\(target.model)」，下次翻译时会重新加载。" : "「\(target.model)」当前未加载。"
+                } else {
+                    _ = try await nativeCore.requestIfRunning("unload_model", values: values)
+                }
+                if failedModelRelease?.connection.identity == config.identity, failedModelRelease?.model == target.model {
+                    failedModelRelease = nil
+                    modelReleaseError = nil
+                }
+            } catch {
+                failedModelRelease = target
+                modelReleaseError = "释放 \(config.name) 模型「\(target.model)」失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     func chooseProcessingMode(_ value: String) {
@@ -213,12 +281,13 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func applyConnection(_ config: TranslationConnection, model: String, models: [String], rememberKey: Bool) throws {
-        guard !busy else { throw ConnectionError("请等待当前任务结束后再切换接口。") }
+        guard !shuttingDown, !busy else { throw ConnectionError("请等待当前任务结束后再切换接口。") }
         guard models.contains(model) else { throw ConnectionError("请先获取并选择一个模型。") }
         if let configurationLoadError { throw ConnectionError(configurationLoadError) }
         let config = try config.normalized()
         let updated = try localConfiguration.applying(config, model: model, rememberKey: rememberKey)
         try connectionConfigStore.save(updated)
+        releaseModelIfChanging(to: config, model: model)
         localConfiguration = updated
         sessionKeys[config.identity] = config.apiKey
         connectionRequest = nil
@@ -232,9 +301,7 @@ private struct NativeLoadedPage: Decodable {
         defaults.set(model, forKey: "translationModel." + config.identity)
         if config.provider != "omlx", processingMode == "vision" { chooseProcessingMode("text") }
         message = "已连接 " + config.name + " · " + model
-        if config.provider != "ollama" || config.baseURL != TranslationConnection.defaultURL("ollama") {
-            Task { _ = try? await nativeCore.request("release_engine") }
-        }
+        releaseUnusedLocalOllama()
     }
 
     func startup() {
@@ -273,9 +340,17 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func releaseUnusedLocalOllama() {
-        guard localOllamaProbes.isEmpty,
-              connection.provider != "ollama" || connection.baseURL != TranslationConnection.defaultURL("ollama") else { return }
-        Task { _ = try? await nativeCore.request("release_engine") }
+        guard !usesLocalOllama, !shuttingDown else { return }
+        let release = modelReleaseTask
+        Task {
+            await release?.value
+            guard !shuttingDown, !usesLocalOllama, localOllamaProbes.isEmpty else { return }
+            _ = try? await nativeCore.requestIfRunning("release_engine")
+        }
+    }
+
+    private var usesLocalOllama: Bool {
+        connection.provider == "ollama" && connection.baseURL == TranslationConnection.defaultURL("ollama")
     }
 
     private func nativeModels(_ connection: TranslationConnection, allowLocalStart: Bool = false) async throws -> [String] {
@@ -295,7 +370,7 @@ private struct NativeLoadedPage: Decodable {
             engineReady = false
             return false
         }
-        guard !busy, connectionRequest == nil else { return engineReady }
+        guard !shuttingDown, !busy, connectionRequest == nil else { return engineReady }
         let snapshot = connection
         let request = UUID()
         connectionRequest = request
@@ -305,6 +380,7 @@ private struct NativeLoadedPage: Decodable {
             guard request == connectionRequest, snapshot == connection, !busy else { return false }
             let selectedModel = models.contains(model) ? model : (models.first ?? "")
             if !selectedModel.isEmpty { try persistModel(selectedModel) }
+            releaseModelIfChanging(to: connection, model: selectedModel)
             availableModels = models
             model = selectedModel
             if !model.isEmpty { defaults.set(model, forKey: "translationModel." + connection.identity) }
@@ -640,7 +716,7 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func run(operation: String = "both", batch: Bool = false, blockID: String? = nil) {
-        guard !busy, !openingFolder, !preparingImage, let selected else { return }
+        guard !shuttingDown, !busy, !openingFolder, !preparingImage, let selected else { return }
         let jobConnection = connection
         var options: [String: Any] = ["mode": processingMode, "model": model, "provider": jobConnection.provider,
             "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
@@ -764,6 +840,8 @@ private struct NativeLoadedPage: Decodable {
         if !enhancing {
             for url in urls { pageProcessingErrors.removeValue(forKey: url) }
         }
+        let translating = operation == "both" || operation == "translate"
+        let precedingRelease = translating ? modelReleaseTask : nil
         var values = options
         let images = urls.map(\.path)
         values["images"] = images
@@ -780,6 +858,7 @@ private struct NativeLoadedPage: Decodable {
         }
         busy = true; error = nil; queueTotal = urls.count; queueDone = 0
         if enhancing { message = "正在准备整章超分…" }
+        if precedingRelease != nil { message = "正在等待上一个模型释放…" }
         let request = UUID(); operationRequest = request
         task = Task { [self] in
             var startedImages = Set<String>()
@@ -787,11 +866,14 @@ private struct NativeLoadedPage: Decodable {
                 // No newer processing task can start while this one owns busy.
                 busy = false; task = nil
                 if Task.isCancelled { message = "已停止；已完成的结果已保存" }
-                if !enhancing, request == operationRequest || selected.map({ startedImages.contains($0.path) }) == true {
+                if !shuttingDown, !enhancing, request == operationRequest || selected.map({ startedImages.contains($0.path) }) == true {
                     reloadPage()
                 }
             }
             do {
+                await precedingRelease?.value
+                try Task.checkCancellation()
+                if translating { modelReleaseNotice = nil }
                 let data = try await nativeCore.request("process", values: values) { [weak self] event in
                     // Rust announces a page before writing its cache. Checkpoints can
                     // arrive after Stop, or be dropped while the event channel is full.
@@ -876,19 +958,59 @@ private struct NativeLoadedPage: Decodable {
         pageTask?.cancel(); readingTask?.cancel()
         pageRequest = UUID(); readingRequest = UUID(); preparingImage = false; loadingPage = false
     }
-    func shutdown() {
+    private func prepareForShutdown() {
+        shuttingDown = true
         folderRequest = nil; connectionRequest = nil
         pageTask?.cancel(); readingTask?.cancel(); task?.cancel(); modelTimer?.invalidate()
+    }
+
+    func shutdown() {
+        prepareForShutdown()
         nativeCore.shutdown()
+    }
+
+    func shutdownAndWait(_ completion: @escaping @Sendable () -> Void) {
+        prepareForShutdown()
+        nativeCore.shutdownAndWait(completion)
+    }
+
+    func shutdownAndWait() async {
+        await withCheckedContinuation { done in shutdownAndWait { done.resume() } }
     }
 
 }
 
+@MainActor final class KomaAppDelegate: NSObject, NSApplicationDelegate {
+    var reader: Reader?
+    private var terminationPending = false
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let reader else { return .terminateNow }
+        if !terminationPending {
+            terminationPending = true
+            reader.shutdownAndWait {
+                // Quit may have entered AppKit's nested modal loop while
+                // handling a main-queue callback. Reply in that loop directly.
+                RunLoop.main.perform(inModes: [.common, .modalPanel]) {
+                    MainActor.assumeIsolated { sender.reply(toApplicationShouldTerminate: true) }
+                }
+            }
+        }
+        return .terminateLater
+    }
+}
+
 #if !KOMA_REVIEW_HARNESS
 @main struct KomaReaderApp: App {
+    @NSApplicationDelegateAdaptor(KomaAppDelegate.self) private var appDelegate
     @StateObject private var reader = Reader()
     var body: some Scene {
-        WindowGroup("Koma Rust · 本地漫画翻译") { ContentView(reader: reader).tint(ReaderPalette.accent) }
+        WindowGroup("Koma Rust · 本地漫画翻译") {
+            ContentView(reader: reader).tint(ReaderPalette.accent)
+                .onAppear { appDelegate.reader = reader }
+        }
             .defaultSize(width: 1280, height: 850)
             .commands {
                 CommandGroup(after: .appSettings) {

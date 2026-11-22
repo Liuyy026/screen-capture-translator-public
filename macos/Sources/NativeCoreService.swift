@@ -10,7 +10,7 @@ import Darwin
         var errorDescription: String? { message }
     }
     private struct Pending {
-        let continuation: CheckedContinuation<Data, Error>
+        let finish: (Result<Data, Error>) -> Void
         let progress: (([String: Any]) -> Void)?
     }
     private let executable: URL
@@ -122,16 +122,22 @@ import Darwin
                  progress: (([String: Any]) -> Void)? = nil) async throws -> Data {
         try Task.checkCancellation()
         try start()
+        return try await exchange(operation, values: values, progress: progress)
+    }
+
+    /// Automatic cleanup belongs to the process that owns this session's model registry.
+    func requestIfRunning(_ operation: String, values: [String: Any] = [:]) async throws -> Data? {
+        try Task.checkCancellation()
+        guard !closed, child?.isRunning == true else { return nil }
+        return try await exchange(operation, values: values, progress: nil)
+    }
+
+    private func exchange(_ operation: String, values: [String: Any],
+                          progress: (([String: Any]) -> Void)?) async throws -> Data {
         let id = UUID().uuidString
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[id] = Pending(continuation: continuation, progress: progress)
-                do {
-                    var object = values; object["id"] = id; object["op"] = operation
-                    try send(object)
-                } catch {
-                    pending.removeValue(forKey: id)?.continuation.resume(throwing: error)
-                }
+                submit(id, operation, values: values, progress: progress) { continuation.resume(with: $0) }
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -140,6 +146,36 @@ import Darwin
                 // has disposed of any interrupted model channel.
                 try? self.send(["id": UUID().uuidString, "op": "cancel", "target": id])
             }
+        }
+    }
+
+    private func submit(_ id: String, _ operation: String, values: [String: Any],
+                        progress: (([String: Any]) -> Void)? = nil,
+                        finish: @escaping (Result<Data, Error>) -> Void) {
+        pending[id] = Pending(finish: finish, progress: progress)
+        do {
+            var object = values; object["id"] = id; object["op"] = operation
+            try send(object)
+        } catch {
+            pending.removeValue(forKey: id)?.finish(.failure(error))
+        }
+    }
+
+    /// Submit before returning to the event loop so a subsequent Quit cannot
+    /// overtake an explicit request to release a previously resident model.
+    func submitExplicitUnload(_ values: [String: Any]) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { reply in
+            do {
+                try start()
+                var values = values
+                values["explicit"] = true
+                submit(UUID().uuidString, "unload_model", values: values) { result in
+                    switch result {
+                    case .success(let data): reply.yield(data); reply.finish()
+                    case .failure(let error): reply.finish(throwing: error)
+                    }
+                }
+            } catch { reply.finish(throwing: error) }
         }
     }
 
@@ -153,15 +189,15 @@ import Darwin
         switch event {
         case "result":
             pending.removeValue(forKey: id)
-            do { request.continuation.resume(returning: try JSONSerialization.data(withJSONObject: object["result"] ?? NSNull(), options: [.fragmentsAllowed])) }
-            catch { request.continuation.resume(throwing: Failure(message: "处理服务返回了无效结果。")) }
+            do { request.finish(.success(try JSONSerialization.data(withJSONObject: object["result"] ?? NSNull(), options: [.fragmentsAllowed]))) }
+            catch { request.finish(.failure(Failure(message: "处理服务返回了无效结果。"))) }
         case "error":
             pending.removeValue(forKey: id)
-            request.continuation.resume(throwing: Failure(message: object["error"] as? String ?? "处理失败。",
-                                                          code: object["code"] as? String))
+            request.finish(.failure(Failure(message: object["error"] as? String ?? "处理失败。",
+                                            code: object["code"] as? String)))
         case "cancelled":
             pending.removeValue(forKey: id)
-            request.continuation.resume(throwing: CancellationError())
+            request.finish(.failure(CancellationError()))
         default: request.progress?(object)
         }
     }
@@ -174,12 +210,31 @@ import Darwin
         input = nil; child = nil; try? log?.close(); log = nil
         let waiting = pending; pending.removeAll()
         for request in waiting.values {
-            request.continuation.resume(throwing: Failure(message: "处理服务已退出；已保存的结果保留，可重新操作。"))
+            request.finish(.failure(Failure(message: "处理服务已退出；已保存的结果保留，可重新操作。")))
         }
     }
 
     func shutdown() {
+        // Close the input even if the final request fails. Rust handles EOF and
+        // shutdown identically, including cancellation and model cleanup.
         closed = true
-        ended(epoch: generation)
+        if let input {
+            try? send(["id": UUID().uuidString, "op": "shutdown"])
+            self.input = nil
+            writer.async { try? input.close() }
+        }
+    }
+
+    func shutdownAndWait(_ completion: @escaping @Sendable () -> Void) {
+        let process = child
+        shutdown()
+        DispatchQueue.global(qos: .userInitiated).async {
+            process?.waitUntilExit()
+            completion()
+        }
+    }
+
+    func shutdownAndWait() async {
+        await withCheckedContinuation { done in shutdownAndWait { done.resume() } }
     }
 }

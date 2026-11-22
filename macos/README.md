@@ -186,4 +186,6 @@ python3 macos/scripts/setup_reading_model.py
 
 已有本地测试文件时，可通过 `macos/.venv/bin/python scripts/check_regressions.py --local --native --swift` 运行共用、macOS Python、Rust 差分和 Swift 回归。各选项所需的用例见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
 
-模型复用会保留内存；退出候选应用时清理所属推理进程。Rust 只管理自己启动的、无密钥且位于既定 `127.0.0.1:11439` 地址的本地 Ollama；已有 Ollama/oMLX 服务不被接管。
+翻译后，Koma 会保留模型供下一页复用。切换翻译模型或服务时，会向原服务请求卸载本次会话用过的旧模型。关闭最后一个阅读窗口或退出 Koma 时，会释放本次会话仍在使用的翻译模型。只想腾出内存时，在「处理设置」点击「释放当前模型」即可；所选模型会保留，下次需要翻译时自动加载。这个按钮也可用于释放旧版 Koma 留下的当前模型。
+
+oMLX 与 Ollama 按模型释放内存。如果另一个客户端正在同一台 oMLX 服务上使用同一个模型，卸载也可能中断它的请求。Koma 退出时还会关闭自己的 OCR 工作进程，以及自己在 `127.0.0.1:11439` 启动的 Ollama 进程。

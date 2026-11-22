@@ -57,7 +57,7 @@ struct TranslationSettingsView: View {
             if let configurationError = reader.configurationLoadError {
                 Text(configurationError).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
             }
-            Text(provider == "omlx" ? "连接已启动的 oMLX；模型的加载与释放由 oMLX 管理。" :
+            Text(provider == "omlx" ? "连接已启动的 oMLX。Koma 会在切换模型和退出时请求释放用过的模型。" :
                  "使用本机或其他设备上的 Ollama。默认本机地址可由应用自动启动。")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {

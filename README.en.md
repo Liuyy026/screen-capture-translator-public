@@ -63,6 +63,14 @@ Open an image folder, configure the endpoint, optional API key and model, and pr
 
 Candidate data lives under `~/Library/Application Support/KomaReaderRust/`: `config.json`, `pages/`, `pages/vision-v1/` and `reading-native-v1/`. Stable configuration/pages may be copied read-only into independent candidate files on first use. Keys can be saved in the local plaintext config with mode `0600`; Keychain is not accessed. If key persistence is disabled, the key is session-only. Configs, images, weights and private evaluation artifacts are not committed.
 
+### Release translation models
+
+Mac builds from the current `main` branch can unload translation models from oMLX and Ollama. While you translate consecutive pages, Koma keeps the model loaded for the next page.
+
+- **Release a model manually.** After translation finishes, open Processing Settings (处理设置) and click **释放当前模型** (Release current model) next to **刷新模型** (Refresh models). Your selection stays in place. Koma loads the model again the next time a page needs translation. If unloading fails, click **重试释放** (Retry release).
+- **Automatic unloading.** When you switch models or services, Koma asks the previous service to unload the model used in this session. When you quit Koma or close the last reader window, Koma requests an unload for any remaining models it used and waits for the service to respond before exiting.
+
+Clients using the same oMLX server share models. Unloading a model can interrupt another application's request if it is using that same model.
 
 ## Features
 

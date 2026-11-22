@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub struct Options<'a> {
@@ -380,13 +380,7 @@ pub async fn translate(
             "batch_ids":ids,"unit":if dialogue.is_some(){"dialogues"}else{"blocks"},"route":service.chat_route(),
             "provider":service.provider,"base_url":service.base_url});
         let outcome: Result<()> = async {
-            let response = service
-                .request(
-                    service.chat_route(),
-                    Some(&payload),
-                    Duration::from_secs(300),
-                )
-                .await?;
+            let response = service.chat(&payload).await?;
             for key in [
                 "prompt_eval_count",
                 "prompt_eval_duration",
