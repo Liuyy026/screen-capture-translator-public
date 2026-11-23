@@ -944,22 +944,46 @@ private struct NativeLoadedPage: Decodable {
                               directory: ChapterExport.defaultDirectory(project: runtimeRoot ?? root, defaults: defaults))
     }
 
-    func exportChapter(_ options: ChapterExport.Options) {
-        guard canEnhanceChapter else { return }
+    var chapterExportEnhancement: ChapterExport.Enhancement {
+        .init(engine: srEngine, target: srTarget, axis: srAxis, preset: srPreset)
+    }
+
+    func checkChapterExportPage(_ image: URL, source: ExportSource,
+                                enhancement: ChapterExport.Enhancement) async throws -> ExportPageCheck {
+        guard let data = try await nativeCore.requestIfRunning("export_preflight", values: [
+            "image": image.path, "mode": source.rawValue, "super_resolution": enhancement.settings
+        ]) else {
+            throw NativeCoreService.Failure(message: "页面服务尚未运行。请返回阅读器重新载入一页后再检查，或在这里仍尝试导出。")
+        }
+        return try JSONDecoder().decode(ExportPageCheck.self, from: data)
+    }
+
+    func exportChapter(_ options: ChapterExport.Options, reviewed: ExportReview? = nil,
+                       enhancement: ChapterExport.Enhancement? = nil,
+                       completion: ((ChapterExport.Outcome) -> Void)? = nil) {
+        guard canEnhanceChapter else {
+            completion?(.failed("请等待当前处理完成后再导出。"))
+            return
+        }
+        func reject(_ reason: String) {
+            error = reason
+            completion?(.failed(reason))
+        }
         cancelCrop()
         guard let first = options.pages.first, let last = options.pages.last, first >= 1, last <= files.count else {
-            error = "请选择第 1 页到第 \(files.count) 页之间要导出的页码。"
+            reject("请选择第 1 页到第 \(files.count) 页之间要导出的页码。")
             return
         }
         guard options.directory.isFileURL, !options.directory.path.isEmpty,
               !options.directory.path.utf8.contains(0) else {
-            error = "请选择导出文件的保存位置。"
+            reject("请选择导出文件的保存位置。")
             return
         }
         let exportFolderName: String
         do { exportFolderName = try ChapterExport.validatedFolderName(options.folderName) }
-        catch {
-            self.error = error.localizedDescription
+        catch { reject(error.localizedDescription); return }
+        if let reviewed, reviewed.selection.pages != options.pages || !reviewed.missing.isEmpty {
+            reject("所选页面与检查结果不一致，请重新检查。")
             return
         }
         let directory = options.directory.standardizedFileURL
@@ -967,17 +991,16 @@ private struct NativeLoadedPage: Decodable {
         let pages = options.pages.map { (number: $0, file: files[$0 - 1]) }
         let exportTypography = typography
         let digits = max(3, String(files.count).count)
-        let mode = processingMode
-        let useOriginal = srEngine == "off"
-        var enhancement = srSettings
-        if useOriginal { enhancement["engine"] = "metalfx"; enhancement["preset"] = "standard" }
+        let mode = reviewed?.selection.source.rawValue ?? processingMode
+        let enhancement = enhancement ?? chapterExportEnhancement
+        let fingerprints = reviewed?.fingerprints ?? [:]
 
         busy = true; exportingChapter = true; error = nil; lastChapterExport = nil
         queueTotal = pages.count; queueDone = 0
         message = "正在准备导出 \(pages.count) 页漫画…"
         task = Task {
             defer { busy = false; exportingChapter = false; task = nil }
-            var currentPage: URL?
+            var currentPage: (number: Int, file: URL)?
             do {
                 try Task.checkCancellation()
                 let staging = try ChapterExport.stage(in: directory)
@@ -987,42 +1010,63 @@ private struct NativeLoadedPage: Decodable {
                     // A cancelled export must still release its last enhanced image.
                     Task { try? await nativeCore.request("release_export", values: ["export_id": exportID]) }
                 }
-                var omitted = 0
+                var omissions: [Int: Int] = [:]
                 for (index, entry) in pages.enumerated() {
                     try Task.checkCancellation()
                     let input = entry.file
                     let pageNumber = entry.number
-                    currentPage = input
+                    currentPage = entry
                     message = "正在导出第 \(pageNumber) 页（\(input.lastPathComponent)）…"
-                    let data = try await nativeCore.request("chapter_export_page", values: ["image": input.path,
-                        "mode": mode, "super_resolution": enhancement, "prefer_original": useOriginal, "export_id": exportID])
+                    var values: [String: Any] = ["image": input.path, "mode": mode, "super_resolution": enhancement.settings,
+                                                 "prefer_original": enhancement.preferOriginal, "export_id": exportID]
+                    if let expected = fingerprints[pageNumber] { values["expected_fingerprint"] = expected }
+                    let data = try await nativeCore.request("chapter_export_page", values: values)
                     try Task.checkCancellation()
                     let page = try JSONDecoder().decode(ChapterExport.Page.self, from: data)
                     let number = String(pageNumber)
                     let name = String(repeating: "0", count: digits - number.count) + number + ".png"
-                    let cache = try page.cache.map { URL(fileURLWithPath: $0) } ?? cacheFor(input, mode: mode)
+                    let returnedCache = page.cache.map { URL(fileURLWithPath: $0) }
+                    let verifyOriginal = fingerprints[pageNumber] != nil &&
+                        URL(fileURLWithPath: page.effective_image).standardizedFileURL == input.standardizedFileURL
+                    if verifyOriginal && returnedCache == nil { throw CocoaError(.fileReadCorruptFile) }
+                    let cache = try returnedCache ?? cacheFor(input, mode: mode)
+                    let originalDigest = verifyOriginal ? cache.deletingPathExtension().lastPathComponent : nil
                     let key = ChapterTypography.pageKey(image: input, cache: cache)
                     let styles = exportTypography.styles(for: page.page, key: key)
-                    let size = ChapterTypography.originalSize(at: input)
+                    let size = verifyOriginal ? nil : ChapterTypography.originalSize(at: input)
                     let scale = ChapterTypography.pixelScale(for: page.page, originalWidth: size.map { Double($0.width) })
-                    omitted += try await ChapterExport.write(page, to: staging.appendingPathComponent(name),
-                                                             styles: styles, sourcePixelScale: scale,
-                                                             sourceYScale: size.map { Double(page.page.height) / $0.height })
+                    let omitted = try await ChapterExport.write(page, to: staging.appendingPathComponent(name),
+                                                                styles: styles, sourcePixelScale: scale,
+                                                                sourceYScale: size.map { Double(page.page.height) / $0.height },
+                                                                expectedOriginalDigest: originalDigest)
                     try Task.checkCancellation()
+                    if omitted > 0 { omissions[pageNumber] = omitted }
                     queueDone = index + 1
                 }
                 try Task.checkCancellation()
                 currentPage = nil
-                lastChapterExport = try ChapterExport.finish(staging, in: directory, folderName: exportFolderName)
+                let output = try ChapterExport.finish(staging, in: directory, folderName: exportFolderName)
+                lastChapterExport = output
                 if isCustomDirectory { ChapterExport.rememberDirectory(directory, defaults: defaults) }
                 message = "已导出 \(pages.count) 页超分漫画"
-                if omitted > 0 { message += " · \(omitted) 处缺译文或暂无法排版，已保留原文" }
+                if !omissions.isEmpty {
+                    message += " · \(omissions.count) 页共 \(omissions.values.reduce(0, +)) 处未回填，已保留原图"
+                }
+                completion?(.completed(directory: output, omissions: omissions))
             } catch is CancellationError {
                 message = "已取消导出"
+                completion?(.cancelled)
+            } catch let failure as NativeCoreService.Failure where failure.code == "page_revision_changed" {
+                if let currentPage {
+                    message = "第 \(currentPage.number) 页结果已变化，请重新核对后导出。"
+                    completion?(.changed(page: currentPage.number))
+                }
             } catch {
-                let pageName = currentPage.map { "「\($0.lastPathComponent)」" } ?? ""
-                self.error = "\(pageName)导出失败：\(error.localizedDescription)"
+                let pageName = currentPage.map { "第 \($0.number) 页「\($0.file.lastPathComponent)」" } ?? ""
+                let reason = "\(pageName)导出失败：\(error.localizedDescription)"
+                self.error = reason
                 message = "导出未完成"
+                completion?(.failed(reason))
             }
         }
     }

@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Darwin
 import ImageIO
 import SwiftUI
@@ -9,6 +10,26 @@ enum ChapterExport {
         let pages: IndexSet
         let folderName: String
         let directory: URL
+    }
+
+    struct Enhancement {
+        let engine: String
+        let target: Int
+        let axis: String
+        let preset: String
+
+        var preferOriginal: Bool { engine == "off" }
+        var settings: [String: Any] {
+            ["engine": preferOriginal ? "metalfx" : engine, "target": target, "axis": axis,
+             "preset": preferOriginal ? "standard" : preset]
+        }
+    }
+
+    enum Outcome {
+        case completed(directory: URL, omissions: [Int: Int])
+        case cancelled
+        case changed(page: Int)
+        case failed(String)
     }
 
     struct Page: Decodable {
@@ -115,13 +136,22 @@ enum ChapterExport {
     }
 
     @MainActor static func write(_ input: Page, to url: URL, styles: [String: ReadingTextStyle] = [:],
-                                 sourcePixelScale: Double = 1, sourceYScale: Double? = nil) async throws -> Int {
+                                 sourcePixelScale: Double = 1, sourceYScale: Double? = nil,
+                                 expectedOriginalDigest: String? = nil) async throws -> Int {
         let page = input.page
         guard input.reply.version == 3, page.width > 0, page.height > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
+        let imageURL = URL(fileURLWithPath: input.effective_image)
+        let base = try await Task.detached(priority: .userInitiated) {
+            try decodeImage(at: imageURL, expectedDigest: expectedOriginalDigest)
+        }.value
+        try Task.checkCancellation()
+        // When exporting the original, typography also uses the verified, EXIF-oriented pixels.
+        let scale = expectedOriginalDigest == nil ? sourcePixelScale : Double(page.width) / Double(base.width)
+        let yScale = expectedOriginalDigest == nil ? sourceYScale : Double(page.height) / Double(base.height)
         let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions,
-                                                        styles: styles, sourcePixelScale: sourcePixelScale, sourceYScale: sourceYScale)
+                                                        styles: styles, sourcePixelScale: scale, sourceYScale: yScale)
         let shown = Set(presentations.flatMap(\.region.block_ids))
         let omitted = page.blocks.filter { block in
             if !block.keepsOriginal && !shown.contains(block.id)
@@ -134,9 +164,6 @@ enum ChapterExport {
                     || block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }.count
 
-        let imageURL = URL(fileURLWithPath: input.effective_image)
-        let base = try await Task.detached(priority: .userInitiated) { try decodeImage(at: imageURL) }.value
-        try Task.checkCancellation()
         let size = CGSize(width: base.width, height: base.height)
         let layer = presentations.isEmpty ? nil : try renderOverlay(size: size, page: page, presentations: presentations)
         try await Task.detached(priority: .userInitiated) {
@@ -150,10 +177,28 @@ enum ChapterExport {
         return omitted
     }
 
-    private static func decodeImage(at url: URL) throws -> CGImage {
+    private static func decodeImage(at url: URL, expectedDigest: String?) throws -> CGImage {
+        let source: CGImageSource?
+        if let expectedDigest {
+            // Hash and decode the same owned bytes even if the path is replaced after Rust replies.
+            let changed = NativeCoreService.Failure(message: "导出时原图已变化，请重新核对。", code: "page_revision_changed")
+            let handle: FileHandle
+            do { handle = try FileHandle(forReadingFrom: url) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+                throw changed
+            } catch let error as POSIXError where error.code == .ENOENT {
+                throw changed
+            }
+            defer { try? handle.close() }
+            let bytes = try handle.readToEnd() ?? Data()
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            guard digest == expectedDigest else { throw changed }
+            source = CGImageSourceCreateWithData(bytes as CFData, nil)
+        } else {
+            source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        }
         let decodeOptions = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let pixels = CGImageSourceCreateImageAtIndex(source, 0, decodeOptions) else {
+        guard let source, let pixels = CGImageSourceCreateImageAtIndex(source, 0, decodeOptions) else {
             throw CocoaError(.fileReadCorruptFile)
         }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]

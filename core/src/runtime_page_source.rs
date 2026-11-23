@@ -13,14 +13,14 @@ use opencv::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{borrow::Cow, fs, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};
 
-fn read_json(path: &Path, limit: u64) -> Option<Value> {
+fn bounded_bytes(path: &Path, limit: u64) -> Option<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > limit {
         return None;
     }
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
+    fs::read(path).ok()
 }
 
 fn canvas(page: &Value) -> Option<(i32, i32)> {
@@ -29,25 +29,71 @@ fn canvas(page: &Value) -> Option<(i32, i32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Original<'a> {
+    Path(&'a Path),
+    Bytes(&'a [u8]),
+}
+
+fn image_size(original: Original<'_>, size: &mut Option<(u32, u32)>) -> Result<(u32, u32)> {
+    if let Some(size) = *size { return Ok(size); }
+    let image = match original {
+        Original::Path(path) => imaging::decode_color(path)?,
+        Original::Bytes(bytes) => imaging::decode_bytes(bytes, imgcodecs::IMREAD_COLOR)?,
+    };
+    Ok(*size.insert((image.cols() as u32, image.rows() as u32)))
+}
+
+// Rebuilding an evicted SR sidecar can make a formerly unidentifiable legacy
+// page eligible. Geometry can rule this out, but cannot prove source identity.
+fn unresolved_revisions(directory: &Path, settings: Option<&Settings>, original: Original<'_>,
+    original_size: &mut Option<(u32,u32)>, revisions: &mut BTreeMap<std::path::PathBuf, String>) -> Result<()> {
+    let Some(settings) = settings.filter(|s| s.engine != "off") else { return Ok(()) };
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "json") ||
+            !path.file_stem().and_then(|s| s.to_str()).is_some_and(hex_key) { continue; }
+        let Some(bytes) = bounded_bytes(&path, 16 * 1024 * 1024) else { continue };
+        let Ok(page) = crate::persistence::parse_page(&bytes) else { continue };
+        let (w, h) = image_size(original, original_size)?;
+        if let Some((x, y)) = super_resolution::dimensions(w, h, settings)?
+            && canvas(&page) == Some((x as i32, y as i32)) {
+            revisions.insert(path, format!("{:x}", Sha256::digest(bytes)));
+        }
+    }
+    Ok(())
+}
+
+pub(super) struct LegacyPage {
+    pub page: Value,
+    // Bind all eligible revisions: before enhancement the exact-key tie-break
+    // can be unknown, including when a newer helper would produce a new key.
+    pub revisions: BTreeMap<String, (String, String)>,
+    pub undecided: bool,
+}
+
 pub(super) fn legacy_enhanced_page(
-    original: &Path,
-    effective: &Path,
+    original: Original<'_>,
+    effective: Option<&Path>,
+    requested: Option<&Settings>,
     cache: &Path,
     sr_root: &Path,
     page_root: &Path,
     mode: &str,
-) -> Result<Option<Value>> {
+) -> Result<(Option<LegacyPage>, Option<String>)> {
     let source_sha256 = cache
         .file_stem()
         .and_then(|stem| stem.to_str())
         .context("missing source hash")?;
     let legacy_root = page_root.join("enhanced-v1");
     if !plain_dir(&legacy_root) {
-        return Ok(None);
+        return Ok((None, None));
     }
     let mut original_size = None;
     let mut best = None;
-    let mut candidates = 0;
+    let mut revisions = BTreeMap::new();
+    let mut possible_exact = Vec::new();
+    let mut unresolved = BTreeMap::new();
     for entry in fs::read_dir(legacy_root)? {
         let entry = entry?;
         let key = entry.file_name();
@@ -57,39 +103,34 @@ pub(super) fn legacy_enhanced_page(
         if !entry.file_type()?.is_dir() {
             continue;
         }
+        let directory = if mode == "vision" { entry.path().join("vision-v1") } else { entry.path() };
+        if !plain_dir(&directory) { continue; }
         let sr_dir = sr_root.join(key);
-        if !plain_dir(&sr_dir) {
+        let sidecar = plain_dir(&sr_dir).then(|| bounded_bytes(&sr_dir.join("identity.json"), 65_536))
+            .flatten().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let identity = sidecar.as_ref().map(|sidecar| &sidecar["identity"]);
+        let valid_identity = match identity {
+            Some(identity) if identity["schema"] == 1 =>
+                format!("{:x}", Sha256::digest(serde_json::to_vec(identity)?)) == key,
+            _ => false,
+        };
+        if !valid_identity {
+            unresolved_revisions(&directory, requested, original, &mut original_size, &mut unresolved)?;
             continue;
         }
-        let Some(sidecar) = read_json(&sr_dir.join("identity.json"), 65_536) else {
-            continue;
-        };
+        let sidecar = sidecar.unwrap();
         let identity = &sidecar["identity"];
-        if identity["schema"] != 1
-            || identity["source_sha256"] != source_sha256
-            || format!("{:x}", Sha256::digest(serde_json::to_vec(identity)?)) != key
-        {
-            continue;
-        }
-        let Some(output_sha256) = sidecar["output_sha256"]
-            .as_str()
-            .filter(|hash| hex_key(hash))
-        else {
+        if identity["source_sha256"] != source_sha256 { continue; }
+        let Some(output_sha256) = sidecar["output_sha256"].as_str().filter(|hash| hex_key(hash)) else {
+            unresolved_revisions(&directory, requested, original, &mut original_size, &mut unresolved)?;
             continue;
         };
-        let directory = if mode == "vision" {
-            entry.path().join("vision-v1")
-        } else {
-            entry.path()
-        };
-        if !plain_dir(&directory) {
-            continue;
-        }
         let legacy = directory.join(format!("{output_sha256}.json"));
-        let Some(page) = read_json(&legacy, 16 * 1024 * 1024) else {
+        let Some(bytes) = bounded_bytes(&legacy, 16 * 1024 * 1024) else { continue };
+        let Ok(page) = crate::persistence::parse_page(&bytes) else {
             continue;
         };
-        let Some((width, height)) = canvas(&page).filter(|_| crate::persistence::validate_page(&page).is_ok()) else {
+        let Some((width, height)) = canvas(&page) else {
             continue;
         };
         if identity["width"] != width || identity["height"] != height {
@@ -98,15 +139,7 @@ pub(super) fn legacy_enhanced_page(
         let Ok(settings) = serde_json::from_value::<Settings>(identity["settings"].clone()) else {
             continue;
         };
-        let (source_width, source_height) = match original_size {
-            Some(size) => size,
-            None => {
-                let image = imaging::decode_color(original)?;
-                let size = (image.cols() as u32, image.rows() as u32);
-                original_size = Some(size);
-                size
-            }
-        };
+        let (source_width, source_height) = image_size(original, &mut original_size)?;
         if super_resolution::dimensions(source_width, source_height, &settings)
             .ok()
             .flatten()
@@ -129,15 +162,14 @@ pub(super) fn legacy_enhanced_page(
                 translated += 1;
             }
         }
-        candidates += 1;
-        let exact = effective.parent() == Some(sr_dir.as_path());
-        let rank = (
-            manual,
-            translated > 0 && translated == eligible,
-            translated,
-            exact,
-            key.to_owned(),
-        );
+        revisions.insert(key.to_owned(), (output_sha256.to_owned(), format!("{:x}", Sha256::digest(bytes))));
+        let quality = (manual, translated > 0 && translated == eligible, translated);
+        if effective.is_none() && requested.is_some_and(|s| s.engine == settings.engine
+            && s.target == settings.target && s.axis == settings.axis && s.preset == settings.preset) {
+            possible_exact.push((quality, key.to_owned()));
+        }
+        let exact = effective.and_then(Path::parent) == Some(sr_dir.as_path());
+        let rank = (quality, exact, key.to_owned());
         if best
             .as_ref()
             .is_none_or(|(previous, _, _)| rank > *previous)
@@ -145,13 +177,17 @@ pub(super) fn legacy_enhanced_page(
             best = Some((rank, page, identity["settings"].clone()));
         }
     }
-    Ok(best.map(|((_, _, _, _, identity), mut page, settings)| {
+    let best = best.map(|((quality, _, identity), mut page, settings)| {
+        let undecided = possible_exact.iter().any(|(rank, key)| *rank == quality && *key != identity);
         page["layout_provenance"] = json!({
             "version": 1, "source_sha256": source_sha256, "legacy_enhancement": identity,
-            "settings": settings, "legacy_candidates": candidates
+            "settings": settings, "legacy_candidates": revisions.len()
         });
-        page
-    }))
+        LegacyPage { page, revisions, undecided }
+    });
+    let unresolved = (!unresolved.is_empty()).then(|| serde_json::to_vec(&unresolved))
+        .transpose()?.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    Ok((best, unresolved))
 }
 
 pub(super) fn source_canvas<'a>(page: &Value, image: &'a [u8]) -> Result<Cow<'a, [u8]>> {
@@ -272,6 +308,39 @@ mod tests {
     }
 
     #[test]
+    fn tied_legacy_revisions_and_evicted_identities_are_unresolved_in_preflight() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let image = original_file(root)?;
+        let digest = format!("{:x}", Sha256::digest(fs::read(&image)?));
+        let cache = root.join("pages").join(format!("{digest}.json"));
+        let (a, _) = legacy_fixture(root, &digest, "text", "standard", true)?;
+        let (b, _) = legacy_fixture(root, &digest, "text", "denoise", true)?;
+        // The actual SR key takes precedence over lexicographic order only
+        // among equally good candidates. Select the lesser key's own preset.
+        let (matched, preset) = if a < b { (&a, "standard") } else { (&b, "denoise") };
+        let settings = Settings { engine: "realcugan".into(), preset:preset.into(), ..Default::default() };
+        let lookup = |effective| legacy_enhanced_page(Original::Path(&image), effective, Some(&settings),
+            &cache, &root.join("sr"), &root.join("pages"), "text");
+        let (preview, unresolved) = lookup(None)?;
+        let preview = preview.unwrap();
+        assert!(preview.undecided && unresolved.is_none());
+        let exact = lookup(Some(matched))?.0.unwrap();
+        assert!(!exact.undecided);
+        assert_eq!(exact.page["blocks"][0]["translation"], preset);
+        assert_eq!(exact.revisions, preview.revisions);
+        assert_ne!(exact.page, preview.page);
+
+        fs::remove_dir_all(root.join("sr"))?;
+        let (known, unresolved) = lookup(None)?;
+        assert!(known.is_none() && unresolved.is_some());
+        let (_, no_enhancement) = legacy_enhanced_page(Original::Path(&image), None, Some(&Settings::default()),
+            &cache, &root.join("sr"), &root.join("pages"), "text")?;
+        assert!(no_enhancement.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn verified_legacy_layout_is_reusable_after_its_image_is_gone() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
@@ -289,16 +358,17 @@ mod tests {
         ];
         let find = |mode| {
             legacy_enhanced_page(
-                &image,
-                &effective,
+                Original::Path(&image),
+                Some(&effective),
+                None,
                 &canonical,
                 &root.join("sr"),
                 &root.join("pages"),
                 mode,
             )
         };
-        let text = find("text")?.context("missing same-source text record")?;
-        let visual = find("vision")?.context("missing same-source visual record")?;
+        let text = find("text")?.0.context("missing same-source text record")?.page;
+        let visual = find("vision")?.0.context("missing same-source visual record")?.page;
         assert_eq!(text["blocks"][0]["translation"], "conservative");
         assert_eq!(text["blocks"][0]["box"], json!([10, 20, 30, 40]));
         assert_eq!(text["layout_provenance"]["legacy_candidates"], 2);

@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 
 #[path = "runtime_page_source.rs"]
 mod page_source;
+#[path = "runtime_export_source.rs"]
+mod export_source;
 #[path = "manual_ocr.rs"]
 mod manual_ocr;
 
@@ -18,6 +20,7 @@ pub struct Runtime{
     pub sr:crate::super_resolution::Store,
     pub cache_policy:Arc<crate::cache_policy::Manager>,
     pub seed_root:Option<PathBuf>,
+    export_transitions:export_source::ExportTransitions,
     pub display:display_cache::Store,
     models:Mutex<ImageModels>,
     pub engine:crate::local_engine::LocalEngine,
@@ -167,49 +170,18 @@ impl Runtime{
         ensure!(!sr.root.starts_with(&cache_root)&&!cache_root.starts_with(&sr.root),"增强缓存与译文目录不能重叠");
         if let Some(seed)=&seed_root {ensure!(!sr.root.starts_with(seed)&&!seed.starts_with(&sr.root),"增强缓存与稳定版缓存不能重叠");}
         let cache_policy=crate::cache_policy::Manager::new(&sr.root,&assets_root,&cache_root)?;
-        Ok(Self{sr,cache_policy,cache_root,seed_root,display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
+        Ok(Self{sr,cache_policy,cache_root,seed_root,export_transitions:Default::default(),display:display_cache::Store{root:assets_root,weights:weights.to_owned()},
             models:Mutex::new(ImageModels::new(python,worker,weights)?),
             translation_models: Arc::default(),
             engine:crate::local_engine::LocalEngine::new(ollama,weights.join("ollama"))})
     }
+    fn cache_directory(&self, mode: &str) -> Result<PathBuf> {
+        ensure!(["text","vision"].contains(&mode), "未知翻译方式");
+        Ok(if mode == "vision" {self.cache_root.join("vision-v1")} else {self.cache_root.clone()})
+    }
     pub fn cache_for(&self,image:&Path,mode:&str)->Result<PathBuf>{
-        ensure!(["text","vision"].contains(&mode),"未知翻译方式");
-        let root = if mode == "vision" {self.cache_root.join("vision-v1")} else {self.cache_root.clone()};
-        persistence::cache_path(image, &root)
+        persistence::cache_path(image, &self.cache_directory(mode)?)
     }
-    fn seed_page(&self, image: &Path, effective: &Path, mode: &str, target: &Path) -> Result<Option<Value>> {
-        if target.exists() {
-            let page = persistence::parse_page(&std::fs::read(target)?)?;
-            let _ = crate::cache_policy::touch(target);
-            return Ok(Some(page));
-        }
-        if let Some(seed) = &self.seed_root {
-            let directory = if mode == "vision" { seed.join("vision-v1") } else { seed.clone() };
-            let source = directory.join(target.file_name().unwrap());
-            if source.is_file() {
-                let bytes = std::fs::read(source)?;
-                let page = persistence::parse_page(&bytes)?;
-                return Ok(Some(persistence::seed_page(target, &bytes, page)?));
-            }
-        }
-        let legacy = |mode| {
-            page_source::legacy_enhanced_page(image, effective, target, &self.sr.root, &self.cache_root, mode)
-        };
-        let mut page = legacy(mode)?;
-        if page.is_none() && mode == "vision" {
-            page = vision_pipeline::prepare(image, target, &self.cache_root)?;
-            if page.is_some() {
-                let _ = crate::cache_policy::touch(&self.cache_for(image, "text")?);
-            } else if let Some(seed) = &self.seed_root {
-                page = vision_pipeline::prepare(image, target, seed)?;
-            }
-            if page.is_none() {
-                page = legacy("text")?.map(vision_pipeline::from_text);
-            }
-        }
-        page.map(|page| persistence::seed_page(target, &serde_json::to_vec_pretty(&page)?, page)).transpose()
-    }
-
     pub async fn load_page(&self, image: &Path, effective: &Path, mode: &str) -> Result<Value> {
         let cache = self.cache_for(image, mode)?;
         let _pin = self.cache_policy.pin_page(&cache)?;
@@ -240,7 +212,7 @@ impl Runtime{
         if waited { read_page_image(image, &cache)?; }
         let (mut page, revision) = snapshot.unzip();
         if let Some(page) = page.as_mut() {
-            if crate::translation::audit_cache(page, None) { structure::sync(page)?; }
+            export_source::audit_for_read(page)?;
             let _ = crate::cache_policy::touch(&cache);
         }
         Ok(json!({"cache":cache,"page":page,"revision":revision,"layout_image":image}))
@@ -378,13 +350,23 @@ impl Runtime{
     }
 
     pub async fn chapter_export_page(&self, source: &Path, mode: &str,
-        settings: &crate::super_resolution::Settings) -> Result<Value> {
+        settings: &crate::super_resolution::Settings, session: &str, expected: Option<&str>) -> Result<Value> {
+        if let Some(expected) = expected { self.verify_export(source, mode, settings, session, expected)?; }
         let effective = self.sr.prepare(source, settings).await?;
-        let mut snapshot = self.load_page(source, &effective, mode).await?;
+        let (mut snapshot, loaded_fingerprint) = match expected {
+            Some(expected) => {
+                let (snapshot, proof) = self.load_confirmed_export(source, &effective, mode, settings, session, expected).await?;
+                (snapshot, Some(proof))
+            }
+            None => (self.load_page(source, &effective, mode).await?, None),
+        };
         ensure!(!snapshot["page"].is_null(), "这页尚未处理，请先翻译整个文件夹。");
         let cache = Path::new(snapshot["cache"].as_str().context("missing cache path")?);
         let revision = snapshot["revision"].as_str().context("missing page revision")?;
         snapshot["reply"] = self.display_page(source, cache, Some(revision)).await?["reply"].take();
+        // Rendering may wait for image models. Check both page sources again
+        // before passing the rendered result to the PNG writer.
+        if let Some(proof) = loaded_fingerprint { self.verify_export(source, mode, settings, "", &proof)?; }
         snapshot["effective_image"] = json!(effective);
         Ok(snapshot)
     }
@@ -441,6 +423,11 @@ impl Runtime{
         if crate::translation::audit_cache(&mut page, None) { structure::sync(&mut page)?; }
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
     }
+    pub fn release_export(&self, session: &str) {
+        self.export_transitions.release(session);
+        self.cache_policy.release_export(session);
+    }
+
     pub async fn maintain_cache(&self) {
         if let Err(error)=self.cache_policy.maintain().await { eprintln!("缓存清理未完成：{error}"); }
     }
@@ -468,7 +455,7 @@ impl Runtime{
 mod tests {
     use super::*;
 
-    fn isolated_runtime(root: &Path) -> Result<Runtime> {
+    pub(super) fn isolated_runtime(root: &Path) -> Result<Runtime> {
         let worker = root.join("core/python/model_worker.py");
         std::fs::create_dir_all(worker.parent().unwrap())?;
         std::fs::write(&worker, "")?;

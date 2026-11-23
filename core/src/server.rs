@@ -94,6 +94,10 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let _activity=runtime.cache_policy.activity().await?;
             runtime.display_page(Path::new(required(r,"image")?),Path::new(required(r,"cache")?),r["revision"].as_str()).await
         },
+        "export_preflight"=>{
+            let settings = serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
+            runtime.export_preflight(Path::new(required(r,"image")?), r["mode"].as_str().unwrap_or("text"), &settings)
+        },
         "chapter_export_page"=>{
             let _permit=display_gate.acquire().await?;
             let _activity=runtime.cache_policy.activity().await?;
@@ -102,13 +106,15 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             ensure!(session.len() <= 128, "无效导出任务编号");
             let settings:crate::super_resolution::Settings=serde_json::from_value(r["super_resolution"].clone())?;
             ensure!(settings.engine != "off", "请选择超分引擎");
+            let expected = r.get("expected_fingerprint").map(|v| v.as_str()
+                .filter(|s| crate::cache_policy::hex_key(s)).context("无效导出预检凭据")).transpose()?;
             let reply = runtime.chapter_export_page(Path::new(required(r,"image")?),r["mode"].as_str().unwrap_or("text"),
-                &settings).await?;
+                &settings, session, expected).await?;
             runtime.cache_policy.pin_export(session, Path::new(required(&reply, "effective_image")?))?;
             Ok(reply)
         },
         "release_export"=>{
-            runtime.cache_policy.release_export(required(r, "export_id")?);
+            runtime.release_export(required(r, "export_id")?);
             Ok(json!({"released": true}))
         },
         "edit"=>{
@@ -225,7 +231,7 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
     if job.request["op"] == "ocr_crop_preview" || (job.request["op"] == "process" && job.request["operation"] != "enhance") {
         cleanup_ocr(&runtime).await;
     }
-    runtime.maintain_cache().await;
+    if job.request["op"] != "export_preflight" { runtime.maintain_cache().await; }
     registry.lock().await.remove(&job.id);
     let _=output.send(reply).await;
 }

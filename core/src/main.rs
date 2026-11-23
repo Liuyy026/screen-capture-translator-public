@@ -2,6 +2,7 @@ mod background;
 mod cache_policy;
 mod compat;
 mod display_cache;
+mod export_preflight;
 mod geometry;
 mod imaging;
 mod ink;

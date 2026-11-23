@@ -149,15 +149,17 @@ pub fn reading_order(items: Vec<Value>, vertical: bool, page: bool) -> Vec<Value
     sorted
 }
 
+pub(crate) fn normalized_source(source: &str) -> Option<String> {
+    let value: String = source.nfkc().filter(|c| !whitespace(*c)).collect();
+    (!value.is_empty()).then_some(value)
+}
+
 fn duplicate(a: &Value, b: &Value) -> bool {
-    let normalized = |v: &Value| {
-        nfkc(&v["source"])
-            .chars()
-            .filter(|c| !whitespace(*c))
-            .collect::<String>()
+    let normalized = |v: &Value| normalized_source(&string_or_empty(&v["source"]));
+    let Some(source) = normalized(a) else {
+        return false;
     };
-    let s = normalized(a);
-    if s.is_empty() || s != normalized(b) {
+    if normalized(b).as_deref() != Some(source.as_str()) {
         return false;
     }
     let (x, y) = (rect(a), rect(b));
