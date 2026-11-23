@@ -6,13 +6,13 @@ Koma 在 Apple 芯片 Mac 上识别日文漫画、翻译对白并将中文排回
 
 ## 下载
 
-**[下载 Koma v0.22（macOS ZIP）](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/Koma-0.22-macOS-arm64.zip)** · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/SHA256SUMS.txt) · [v0.22 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22)
+**[下载 Koma v2.3（macOS ZIP）](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/Koma-2.3-macOS-arm64.zip)** · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/SHA256SUMS.txt) · [v2.3 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v2.3)
 
 适用于 Apple 芯片 Mac，要求 macOS 14 或更新版本。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。正式应用继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
 
-0.22 可以在同一整章任务中复用 OCR 模型，并在切页、编辑、导出和取消时保护页面缓存与手改内容。视觉辅助从第 3 页起同时参考同章上一页，只翻译当前页；逐框排版、选择页码导出和两种超分继续可用。[Mac 操作手册](macos/README.md)
+v2.3 支持在导出时单独选择普通翻译或视觉辅助。导出窗口会逐页检查可用译文，并列出另一种方式里内容不同的手改。发现漏字时，可以框选原图补充识别，在中文视图里可以移动或调宽文字框，保存后用于阅读和 PNG 导出。[Mac 操作手册](macos/README.md)
 
-旧版可从 [macOS v0.21 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21) 下载。源码构建见[从源码运行](#从源码运行)。
+旧版可从 [macOS v0.22 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22) 下载。源码构建见[从源码运行](#从源码运行)。
 
 Windows 旧版源码及运行说明见 [Koma-Windows-Legacy](https://github.com/Liuyy026/Koma-Windows-Legacy) 和 [Windows 实机验证指南](https://github.com/Liuyy026/Koma-Windows-Legacy/blob/main/Windows%E5%AE%9E%E6%9C%BA%E9%AA%8C%E8%AF%81.md)。
 

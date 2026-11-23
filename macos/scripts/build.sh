@@ -16,8 +16,8 @@ import os
 import sys
 root = Path.cwd()
 info = {'CFBundleName': 'Koma Rust 候选版', 'CFBundleDisplayName': 'Koma Rust 候选版',
-        'CFBundleIdentifier': os.environ.get('KOMA_APP_ID', 'local.koma.reader.rust'), 'CFBundleVersion': '1',
-        'CFBundleShortVersionString': '0.2.0-dev', 'CFBundleExecutable': 'KomaRustReader',
+        'CFBundleIdentifier': os.environ.get('KOMA_APP_ID', 'local.koma.reader.rust'), 'CFBundleVersion': '2.3',
+        'CFBundleShortVersionString': '2.3', 'CFBundleExecutable': 'KomaRustReader',
         'CFBundleIconFile': 'AppIcon.icns',
         'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': '14.0',
         'NSHighResolutionCapable': True, 'NSPrincipalClass': 'NSApplication',

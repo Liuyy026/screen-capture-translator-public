@@ -65,9 +65,10 @@ Select a dialogue and choose **Keep original bubble** (`保留原框`) in the ed
 
 ### Export manga
 
-1. Process the pages to export in the current translation mode. Click **Export manga** (`导出漫画`) in the toolbar.
-2. Choose the whole chapter or enter selected pages. Use the page numbers shown in the reader. You can mix single pages and ranges, such as `1, 3, 5–8`.
-3. Set the folder name and destination, then start the export. A new installation defaults to your Documents folder. The app remembers the destination locally after a successful export.
+1. Click **Export manga** (`导出漫画`) and choose the whole chapter or specific pages. Use the page numbers in the reader, for example `1, 3, 5–8`.
+2. Choose ordinary or vision-assisted translations for this export. The default follows your reader setting. Review the selected pages for missing recognition, text that needs checking and differing manual translations in the other mode. You can change the export source, open a page to inspect it or continue with the selected source. Each mode keeps its own edits.
+3. If only ordinary results exist, the vision source can inherit OCR and saved manual edits. To include other translations in the vision edition, translate the page in vision mode first. If only vision results exist, process the page in ordinary mode before exporting an ordinary edition.
+4. Set the destination and folder name, then start the export. If the source changes before confirmation, review the updated results. A new installation defaults to Documents and remembers the destination after a successful export.
 
 The app composites existing Chinese layouts onto the enhanced images and saves local PNGs with the original chapter numbers, such as `001.png`, `003.png` and `005.png`. It uses the current enhancement settings, with MetalFX when pre-enhancement is off. Preserved bubbles and areas without usable translations retain the original text. If the folder name is taken, the app adds a number. After export, reveal the folder in Finder from the status bar.
 

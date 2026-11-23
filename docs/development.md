@@ -19,8 +19,8 @@ macos/.venv/bin/python scripts/check_regressions.py --native
 使用干净的源码提交。OpenCV 的最低部署目标应为 macOS 14，在编译它之前设置 `MACOSX_DEPLOYMENT_TARGET=14.0`。为避免原生依赖的编译信息携带个人路径，发布用 OpenCV 的构建目录可设在 `/private/tmp`。然后传入含有 `build/`、`install/` 和原始 OpenCV 源码的目录。
 
 ```sh
-python3 macos/release/package.py --version 0.22 --native-deps /path/to/native-deps --output dist/v0.22
-(cd dist/v0.22 && shasum -a 256 Koma-0.22-macOS-arm64.zip > SHA256SUMS.txt)
+python3 macos/release/package.py --version 2.3 --native-deps /path/to/native-deps --output dist/v2.3
+(cd dist/v2.3 && shasum -a 256 Koma-2.3-macOS-arm64.zip > SHA256SUMS.txt)
 ```
 
 打包器检查 CPU 架构、最低系统版本、动态库路径和临时签名，并将当前提交写入 ZIP 的 `版本.txt`。发行版使用 `~/Library/Application Support/KomaReaderRelease/`，开发版使用 `KomaReaderRust/`。

@@ -57,7 +57,9 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 ## 常驻应用服务
 
-`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`models`、`unload_model`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`ocr_crop_preview`、`ocr_crop_apply`、`export_preflight`、`chapter_export_page`、`release_export`、`models`、`unload_model`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+
+导出窗口逐页发送 `export_preflight`，参数为原图 `image`、所选 `mode` 和本次 `super_resolution` 设置。只读预检返回 `ready`、`missing` 或 `uncertain`，以及来源、手改对照、待核对框数和 `fingerprint`。指纹涵盖原图、设置和两种方式的缓存版本。`chapter_export_page` 接受可选的 `expected_fingerprint`，发现来源变化会返回 `page_revision_changed`。同一导出任务使用同一 `export_id`，结束时调用 `release_export`。
 
 `unload_model` 按 `provider`、`base_url`、`model` 指定目标。切换模型时只释放本次会话实际请求过推理的模型；手动按钮传入 `explicit: true`，也可释放此前已加载的指定模型。`shutdown` 和标准输入关闭都会清理本次会话使用的翻译模型；`shutdown` 在清理结束后回执，未能确认卸载时返回 `unload_error`。
 

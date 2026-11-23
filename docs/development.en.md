@@ -19,8 +19,8 @@ Use `--local` to require private Python suites in `tests/` and `macos/tests/`. U
 Start from a clean commit. Set `MACOSX_DEPLOYMENT_TARGET=14.0` before compiling release OpenCV. A build directory in `/private/tmp` avoids embedding a personal home path in native build metadata. Pass its directory containing the OpenCV source, build and installation to the packager.
 
 ```sh
-python3 macos/release/package.py --version 0.22 --native-deps /path/to/native-deps --output dist/v0.22
-(cd dist/v0.22 && shasum -a 256 Koma-0.22-macOS-arm64.zip > SHA256SUMS.txt)
+python3 macos/release/package.py --version 2.3 --native-deps /path/to/native-deps --output dist/v2.3
+(cd dist/v2.3 && shasum -a 256 Koma-2.3-macOS-arm64.zip > SHA256SUMS.txt)
 ```
 
 The packager verifies architecture, minimum OS, library paths and ad hoc signatures, and records the source commit in the ZIP. Release data stays in `~/Library/Application Support/KomaReaderRelease/`. The source-built reader uses `KomaReaderRust/`.

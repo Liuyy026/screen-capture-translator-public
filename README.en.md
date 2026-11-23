@@ -6,13 +6,13 @@ Koma recognizes Japanese dialogue on an Apple Silicon Mac, translates it and typ
 
 ## Download
 
-**[Download Koma v0.22 for macOS (ZIP)](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/Koma-0.22-macOS-arm64.zip)** · [SHA-256 checksum](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v0.22/SHA256SUMS.txt) · [v0.22 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22)
+**[Download Koma v2.3 for macOS (ZIP)](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/Koma-2.3-macOS-arm64.zip)** · [SHA-256 checksum](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/SHA256SUMS.txt) · [v2.3 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v2.3)
 
 Requires Apple Silicon and macOS 14 or later. Unzip and open `Koma.app` to read a chapter or try the sample pages. Quit the app and run the included `准备组件.command` to install OCR, restoration and Real-CUGAN components. The release app continues to use existing settings and caches in `KomaReaderRelease`. [Package instructions (Chinese)](macos/release/README.md)
 
-The reader reuses the OCR model within chapter jobs and protects manual edits and cached pages during navigation, export and cancellation. Visual assistance can use the preceding image starting on page 3. Per-bubble typography, selected-page export and both upscalers remain available. [Mac reader guide](macos/README.en.md)
+In v2.3 you can choose ordinary or vision-assisted translations for each export. The reader checks the selected pages and shows differing manual translations saved in the other mode. Select a missed area to correct its OCR, or move and resize a Chinese text frame before saving the chapter as PNGs. [Mac reader guide](macos/README.en.md)
 
-The previous download remains on the [macOS v0.21 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.21). See [Run from source](#run-from-source) for build instructions.
+The previous download remains on the [macOS v0.22 release page](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v0.22). See [Run from source](#run-from-source) for build instructions.
 
 Find the legacy Windows source and setup instructions in [Koma-Windows-Legacy](https://github.com/Liuyy026/Koma-Windows-Legacy) and the [Windows validation guide (Chinese)](https://github.com/Liuyy026/Koma-Windows-Legacy/blob/main/Windows%E5%AE%9E%E6%9C%BA%E9%AA%8C%E8%AF%81.md).
 
