@@ -1,6 +1,6 @@
-# Koma Rust core（macOS 候选版）
+# Koma 的 Rust 核心（macOS）
 
-本目录实现独立 macOS 候选版的 Rust 核心，已完成目标职责迁移、35 页效果与显示性能对照及真实窗口流程验收。候选版独立运行，不覆盖稳定阅读器。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型；不能依赖旧 Python 业务流程完成所谓 Rust 处理。
+本目录实现 Koma macOS 版的 Rust 核心。迁移时完成了 35 页效果与显示性能对照及真实窗口流程验收。目标职责与验收标准见 [迁移记录](../docs/rust-core-migration.md)。Python 模型进程仅运行检测、OCR 和背景修补模型。
 
 ## 本地开发
 
@@ -53,11 +53,11 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 `background-render` 用于局部修补差分验证。`verify_reader_behavior.py` 将既有阅读显示行为断言接到 Rust CLI；完整章节像素与人工截图验收保留为历史记录，不属于当前离线核心回归。
 
-实际 OCR 页面组装、持久显示缓存、常驻任务服务和本地引擎生命周期已接入候选应用，验收结果与性能口径见 [验收报告](../docs/rust-core-validation.md)。
+实际 OCR 页面组装、持久显示缓存、常驻任务服务和本地引擎生命周期已接入 Koma，验收结果与性能口径见 [验收报告](../docs/rust-core-validation.md)。
 
 ## 常驻应用服务
 
-`serve --cache-root <candidate-pages> --assets-root <candidate-assets> --seed-root <stable-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`ocr_crop_preview`、`ocr_crop_apply`、`export_preflight`、`chapter_export_page`、`release_export`、`models`、`unload_model`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
+`serve --cache-root <pages> --assets-root <assets> --seed-root <legacy-pages> --python <python> --worker core/python/model_worker.py --weights <weights>` 使用标准输入/输出 JSONL。每条请求具有唯一字符串 `id` 和 `op`，支持 `health`、`load_page`、`process`、`display`、`edit`、`ocr_crop_preview`、`ocr_crop_apply`、`export_preflight`、`chapter_export_page`、`release_export`、`models`、`unload_model`、`release_engine`、`cancel`、`shutdown`。凭据仅在请求内传递，不放进命令行、响应或推理子进程环境。
 
 导出窗口逐页发送 `export_preflight`，参数为原图 `image`、所选 `mode` 和本次 `super_resolution` 设置。只读预检返回 `ready`、`missing` 或 `uncertain`，以及来源、手改对照、待核对框数和 `fingerprint`。指纹涵盖原图、设置和两种方式的缓存版本。`chapter_export_page` 接受可选的 `expected_fingerprint`，发现来源变化会返回 `page_revision_changed`。同一导出任务使用同一 `export_id`，结束时调用 `release_export`。
 
@@ -65,11 +65,11 @@ core/target/release/koma-core display --image /path/to/page.webp --cache /path/t
 
 Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启动的模型进程。取消后销毁并等待受中断的模型进程退出，下一次推理使用新进程和临时目录；标准输入关闭会取消任务并清理子进程。非终态进度事件在客户端过慢时可合并丢弃，终态和每页完成事件可靠发送。调用方必须持续读取输出。
 
-候选页面和显示缓存目录不得与只读种子缓存重叠。首次打开按图像哈希复制已有页面，原文、译文和未知元数据保留。编辑支持版本校验，拒绝过期修改及越界写入。显示缓存含代码、输入和模型文件身份以及载荷校验，损坏时重新生成。
+页面和显示缓存目录不得与只读种子缓存重叠。首次打开按图像哈希复制已有页面，原文、译文和未知元数据保留。编辑支持版本校验，拒绝过期修改及越界写入。显示缓存含代码、输入和模型文件身份以及载荷校验，损坏时重新生成。
 
 `verify_runtime.py --output <new-directory>` 自动生成两页素材，验证真实常驻服务的队列、取消、崩溃恢复、手改保护和缓存隔离；故障测试使用模拟推理与回环 HTTP，不运行真实 OCR 或修补模型。
 
-候选应用由 `macos/scripts/build.sh` 构建为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移稳定版配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。本地 Ollama 启停由 Rust 的 `local_engine.rs` 管理：仅在调用方允许启动、无密钥且使用既定本地地址时启动指定安装文件；已运行的外部服务由原进程继续提供，Koma 通过服务接口卸载指定模型。取消未完成的启动或退出时清理自有进程组及 runner。`serve --ollama <executable>` 提供安装文件，默认不启动任何服务。
+`macos/scripts/build.sh` 生成 `macos/dist/Koma.app`，标识为 `local.koma.reader.rust`。默认数据位于 `~/Library/Application Support/KomaReaderRust`，首次配置只读迁移旧版 `KomaReader` 配置到独立副本，不访问钥匙串。`NativeCoreService.swift` 持有 Rust 服务的管道，持续读取并匹配请求编号；Swift 保留界面和排版。本地 Ollama 启停由 Rust 的 `local_engine.rs` 管理：仅在调用方允许启动、无密钥且使用既定本地地址时启动指定安装文件；已运行的外部服务由原进程继续提供，Koma 通过服务接口卸载指定模型。取消未完成的启动或退出时清理自有进程组及 runner。`serve --ollama <executable>` 提供安装文件，默认不启动任何服务。
 
 ## 普通翻译与 OCR 区域分类
 
@@ -79,15 +79,15 @@ Rust 串行调度跨页处理任务；显示请求单独限流，共用延迟启
 
 ```sh
 core/target/release/koma-core translate \
-  --cache /path/to/input-page.json --destination /path/to/candidate-page.json \
-  --image /path/to/page.webp --status /path/to/candidate-status.json \
+  --cache /path/to/input-page.json --destination /path/to/output-page.json \
+  --image /path/to/page.webp --status /path/to/translation-status.json \
   --provider omlx --base-url http://127.0.0.1:8000/v1 --model installed-model \
   --unit blocks --batch-size 8
 ```
 
 `--unit dialogues` 使用完整对白；`--block-id` 仅处理指定块，保留手工修改；`--metrics` 可选输出只含已知计时/计数字段的 JSONL。目标页面原子替换、权限 0600。部分翻译失败保存在对应文字块的 `error` 中，命令成功结束不等于所有句子都翻译成功。
 
-`verify_translation_protocol.py` 对照提示词、解析规则和本地模拟 HTTP；`verify_translate_pipeline.py` 对照每批请求、页面与保存快照。这些脚本只使用模拟模型回复，不访问已有 oMLX/Ollama 服务。`protocol-probe`、`service-probe`、`translation-probe` 是开发验证入口，不能代表候选应用已接入。
+`verify_translation_protocol.py` 对照提示词、解析规则和本地模拟 HTTP；`verify_translate_pipeline.py` 对照每批请求、页面与保存快照。这些脚本只使用模拟模型回复，不访问已有 oMLX/Ollama 服务。`protocol-probe`、`service-probe`、`translation-probe` 用于开发验证，应用接入由 Koma 实际运行验证。
 
 ## 视觉翻译
 

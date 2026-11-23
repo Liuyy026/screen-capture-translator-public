@@ -47,21 +47,21 @@ Rust starts the Python inference adapter on demand and reuses it. It manages any
 
 Requires Apple Silicon, macOS 14+, Swift build tools, Rust/Cargo, native OpenCV 4.11.0, a prepared `macos/.venv`, and installed weights under `.models/`. Follow the [macOS setup guide](macos/README.en.md) for first-time preparation.
 
-For daily use, double-click **[启动 Rust 候选版.command](启动%20Rust%20候选版.command)** at the repository root, or `macos/启动.command`. The launchers activate an existing window and build if app or core artifacts are missing or the checkout has moved. After updating existing source files, rebuild with the command below.
+For daily use, double-click **[启动 Koma.command](启动%20Koma.command)** at the repository root, or `macos/启动.command`. The launchers activate an existing window and build if app or core artifacts are missing or the checkout has moved. After updating existing source files, rebuild with the command below.
 
 For development, from this branch's repository root:
 
 ```sh
 ./macos/scripts/build_and_run.sh --verify
 # Open an existing build:
-open 'macos/dist/Koma Rust 候选版.app'
+open macos/dist/Koma.app
 ```
 
-The script builds and restarts only this checkout's candidate, then checks that it stays alive for 10 seconds. The double-click launcher uses `--open` to reuse an existing build without restarting the app. The build depends on the checkout and local runtime; rebuild after moving the repository.
+The script builds and restarts only this checkout's Koma app, then checks that it stays alive for 10 seconds. The double-click launcher uses `--open` to reuse an existing build. Rebuild after moving the repository so the app can find its local runtime.
 
 Open an image folder, configure the endpoint, optional API key and model, and process a page or folder. Visual assistance combines manga images with existing OCR text and translates within the detected text boxes.
 
-Candidate data lives under `~/Library/Application Support/KomaReaderRust/`: `config.json`, `pages/`, `pages/vision-v1/` and `reading-native-v1/`. Stable configuration/pages may be copied read-only into independent candidate files on first use. Keys can be saved in the local plaintext config with mode `0600`; Keychain is not accessed. If key persistence is disabled, the key is session-only. Configs, images, weights and private evaluation artifacts are not committed.
+The source build stores its data under `~/Library/Application Support/KomaReaderRust/`. This includes `config.json`, `pages/`, `pages/vision-v1/` and `reading-native-v1/`. On first use, the app can copy settings and pages from the older `KomaReader` data directory. Keys can be saved in the local plaintext config with mode `0600`; Keychain is not accessed. If key persistence is disabled, the key is session-only. Configs, images, weights and private evaluation artifacts are not committed.
 
 ### Release translation models
 
@@ -118,7 +118,7 @@ Manual box editing, cross-page character memory, glossaries, ZIP/PDF input and r
 
 ```text
 core/                   Rust core, native bridge and Python model adapter
-macos/                  Swift UI, candidate build and model environment
+macos/                  Swift UI, app build and model environment
 tools/rust_migration/    Build tools and offline core regressions
 scripts/                Model preparation, cache migration and regression runner
 docs/                   Architecture, migration and validation

@@ -1,4 +1,4 @@
-# Koma · macOS Rust candidate
+# Koma · macOS
 
 [简体中文](README.md) | English | [Project home](../README.en.md)
 
@@ -28,22 +28,22 @@ python3 macos/scripts/setup_reading_model.py
 
 These commands download OCR/detection weights and the optional Anime LaMa restoration model (about 197 MiB). For visual assistance, configure oMLX as described in the [visual assistance guide](#visual-assistance-omlx). Runtime inference reads installed weights offline.
 
-Alternatively, after preparing OpenCV, use `python3 macos/scripts/setup.py` to install Python dependencies, OCR, a project-local Ollama and Qwen3 4B, and build the candidate. That installer may start local Ollama to download the model. It does not install Rust or build OpenCV. Then run `python3 macos/scripts/setup_reading_model.py` for restoration weights. Existing oMLX users do not need the Ollama installer.
+Alternatively, after preparing OpenCV, use `python3 macos/scripts/setup.py` to install Python dependencies, OCR, a project-local Ollama and Qwen3 4B, and build Koma. That installer may start local Ollama to download the model. It does not install Rust or build OpenCV. Then run `python3 macos/scripts/setup_reading_model.py` for restoration weights. Existing oMLX users do not need the Ollama installer.
 
 ## Build and run
 
-For daily use, double-click **[启动 Rust 候选版.command](../启动%20Rust%20候选版.command)** at the repository root or `macos/启动.command`. Both use `scripts/build_and_run.sh --open`: reuse the existing build and activate an already-running candidate. Missing app/core artifacts or a moved checkout trigger a build and startup check. If setup is incomplete, the launcher keeps the error visible and points to this guide; it does not automatically install dependencies or download models.
+For daily use, double-click **[启动 Koma.command](../启动%20Koma.command)** at the repository root or `macos/启动.command`. Both use `scripts/build_and_run.sh --open` to open an existing build or bring a running Koma window to the front. Missing app/core artifacts or a moved checkout trigger a build and startup check. If setup is incomplete, the launcher keeps the error visible and points to this guide; it does not automatically install dependencies or download models.
 
 ```sh
-# Build, restart this checkout's candidate, check 10 seconds of survival:
+# Build and restart Koma, then check that it runs for 10 seconds
 ./macos/scripts/build_and_run.sh --verify
 # Build only:
 zsh macos/scripts/build.sh
 # Open an existing build:
-open 'macos/dist/Koma Rust 候选版.app'
+open macos/dist/Koma.app
 ```
 
-The source build is named `Koma Rust 候选版.app` and uses the bundle identifier `local.koma.reader.rust`. Use `--verify` to rebuild and restart after updating the source or moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when prompted. The 10-second check verifies startup.
+The source build produces `macos/dist/Koma.app` and uses the bundle identifier `local.koma.reader.rust`. Use `--verify` to rebuild and restart after updating the source or moving the checkout. `--logs` streams logs and `--debug` starts LLDB. Grant macOS folder access when prompted. The 10-second check verifies startup.
 
 Open an image folder, configure the provider, endpoint, optional key and model, then process a page or folder. Use the bottom bar to switch between original or enhanced image, text boxes and Chinese rendering. The zoom menu can fit the whole page, and clicking the page number opens chapter thumbnails. The dialogue pane is collapsible. Drag the divider to resize the dialogue pane. Expand **Typesetting** (`排版`) for the selected dialogue to change its font, size and direction. **Reflow page** (`重排本页`) uses saved translations. Unsaved drafts survive dialogue and page switches during the current session. Save edits before retranslating an entry. Batch processing protects saved manual translations.
 
@@ -74,7 +74,7 @@ The app composites existing Chinese layouts onto the enhanced images and saves l
 
 ## Connections and isolated data
 
-The candidate stores data under `~/Library/Application Support/KomaReaderRust/`:
+The source build stores data under `~/Library/Application Support/KomaReaderRust/`.
 
 | Item | Purpose |
 | --- | --- |
@@ -84,9 +84,9 @@ The candidate stores data under `~/Library/Application Support/KomaReaderRust/`:
 | `reading-native-v1/` | Native display assets |
 | `native-core.log` | Native service diagnostics |
 
-Stable `KomaReader` configuration/pages can be copied read-only into candidate files on first use. Subsequent edits stay independent. Ordinary and vision edits are also not automatically synchronized.
+On first use, Koma can copy settings and pages from the older `KomaReader` data directory. Subsequent edits are saved in `KomaReaderRust`. Ordinary and vision modes keep their own edits.
 
-Use the settings UI to persist connections. Defaults are `http://127.0.0.1:8000/v1` for oMLX and `http://127.0.0.1:11439` for Ollama. Keys can be saved in a local plaintext file with permissions `0600`; disabling key persistence keeps them session-only. The candidate does not access Keychain. Invalid configuration is reported without silently overwriting the file. Quit the app before editing it manually.
+Use the settings UI to persist connections. Defaults are `http://127.0.0.1:8000/v1` for oMLX and `http://127.0.0.1:11439` for Ollama. Keys can be saved in a local plaintext file with permissions `0600`; disabling key persistence keeps them session-only. Koma does not access Keychain. Invalid configuration is reported without silently overwriting the file. Quit the app before editing it manually.
 
 Koma keeps the translation model in memory for the next page. Switching models or providers asks the previous service to unload the model used in this session. Closing the last reader window or quitting Koma releases any remaining translation models used in the session. To free memory while reading, click **释放当前模型** (Release current model) in processing settings. The model stays selected and loads again the next time a page needs translation. The button can also release the selected model if an older version of Koma left it loaded.
 

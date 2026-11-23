@@ -75,7 +75,7 @@ import Darwin
         process.standardError = log
         let epoch = UUID(); generation = epoch
         do { try process.run() }
-        catch { try? log.close(); throw Failure(message: "无法启动 Rust 处理服务，请检查候选版本的构建。") }
+        catch { try? log.close(); throw Failure(message: "无法启动 Koma 的本地处理服务，请检查应用构建。") }
         child = process; input = incoming.fileHandleForWriting; self.log = log
         let stream = outgoing.fileHandleForReading
         // Drain continuously on a background queue. Reading only after process

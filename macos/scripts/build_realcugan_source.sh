@@ -13,7 +13,7 @@ if [[ "$1" != /* || "$2" != /* || "$3" != /* || ! -f "$1" || \
   exit 2
 fi
 if [[ "$(uname -m)" != arm64 ]]; then
-  echo "This candidate build is for Apple Silicon." >&2
+  echo "This Real-CUGAN build is for Apple Silicon." >&2
   exit 2
 fi
 

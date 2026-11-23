@@ -24,12 +24,12 @@ macOS 阅读器可用 MetalFX 或 Real-CUGAN 生成增强图。首次识别可�
 - `macos/tools/MetalFXUpscaler.swift` → `macos/.build/koma-sr-metalfx`。
 - `macos/tools/RealCUGANUpscaler.swift` → `macos/.build/koma-sr-realcugan`，调用原生 arm64 ncnn/MoltenVK 程序。
 - `core/src/super_resolution.rs` 管理统一协议、尺寸、缓存、输出校验、超时与取消；Rust 在 OCR 前选择有效图。
-- `macos/scripts/build.sh` 构建两套 helper 和候选应用。Real-CUGAN 资源缺失不影响编译，但能力检查会显示不可用。
+- `macos/scripts/build.sh` 构建两套 helper 和 `macos/dist/Koma.app`。Real-CUGAN 资源缺失不影响编译，但能力检查会显示不可用。
 - 首次准备 Real-CUGAN 可运行 `bash macos/scripts/prepare_realcugan.sh`。脚本校验发行包的 SHA256，并把引擎和模型放在当前仓库的 `.runtime/super-resolution/realcugan/`。
 - 超分运行不依赖 Python；现有 OCR、背景修补仍使用其原有 Python 模型适配器。准备脚本和测试脚本可以使用 Python。
 - 当前说明适用于 `main` 中的 macOS 源码构建，应用依赖仓库目录和本机运行环境。
 
-默认候选数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`。识别和译文按原图内容保存到 `pages/` 或 `pages/vision-v1/`。缺少对应记录时，可从 `pages/enhanced-v1/` 中根据增强元数据核对并导入一份旧结果，保留旧记录及原坐标。图片缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份，命中时检查输出内容哈希及尺寸。
+源码构建的默认数据目录为 `~/Library/Application Support/KomaReaderRust/`。增强图片在 `super-resolution-v1/<identity>/effective.png`。识别和译文按原图内容保存到 `pages/` 或 `pages/vision-v1/`。缺少对应记录时，可从 `pages/enhanced-v1/` 中根据增强元数据核对并导入一份旧结果，保留旧记录及原坐标。图片缓存身份包含输入内容、设置、实际尺寸、helper 和模型/系统身份，命中时检查输出内容哈希及尺寸。
 
 Real-CUGAN 分块使用精确的全图特征同步（`-c 1`），减少粗略同步在密集网点漫画上引起的偏色与模糊。更新 helper 后会重建对应的增强图，已保存的 OCR、译文和手改可继续复用。参数定义见[上游 Real-CUGAN 说明](https://github.com/nihui/realcugan-ncnn-vulkan#full-usages)。
 
@@ -60,7 +60,7 @@ GB/MB 使用十进制字节。达到上限不清理；超过时按最近使用�
 - 新识别页面带 `cache_retention={version:1,kind:automatic}`。修改日文原文、译文或「保留原框」状态会将整页标为 `kind:manual`。任一块有手改标记同样保护整页，重新翻译后保护仍生效。
 - 旧版没有可靠标记来区分自动 OCR 与人工修正原文，所以不从“edited=false”推断旧记录可删。未标记旧记录、损坏记录、不支持的格式和大于 16 MiB 的异常记录保守保留，不自动补写 automatic 标记。
 - 后台启动时、逐页处理及请求完成后检查；后台保持运行时，每 60 秒再检查一次。应用关闭期间不运行清理，下一次启动再检查。
-- 正在读写缓存的任务会阻止清理；当前查看的增强图及译文记录单独保护。译文使用独立锁文件，原子保存手改内容时仍保持保护。进程间文件锁同时保护共享这些缓存目录的其他新版候选进程。取消请求或进程结束后，系统释放相应锁。
+- 正在读写缓存的任务会阻止清理；当前查看的增强图及译文记录单独保护。译文使用独立锁文件，原子保存手改内容时仍保持保护。进程间文件锁同时保护共享这些缓存目录的其他 Koma 进程。取消请求或进程结束后，系统释放相应锁。
 - 两项限额都是持久缓存的管理目标，**不是文件系统硬配额**：任务写入、当前查看、手改/旧版保留记录或清理失败可能使实际占用超过限制；释放活动占用后自动重试。手改和旧版保留记录计入译文占用统计，但不会为凑容量而删除，所以保护内容较多时可能持续超限。旧版、不遵守缓存锁的后台不应与新版共用目录运行。
 - 为保护用户数据，符号链接、含未知文件的目录和未完成的 `inference-*` 目录跳过自动删除。正常失败/取消仍由原有任务清理临时目录；本策略不把异常退出留下的未知内容强行纳入递归清理。
 

@@ -1245,7 +1245,7 @@ private struct NativeLoadedPage: Decodable {
     @NSApplicationDelegateAdaptor(KomaAppDelegate.self) private var appDelegate
     @StateObject private var reader = Reader()
     var body: some Scene {
-        WindowGroup("Koma Rust · 本地漫画翻译") {
+        WindowGroup("Koma · 本地漫画翻译") {
             ContentView(reader: reader).tint(ReaderPalette.accent)
                 .onAppear { appDelegate.reader = reader }
         }

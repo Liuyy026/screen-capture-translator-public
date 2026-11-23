@@ -6,7 +6,7 @@
 
 ## 首次准备
 
-要求 Apple Silicon、macOS 14+、可用的 `xcrun swiftc`、Rust/Cargo、Python 3 和 uv。候选应用还依赖项目内原生 OpenCV、Python 3.12 环境和模型权重，不是独立安装包。
+要求 Apple Silicon、macOS 14+、可用的 `xcrun swiftc`、Rust/Cargo、Python 3 和 uv。从源码构建的 Koma 还依赖项目内原生 OpenCV、Python 3.12 环境和模型权重。
 
 先构建项目内 OpenCV 4.11.0，不写入系统库目录（首次会下载源码和构建工具）：
 
@@ -39,11 +39,11 @@ python3 macos/scripts/setup.py
 python3 macos/scripts/setup_reading_model.py
 ```
 
-此安装器会建立 Python 环境、下载 OCR、Ollama 与 Qwen3 4B，必要时启动本地 Ollama 完成模型下载，最后构建候选应用。仅使用现有 oMLX 时不需要此步骤；安装器也不会代为安装 Rust 或构建原生 OpenCV。安装完成后可使用下方的候选版双击入口。
+此安装器会建立 Python 环境、下载 OCR、Ollama 与 Qwen3 4B，必要时启动本地 Ollama 完成模型下载，最后构建 Koma。仅使用现有 oMLX 时不需要此步骤；安装器也不会代为安装 Rust 或构建原生 OpenCV。安装完成后可使用下方的双击入口。
 
 ## 构建与启动
 
-日常双击仓库根目录的 **[启动 Rust 候选版.command](../启动%20Rust%20候选版.command)**，或本目录的 **启动.command**。两者共用 `scripts/build_and_run.sh --open`：已构建就直接打开，已运行就切回窗口；缺少应用/核心构建产物或移动仓库后自动构建并检查启动。首次依赖未准备时会保留具体错误，提示按本页完成准备，不自动安装或下载模型。
+日常双击仓库根目录的 **[启动 Koma.command](../启动%20Koma.command)**，或本目录的 **启动.command**。两者共用 `scripts/build_and_run.sh --open`：已构建就直接打开，已运行就切回窗口；缺少应用/核心构建产物或移动仓库后自动构建并检查启动。首次依赖未准备时会保留具体错误，提示按本页完成准备，不自动安装或下载模型。
 
 ```sh
 # 构建、启动，并检查进程持续存活 10 秒
@@ -52,11 +52,11 @@ python3 macos/scripts/setup_reading_model.py
 # 只构建，不启动应用或翻译服务
 zsh macos/scripts/build.sh
 
-# 打开已构建的候选版
-open 'macos/dist/Koma Rust 候选版.app'
+# 打开已构建的 Koma
+open macos/dist/Koma.app
 ```
 
-输出应用为 `Koma Rust 候选版.app`，标识 `local.koma.reader.rust`。更新源码后，运行 `--verify` 重新构建并重启当前仓库的应用。`--logs` 可查看日志，`--debug` 可进入 LLDB。应用按构建时记录的仓库路径查找核心、环境和模型，移动仓库后须重新构建。
+输出应用为 `macos/dist/Koma.app`，标识 `local.koma.reader.rust`。更新源码后，运行 `--verify` 重新构建并重启当前仓库的应用。`--logs` 可查看日志，`--debug` 可进入 LLDB。应用按构建时记录的仓库路径查找核心、环境和模型，移动仓库后须重新构建。
 
 首次访问桌面中的漫画或运行环境时，请完成 macOS 文件夹授权。`--verify` 是启动检查，不代替实际翻译或界面验收。
 
@@ -100,11 +100,11 @@ Swift 的 `NativeCoreService.swift` 通过 JSONL 管道连接 `core/target/relea
 | `macos/.venv/`、`.models/` | Python 模型环境、已安装权重 |
 | `.runtime/native-deps/`、`core/target/` | 原生 OpenCV、Rust 构建产物 |
 | `macos/.runtime/ollama/` | 可选的项目内 Ollama |
-| `~/Library/Application Support/KomaReaderRust/config.json` | 候选版连接配置 |
+| `~/Library/Application Support/KomaReaderRust/config.json` | 源码构建的连接配置 |
 | 同目录 `pages/`、`pages/vision-v1/` | 普通/视觉结果与手工编辑 |
 | 同目录 `reading-native-v1/`、`native-core.log` | 原生显示缓存、服务日志 |
 
-首次可只读复制 `KomaReader` 中的稳定配置和对应页面，之后写入候选独立目录。稳定数据不会随候选编辑变化，普通和视觉模式的编辑也不自动互相同步。
+首次可只读复制旧版 `KomaReader` 的配置和对应页面，后续编辑保存在 `KomaReaderRust`。普通和视觉模式的编辑各自保存。
 
 公开检出可运行模型进程协议基础测试，无需真实模型权重或翻译服务。
 
@@ -122,7 +122,7 @@ macos/.venv/bin/python scripts/check_regressions.py
 
 开发期间，服务、接口地址、模型和可选 API Key 保存在 `~/Library/Application Support/KomaReaderRust/config.json`，不放入仓库。配置是明文文件，权限为 `0600`，仅当前用户可读写；每次保存均原子替换。设置中的「将 API Key 保存在本地配置文件」不勾选时，密钥只用于本次运行，并从该服务的持久配置中清除。应用不会读取、写入或弹出系统钥匙串授权；钥匙串接入留待稳定后再处理。
 
-首次没有候选配置时，可从稳定版本地配置只读导入独立副本；没有稳定配置则使用已有偏好中的服务、地址和模型，不读取旧钥匙串密钥。JSON 格式错误、版本不支持或权限异常会显示具体文件位置与修复提示，并阻止自动连接和覆盖原配置。手工修改前先退出应用；修复文件，或将它移走保留备份后，重新启动。
+首次没有 `KomaReaderRust` 配置时，可从旧版 `KomaReader` 配置只读导入独立副本；没有旧版配置则使用已有偏好中的服务、地址和模型，不读取旧钥匙串密钥。JSON 格式错误、版本不支持或权限异常会显示具体文件位置与修复提示，并阻止自动连接和覆盖原配置。手工修改前先退出应用；修复文件，或将它移走保留备份后，重新启动。
 
 配置格式示例（不需要认证时 `apiKey` 填空字符串；`connections` 每个服务最多一项）：
 
@@ -167,7 +167,7 @@ macos/.build/connection-config-tests
 
 视觉结果保存到 `~/Library/Application Support/KomaReaderRust/pages/vision-v1/`，普通结果仍在 `pages/`。两种模式单独保存编辑；首次建立视觉结果时，可复用普通模式已有 OCR 和手动译文，后续修改不自动跨模式同步。图片长边最多 1775 像素；当前仍依赖 OCR 找框，漏检文字、拟声词不会自动补框。视觉模式不保证比普通翻译更准确，也不保证模型不会拒译。
 
-候选版实现位于 `core/src/vision_pipeline.rs`、`vision_image.rs` 和 `vision_decode.rs`，由 Rust 完成请求、编码及保存。[早期真实模型试用记录](../docs/macos-vision-1209806-2026-11-07.md)保留当时的 Python/钥匙串/白底方案，不代表当前实现。Rust 迁移使用确定的模拟回复做流程对照，没有重新进行真实语言模型质量评测。
+视觉翻译实现位于 `core/src/vision_pipeline.rs`、`vision_image.rs` 和 `vision_decode.rs`，由 Rust 完成请求、编码及保存。[早期真实模型试用记录](../docs/macos-vision-1209806-2026-11-07.md)保留当时的 Python/钥匙串/白底方案，不代表当前实现。Rust 迁移使用确定的模拟回复做流程对照，没有重新进行真实语言模型质量评测。
 
 ## 中文气泡排版
 
@@ -189,7 +189,7 @@ python3 macos/scripts/setup_reading_model.py
 
 旧缓存中的白色矩形不会直接作为回退覆盖；打开页面时重新检查背景和文字范围。译文不完整、排版空间不足或背景不可靠时保留原图，底部状态区提示译文暂未覆盖，可在右侧对白栏阅读完整译文。此项改善显示，不自动修正 OCR 或翻译语义，也不保证手写字、复杂背景、漏检文字和所有异形气泡都能覆盖。
 
-候选版显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。历史基线中的 Python 排版代码提供对照行为，原生回归通过实际 Rust CLI 复用其合成输入断言。
+显示分析入口为 `core/src/reading.rs`，几何、清字、合成分别位于 `geometry.rs`、`background.rs` 和 `texture.rs`；Swift 使用 `ReadingLayout.swift` / `ReadingOverlayView.swift` 排版绘制。历史基线中的 Python 排版代码提供对照行为，原生回归通过实际 Rust CLI 复用其合成输入断言。
 
 已有本地测试文件时，可通过 `macos/.venv/bin/python scripts/check_regressions.py --local --native --swift` 运行共用、macOS Python、Rust 差分和 Swift 回归。各选项所需的用例见 [开发说明](../docs/development.md)。历史章节、模型与截图验收脚本已精简，旧结果保留在历史记录中。
 

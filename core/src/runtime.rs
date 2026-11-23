@@ -334,7 +334,7 @@ impl Runtime{
     }
     pub async fn display_page(&self,image:&Path,cache:&Path,revision:Option<&str>)->Result<Value>{
         let cache=cache.canonicalize()?;
-        ensure!(cache.starts_with(&self.cache_root),"只能显示候选版本自己的缓存");
+        ensure!(cache.starts_with(&self.cache_root),"只能显示当前 Koma 缓存目录中的页面");
         let _pin = self.cache_policy.pin_page(&cache)?;
         let image_bytes=read_page_image(image, &cache)?;let cache_bytes=std::fs::read(&cache)?;
         if let Some(revision)=revision{ensure!(format!("{:x}",Sha256::digest(&cache_bytes))==revision,PageRevisionChanged);}
@@ -373,7 +373,7 @@ impl Runtime{
 
     pub async fn edit(&self,cache:&Path,id:&str,values:&Value,revision:Option<&str>,image:Option<&Path>)->Result<Value>{
         let cache=cache.canonicalize()?;
-        ensure!(cache.starts_with(&self.cache_root),"只能修改候选版本自己的缓存");
+        ensure!(cache.starts_with(&self.cache_root),"只能修改当前 Koma 缓存目录中的页面");
         let _guard = self.cache_policy.lock_page(&cache).await?;
         let bytes=std::fs::read(&cache)?;
         if let Some(revision)=revision{ensure!(format!("{:x}",Sha256::digest(&bytes))==revision,"页面已更新，请重新打开后再保存修改");}

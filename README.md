@@ -8,7 +8,7 @@ Koma 在 Apple 芯片 Mac 上识别日文漫画、翻译对白并将中文排回
 
 **[下载 Koma v2.3（macOS ZIP）](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/Koma-2.3-macOS-arm64.zip)** · [SHA-256 校验文件](https://github.com/Liuyy026/screen-capture-translator-public/releases/download/v2.3/SHA256SUMS.txt) · [v2.3 发布页](https://github.com/Liuyy026/screen-capture-translator-public/releases/tag/v2.3)
 
-适用于 Apple 芯片 Mac，要求 macOS 14 或更新版本。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。正式应用继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
+适用于 Apple 芯片 Mac，要求 macOS 14 或更新版本。双击解压后的 `Koma.app` 即可阅读或尝试内置样图。首次使用 OCR、修补和 Real-CUGAN 时，退出应用，运行 ZIP 里的 `准备组件.command`。发行版继续使用 `KomaReaderRelease` 的已有配置和缓存。[随包使用说明](macos/release/README.md)
 
 v2.3 支持在导出时单独选择普通翻译或视觉辅助。导出窗口会逐页检查可用译文，并列出另一种方式里内容不同的手改。发现漏字时，可以框选原图补充识别，在中文视图里可以移动或调宽文字框，保存后用于阅读和 PNG 导出。[Mac 操作手册](macos/README.md)
 
@@ -47,23 +47,23 @@ Rust 按需启动和复用 Python 推理进程，并管理自己启动的本地 
 
 要求 Apple Silicon、macOS 14+、Swift 编译工具、Rust/Cargo、原生 OpenCV 4.11.0，以及已准备好的 `macos/.venv` 和 `.models/`。**首次准备请按 [macOS 运行指南](macos/README.md) 完成依赖和模型安装**。
 
-日常使用双击仓库根目录的 **[启动 Rust 候选版.command](启动%20Rust%20候选版.command)**，或 `macos/启动.command`。已运行时切回现有窗口，缺少应用或核心构建产物、仓库移动时自动构建。更新现有源码后，运行下面的开发命令重新构建。
+日常使用双击仓库根目录的 **[启动 Koma.command](启动%20Koma.command)**，或 `macos/启动.command`。已运行时切回现有窗口，缺少应用或核心构建产物、仓库移动时自动构建。更新现有源码后，运行下面的开发命令重新构建。
 
 开发时在本分支仓库根目录执行：
 
 ```sh
-# 构建、启动候选版，并检查启动后持续存活 10 秒
+# 构建并启动 Koma，检查进程持续运行 10 秒
 ./macos/scripts/build_and_run.sh --verify
 
 # 已构建后直接打开
-open 'macos/dist/Koma Rust 候选版.app'
+open macos/dist/Koma.app
 ```
 
-`--verify` 只重启此 checkout 的候选应用；双击入口使用 `--open`，直接打开已有构建。构建产物依赖仓库路径及本机环境，移动仓库后需重新构建。
+`--verify` 只重启当前仓库构建的 Koma。双击入口使用 `--open`，直接打开已有构建。构建产物依赖仓库路径及本机环境，移动仓库后需重新构建。
 
 打开图片文件夹，在接口设置中保存服务地址、可选 Key 和模型，选择「普通翻译」或「视觉辅助」，再执行单页或整文件夹处理。视觉辅助结合漫画图像和已有 OCR 文字，翻译范围由已有文字框决定。
 
-候选数据位于 `~/Library/Application Support/KomaReaderRust/`：`config.json` 保存连接配置，`pages/` 保存普通结果，`pages/vision-v1/` 保存视觉结果，`reading-native-v1/` 保存显示资产。首次可只读复制稳定版的配置和页面到独立副本。Key 可保存在权限 `0600` 的本地明文配置中，不访问钥匙串；不勾选保存 Key 时仅供本次运行使用。配置、原图、模型及私人评测工件不提交到 Git。
+源码构建的数据位于 `~/Library/Application Support/KomaReaderRust/`。`config.json` 保存连接配置，`pages/` 保存普通结果，`pages/vision-v1/` 保存视觉结果，`reading-native-v1/` 保存显示资产。首次可只读复制旧版 `KomaReader` 的配置和页面到独立副本。Key 可保存在权限 `0600` 的本地明文配置中，不访问钥匙串；不勾选保存 Key 时仅供本次运行使用。配置、原图、模型及私人评测工件不提交到 Git。
 
 ### 释放翻译模型
 
@@ -122,7 +122,7 @@ open 'macos/dist/Koma Rust 候选版.app'
 
 ```text
 core/                   Rust 核心、原生桥与 Python 模型适配器
-macos/                  Swift 界面、候选构建及模型环境
+macos/                  Swift 界面、应用构建及模型环境
 tools/rust_migration/   Rust 构建及离线核心回归
 scripts/                模型准备、缓存迁移及回归入口
 docs/                   架构、迁移和验收记录

@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-APP_BUNDLE="${KOMA_BUILD_APP:-dist/Koma Rust 候选版.app}"
+APP_BUNDLE="${KOMA_BUILD_APP:-dist/Koma.app}"
 python3 ../tools/rust_migration/cargo.py build --release
 mkdir -p .build
 xcrun swiftc -O -target arm64-apple-macosx14.0 tools/MetalFXUpscaler.swift -o .build/koma-sr-metalfx -framework Metal -framework MetalFX -framework CoreImage -framework ImageIO
@@ -15,7 +15,7 @@ import plistlib
 import os
 import sys
 root = Path.cwd()
-info = {'CFBundleName': 'Koma Rust 候选版', 'CFBundleDisplayName': 'Koma Rust 候选版',
+info = {'CFBundleName': 'Koma', 'CFBundleDisplayName': 'Koma',
         'CFBundleIdentifier': os.environ.get('KOMA_APP_ID', 'local.koma.reader.rust'), 'CFBundleVersion': '2.3',
         'CFBundleShortVersionString': '2.3', 'CFBundleExecutable': 'KomaRustReader',
         'CFBundleIconFile': 'AppIcon.icns',

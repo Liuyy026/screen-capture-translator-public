@@ -38,7 +38,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Koma native processing core (migration in progress)")]
+#[command(about = "Koma native processing core")]
 struct Cli {
     #[command(subcommand)]
     command: Operation,
@@ -46,7 +46,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
-    /// Serve the candidate application over bounded JSONL on stdin/stdout.
+    /// Serve Koma over bounded JSONL on stdin/stdout.
     Serve {
         #[arg(long)] ollama:Option<PathBuf>,
         #[arg(long)] cache_root:PathBuf,

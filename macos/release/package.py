@@ -149,8 +149,7 @@ def package(version, native, destination):
         with info_file.open("rb") as stream:
             info = plistlib.load(stream)
         info.pop("ProjectRoot")
-        info.update(CFBundleName="Koma", CFBundleDisplayName="Koma 漫画翻译",
-                    CFBundleShortVersionString=version.split("-")[0], CFBundleVersion=version.split("-")[0],
+        info.update(CFBundleShortVersionString=version.split("-")[0], CFBundleVersion=version.split("-")[0],
                     KomaRuntimeFolder="KomaRuntime",
                     NSDesktopFolderUsageDescription="读取您从桌面选择的漫画图片。")
         info_file.write_bytes(plistlib.dumps(info))
