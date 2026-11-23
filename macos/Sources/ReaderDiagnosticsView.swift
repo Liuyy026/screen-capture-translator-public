@@ -10,21 +10,27 @@ struct ReaderDiagnosticsView: View {
     private var translated: Int {
         candidates.filter { $0.error.isEmpty && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
     }
-    private var problems: [(block: TextBlock, reason: String)] {
+    private var problems: [(number: Int, blockID: String, reason: String)] {
         let displayed = Set(reader.readingPresentations.flatMap(\.region.block_ids))
-        return blocks.filter { !$0.keepsOriginal }.compactMap { block in
-            if block.needsOCRReview { return (block, block.ocr_review?.reason ?? "疑似非文字，已暂停处理") }
-            if let issue = block.translationIssue { return (block, issue) }
-            if let reason = reader.readingPreserved[block.id] { return (block, reason) }
-            if block.overlay == "skip" || block.text_kind == "noise" { return nil }
-            if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return (block, block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "日文识别为空" : "缺少中文译文")
-            }
-            if reader.readingRegions != nil && block.needsReadingOverlay && !displayed.contains(block.id) {
-                return (block, ReadingLayout.failureReason(blockID: block.id, page: reader.page!, regions: reader.readingRegions!))
-            }
-            return nil
+        return blocks.enumerated().compactMap { index, block in
+            guard !block.keepsOriginal, let reason = problem(for: block, displayed: displayed) else { return nil }
+            return (index + 1, block.id, reason)
         }
+    }
+
+    private func problem(for block: TextBlock, displayed: Set<String>) -> String? {
+        if block.needsOCRReview { return block.ocr_review?.reason ?? "疑似非文字，已暂停处理" }
+        if let issue = block.translationIssue { return issue }
+        if let reason = reader.readingPreserved[block.id] { return reason }
+        if block.overlay == "skip" || block.text_kind == "noise" { return nil }
+        if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "日文识别为空" : "缺少中文译文"
+        }
+        if block.needsReadingOverlay, !displayed.contains(block.id),
+           let page = reader.page, let regions = reader.readingRegions {
+            return ReadingLayout.failureReason(blockID: block.id, page: page, regions: regions)
+        }
+        return nil
     }
 
     var body: some View {
@@ -40,12 +46,14 @@ struct ReaderDiagnosticsView: View {
                 stage("识别", recognitionStatus)
                 stage("翻译", translationStatus)
                 stage("回填", layoutStatus)
-                if !problems.isEmpty {
+                let issues = problems
+                if !issues.isEmpty {
                     Divider()
-                    ForEach(problems, id: \.block.id) { item in
+                    ForEach(issues, id: \.blockID) { item in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Button("对白 \(item.block.id)") { showDialogue(item.block.id) }
+                            Button("对白 " + String(format: "%02d", item.number)) { showDialogue(item.blockID) }
                                 .buttonStyle(.link).fixedSize()
+                                .help("文字框编号 " + item.blockID)
                             Text(item.reason).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }.font(.caption)

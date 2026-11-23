@@ -116,8 +116,8 @@ struct ReaderCropReviewView: View {
     var body: some View {
         if let session = reader.cropSession {
             let waiting = session.phase != .reviewing
-            let blocks = (reader.page?.blocks ?? []).filter { !$0.keepsOriginal }
-            let target = blocks.first { $0.id == session.target }
+            let blocks = (reader.page?.blocks ?? []).enumerated().filter { !$0.element.keepsOriginal }
+            let target = blocks.first { $0.element.id == session.target }?.element
             let canMerge = target.map { block in
                 !workspace.draft(for: ReaderDraftKey(cache: session.cache.path, blockID: block.id), block: block).changed
             } ?? false
@@ -141,7 +141,11 @@ struct ReaderCropReviewView: View {
                             translation = ""
                         })) {
                             Text("新增对白").tag("")
-                            ForEach(blocks) { block in Text("对白 " + block.id + "　" + String(block.source.prefix(18))).tag(block.id) }
+                            ForEach(blocks, id: \.element.id) { index, block in
+                                Text("对白 " + String(format: "%02d", index + 1) + "　" + String(block.source.prefix(18)))
+                                    .tag(block.id)
+                                    .help("文字框编号 " + block.id)
+                            }
                         }.accessibilityIdentifier("crop-target")
                     }
                     if let target, session.placement != .new {

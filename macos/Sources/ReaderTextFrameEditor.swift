@@ -82,7 +82,7 @@ struct ReaderTextFrameEditor: NSViewRepresentable {
         override func draw(_ dirtyRect: NSRect) {
             guard let editor, editor.editable, let target = editor.targets.first(where: { $0.id == editor.selectedID }) else { return }
             let rect = displayRect(target)
-            let color = editor.invalidPreview ? NSColor.systemOrange : NSColor.controlAccentColor
+            let color = editor.invalidPreview ? NSColor.systemOrange : NSColor(ReaderPalette.marker)
             color.setStroke()
             let path = NSBezierPath(rect: rect)
             path.lineWidth = 1.5

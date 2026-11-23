@@ -15,17 +15,16 @@ struct ReaderInspectorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("对白对照").font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Button { reader.beginCrop() } label: {
-                    Label("圈选补识别", systemImage: "viewfinder")
-                }.buttonStyle(.borderless).font(.caption).disabled(!reader.canBeginCrop)
-                    .accessibilityIdentifier("start-crop-ocr")
-                Text(candidateSummary).font(.caption)
-                    .foregroundStyle(ReaderPalette.secondary)
-            }.padding(12)
-            Divider().overlay(ReaderPalette.separator)
+            if selectedBlock == nil || reader.editCacheIdentity == nil {
+                HStack {
+                    Text("对白对照").font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text("共 \(reader.page?.blocks.count ?? 0) 项").font(.caption)
+                        .foregroundStyle(ReaderPalette.secondary)
+                    ReaderCropOCRButton(reader: reader)
+                }.padding(12)
+                Divider().overlay(ReaderPalette.separator)
+            }
             if let page = reader.page {
                 GeometryReader { geometry in
                     VStack(alignment: .leading, spacing: 0) {
@@ -37,12 +36,13 @@ struct ReaderInspectorView: View {
                                 ReaderSelectedBlockEditor(reader: reader, workspace: workspace, block: block, key: key,
                                                           showsTypography: $showsTypography,
                                                           showsTypographyDetails: $showsTypographyDetails)
+                                    .id(key)
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { editorHeight = $0 }
                             }.scrollBounceBehavior(.basedOnSize)
                                 .frame(height: min(editorHeight > 0 ? editorHeight : available, available))
                             Divider().overlay(ReaderPalette.separator)
                         }
-                        pageHeading(hasBlocks: !page.blocks.isEmpty)
+                        pageHeading(page)
                         if page.blocks.isEmpty {
                             Text("没有检测到文字。复杂背景、手写字或低清晰度图片可能漏检。")
                                 .font(.callout).foregroundStyle(ReaderPalette.secondary).padding(12)
@@ -66,14 +66,19 @@ struct ReaderInspectorView: View {
             .accessibilityIdentifier("dialogue-inspector")
     }
 
-    private func pageHeading(hasBlocks: Bool) -> some View {
-        HStack {
+    private func pageHeading(_ page: PageResult) -> some View {
+        let pendingReview = page.blocks.filter(\.needsOCRReview).count
+        return HStack {
             Text("本页对白").font(.system(size: 12, weight: .semibold))
+            if pendingReview > 0 {
+                Text("\(pendingReview) 处待核对").font(.caption).foregroundStyle(ReaderPalette.secondary)
+                    .help("已识别 \(page.blocks.count - pendingReview) 处文字，另有 \(pendingReview) 处待核对")
+            }
             Spacer(minLength: 8)
             Button { reader.reflowCurrentPageTypography() } label: {
                 Label("重排本页", systemImage: "arrow.clockwise")
             }.buttonStyle(.borderless).font(.system(size: 12))
-                .disabled(!hasBlocks || reader.readingRegions == nil || reader.busy || reader.openingFolder
+                .disabled(page.blocks.isEmpty || reader.readingRegions == nil || reader.busy || reader.openingFolder
                     || reader.preparingImage || reader.loadingPage)
                 .help("用现有译文和排版设置重新排版本页")
                 .accessibilityIdentifier("reflow-page-typography")
@@ -84,8 +89,8 @@ struct ReaderInspectorView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(page.blocks) { block in
-                        dialogueRow(block).id(block.id)
+                    ForEach(Array(page.blocks.enumerated()), id: \.element.id) { index, block in
+                        dialogueRow(block, number: index + 1).id(block.id)
                     }
                 }.padding(.horizontal, 6).padding(.bottom, 8)
             }
@@ -100,23 +105,19 @@ struct ReaderInspectorView: View {
         }.frame(minHeight: 100)
     }
 
-    private var candidateSummary: String {
-        let blocks = reader.page?.blocks ?? []
-        let review = blocks.filter(\.needsOCRReview).count
-        return review == 0 ? "\(blocks.count) 处文字" : "\(blocks.count - review) 处文字 · \(review) 处待核对"
-    }
-
-    private func dialogueRow(_ block: TextBlock) -> some View {
+    private func dialogueRow(_ block: TextBlock, number: Int) -> some View {
         let active = reader.selectedBlock == block.id
+        let numberLabel = String(format: "%02d", number)
         let source = block.source.isEmpty ? "尚无原文" : block.source
         let title = block.needsOCRReview ? "疑似非文字" : (block.keepsOriginal ? source : (block.translation.isEmpty ? "尚未翻译" : block.translation))
         let detail = block.needsOCRReview ? "已暂停翻译与回填" : (block.keepsOriginal ? "保留原框" : source)
+        let hint = block.needsOCRReview ? (block.ocr_review?.reason ?? "请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? source : block.translation)
         return Button { reader.selectedBlock = block.id } label: {
             HStack(alignment: .top, spacing: 6) {
-                Text(block.id.count == 1 ? "0" + block.id : block.id)
+                Text(numberLabel)
                     .font(.system(size: 11, weight: active ? .semibold : .regular).monospacedDigit())
                     .foregroundStyle(active ? ReaderPalette.accent : ReaderPalette.secondary)
-                    .frame(width: 24, alignment: .leading)
+                    .fixedSize().frame(minWidth: 24, alignment: .leading)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.system(size: 12)).lineLimit(1)
                     Text(detail)
@@ -130,9 +131,20 @@ struct ReaderInspectorView: View {
                 .background(active ? ReaderPalette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
-            .help(block.needsOCRReview ? (block.ocr_review?.reason ?? "请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? source : block.translation))
-            .accessibilityLabel("对白 " + block.id + "，" + title + "，" + detail)
+            .help(hint + "\n文字框编号 " + block.id)
+            .accessibilityLabel("对白 " + numberLabel + "，" + title + "，" + detail)
             .accessibilityIdentifier("dialogue-" + block.id)
+    }
+}
+
+private struct ReaderCropOCRButton: View {
+    @ObservedObject var reader: Reader
+
+    var body: some View {
+        Button { reader.beginCrop() } label: {
+            Label("圈选补识别", systemImage: "viewfinder").labelStyle(.iconOnly)
+        }.buttonStyle(ReaderControlButtonStyle()).disabled(!reader.canBeginCrop)
+            .help("圈选补识别").accessibilityIdentifier("start-crop-ocr")
     }
 }
 
@@ -146,6 +158,9 @@ private struct ReaderSelectedBlockEditor: View {
 
     private var draft: ReaderEditDraft { workspace.draft(for: key, block: block) }
     private var disabled: Bool { reader.cropSession != nil || reader.busy || reader.openingFolder || reader.preparingImage || draft.phase != .editing }
+    private var retryDisabled: Bool {
+        disabled || draft.changed || !reader.engineReady || block.keepsOriginal || block.needsOCRReview
+    }
     private var index: Int { reader.page?.blocks.firstIndex(where: { $0.id == block.id }) ?? 0 }
     private var warnings: [String] {
         var values: [String] = []
@@ -167,8 +182,11 @@ private struct ReaderSelectedBlockEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("对白 " + (block.id.count == 1 ? "0" + block.id : block.id))
+                Text("对白 " + String(format: "%02d", index + 1))
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(ReaderPalette.accent)
+                    .help("文字框编号 " + block.id)
+                Text("/ \(reader.page?.blocks.count ?? 0)")
+                    .font(.system(size: 12)).foregroundStyle(ReaderPalette.secondary)
                 if draft.changed {
                     Text(draft.phase == .editing ? "未保存" : (draft.phase == .saving ? "保存中…" : "已保存"))
                         .font(.system(size: 11)).foregroundStyle(ReaderPalette.secondary)
@@ -176,9 +194,10 @@ private struct ReaderSelectedBlockEditor: View {
                     Text("已修改").font(.system(size: 11)).foregroundStyle(ReaderPalette.secondary)
                 }
                 Spacer(minLength: 0)
-                Button { move(-1) } label: { Image(systemName: "chevron.up") }
+                ReaderCropOCRButton(reader: reader)
+                Button { move(-1) } label: { Label("上一条对白", systemImage: "chevron.up").labelStyle(.iconOnly) }
                     .disabled(index == 0).help("上一条对白").accessibilityIdentifier("previous-dialogue")
-                Button { move(1) } label: { Image(systemName: "chevron.down") }
+                Button { move(1) } label: { Label("下一条对白", systemImage: "chevron.down").labelStyle(.iconOnly) }
                     .disabled(index >= (reader.page?.blocks.count ?? 0) - 1)
                     .help("下一条对白").accessibilityIdentifier("next-dialogue")
             }.buttonStyle(ReaderControlButtonStyle()).frame(height: 28)
@@ -193,12 +212,12 @@ private struct ReaderSelectedBlockEditor: View {
                 .accessibilityIdentifier("dialogue-language")
             field("日文原文", text: Binding(get: { draft.source }, set: {
                 workspace.update(key, block: block, source: $0)
-            }), height: 76, identifier: "dialogue-source")
+            }), identifier: "dialogue-source")
             field(block.needsOCRReview ? "旧译文（未采用）" : "中文译文", text: Binding(get: {
                 draft.phase == .saved ? draft.savedTranslation : draft.translation
             }, set: {
                 workspace.update(key, block: block, translation: $0)
-            }), height: 64, identifier: "dialogue-translation")
+            }), identifier: "dialogue-translation")
             Divider().overlay(ReaderPalette.separator)
             ReaderBlockTypographyView(reader: reader, block: block, key: key, isDisabled: disabled,
                                       isExpanded: $showsTypography, showsDetails: $showsTypographyDetails)
@@ -231,23 +250,34 @@ private struct ReaderSelectedBlockEditor: View {
             HStack {
                 Button { reader.retryBlock(block.id) } label: { Label("重新翻译", systemImage: "arrow.clockwise") }
                     .buttonStyle(.borderless).font(.system(size: 12))
-                    .disabled(disabled || draft.changed || !reader.engineReady || block.keepsOriginal || block.needsOCRReview)
+                    .disabled(retryDisabled).opacity(retryDisabled ? 0.4 : 1)
                     .accessibilityIdentifier("retry-dialogue")
                 Spacer(minLength: 4)
-                Button("保存修改", action: save).buttonStyle(ReaderPrimaryButtonStyle())
-                    .disabled(disabled || !draft.changed).accessibilityIdentifier("save-dialogue")
-            }.padding(.top, 2)
+                if draft.changed && draft.phase != .saved {
+                    Button("保存修改", action: save).buttonStyle(ReaderPrimaryButtonStyle())
+                        .disabled(disabled).accessibilityIdentifier("save-dialogue")
+                }
+            }.frame(minHeight: 30)
         }.padding(12)
     }
 
-    private func field(_ title: String, text: Binding<String>, height: CGFloat, identifier: String) -> some View {
+    private func field(_ title: String, text: Binding<String>, identifier: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.system(size: 11)).foregroundStyle(ReaderPalette.secondary)
-            TextEditor(text: text).font(.system(size: 13)).scrollContentBackground(.hidden)
-                .padding(5).frame(height: height).background(ReaderPalette.bar)
+            // Measure at the editor's wrapping width, including the empty line after a final Return.
+            Text(verbatim: text.wrappedValue + "\u{200B}")
+                .lineLimit(4).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+                .padding(.horizontal, 8).hidden().accessibilityHidden(true)
+                .overlay {
+                    TextEditor(text: text).scrollContentBackground(.hidden)
+                        .padding(.horizontal, 3)
+                        .disabled(disabled).accessibilityLabel(title).accessibilityIdentifier(identifier)
+                }
+                .font(.system(size: 13)).padding(.vertical, 7)
+                .background(ReaderPalette.bar)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(ReaderPalette.fieldBorder, lineWidth: 1))
-                .disabled(disabled).accessibilityLabel(title).accessibilityIdentifier(identifier)
         }
     }
 

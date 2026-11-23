@@ -55,9 +55,6 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         .onReceive(reader.$page) { page in
             guard let page else { return }
             if let cache = reader.editCacheIdentity { workspace.reconcile(cache: cache, page: page) }
-            if !page.blocks.contains(where: { $0.id == reader.selectedBlock }) {
-                reader.selectedBlock = page.blocks.first?.id
-            }
         }
         .onChange(of: reader.selected) { _, _ in workspace.showsPages = false }
         .onChange(of: workspace.showsInspector) { _, isShown in
@@ -250,8 +247,7 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         }.padding(24)
     }
 
-    private func selectBlock(_ id: String?) {
-        guard let id else { return }
+    private func selectBlock(_ id: String) {
         reader.selectedBlock = id
         workspace.showsInspector = true
     }
@@ -262,7 +258,7 @@ private struct ReaderCanvasView: View {
     @ObservedObject var controller: ImagePanController
     let image: NSImage
     let showsSelection: Bool
-    let select: (String?) -> Void
+    let select: (String) -> Void
     @ViewState private var framePreview: FramePreview?
 
     private struct FramePreview {
@@ -278,6 +274,10 @@ private struct ReaderCanvasView: View {
             PannableImageScrollView(controller: controller, documentSize: layout.document, pageID: reader.selected,
                                     isPanEnabled: reader.cropSession == nil) {
                 ZStack(alignment: .topLeading) {
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture(count: 2, coordinateSpace: .local) { point in
+                            clearSelection(at: point, layout: layout)
+                        }
                     imageWithOverlays(size: layout.image)
                         .overlay {
                             if let session = reader.cropSession, session.phase == .selecting {
@@ -287,7 +287,7 @@ private struct ReaderCanvasView: View {
                         .offset(x: layout.inset.x, y: layout.inset.y)
                 }.frame(width: layout.document.width, height: layout.document.height, alignment: .topLeading)
                     .contentShape(Rectangle())
-                    .help("放大后按住鼠标左键拖动图片；单击文字框定位对白。")
+                    .help("放大后按住鼠标左键拖动图片；单击文字框定位对白，双击空白处取消选中。")
             }.onChange(of: reader.zoom) { _, _ in controller.endDrag(); framePreview = nil }
                 .onChange(of: reader.frameEditIdentity) { _, _ in framePreview = nil }
                 .onChange(of: reader.displayMode) { _, _ in framePreview = nil }
@@ -296,22 +296,40 @@ private struct ReaderCanvasView: View {
             .accessibilityIdentifier("reader-canvas")
     }
 
+    private func clearSelection(at point: CGPoint, layout: ReaderCanvasGeometry.Layout) {
+        let imagePoint = CGPoint(x: point.x - layout.inset.x, y: point.y - layout.inset.y)
+        if CGRect(origin: .zero, size: layout.image).contains(imagePoint), let page = reader.page,
+           page.blocks.contains(where: {
+               ReaderCanvasGeometry.blockFrame($0, page: page, size: layout.image)?.contains(imagePoint) == true
+           }) { return }
+        reader.clearBlockSelection()
+    }
+
     private func imageWithOverlays(size: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
             Image(nsImage: image).resizable().frame(width: size.width, height: size.height)
+                .allowsHitTesting(false)
             if reader.cropSession == nil, reader.displayMode != 0, let page = reader.page, page.width > 0, page.height > 0 {
                 if reader.displayMode == 2 {
                     ReadingPageOverlays(items: displayedPresentations, scale: size.width / Double(page.width),
                                         verticalScale: size.height / Double(page.height),
-                                        selectRegion: { select($0.region.block_ids.first) })
+                                        selectRegion: { item in
+                                            if let id = item.region.block_ids.first { select(id) }
+                                        })
                 }
-                ForEach(page.blocks) { block in
-                    let marked = !block.keepsOriginal && (reader.displayMode == 1 || !block.error.isEmpty)
-                    if (marked || block.keepsOriginal), block.box.count == 4,
-                       block.box.allSatisfy(\.isFinite) {
-                        region(block, page: page, size: size, marked: marked)
+                let markers = ReaderBlockMarker.layout(page: page, size: size, boxMode: reader.displayMode == 1)
+                ForEach(markers) { marker in region(marker) }
+                ForEach(markers) { marker in
+                    if let badge = marker.badge {
+                        Text(verbatim: String(marker.number))
+                            .font(Font(ReaderBlockMarker.font))
+                            .lineLimit(1).fixedSize()
+                            .foregroundStyle(.white)
+                            .frame(width: badge.width, height: badge.height)
+                            .background(ReaderPalette.marker, in: RoundedRectangle(cornerRadius: 3))
+                            .offset(x: badge.minX, y: badge.minY)
                     }
-                }
+                }.allowsHitTesting(false).accessibilityHidden(true)
                 if reader.displayMode == 2, let identity = reader.frameEditIdentity, let regions = reader.readingRegions {
                     textEditor(page: page, regions: regions, identity: identity, size: size)
                 }
@@ -365,34 +383,32 @@ private struct ReaderCanvasView: View {
             .frame(width: size.width, height: size.height)
             .accessibilityRepresentation {
                 ForEach(targets, id: \.id) { target in
-                    let block = page.blocks.first { $0.id == target.id }
-                    Button("对白 " + target.id + "，" + (block?.translation ?? "")) { select(target.id) }
-                        .accessibilityIdentifier("comic-translation-" + target.id)
+                    if let index = page.blocks.firstIndex(where: { $0.id == target.id }) {
+                        Button("对白 \(index + 1)，\(page.blocks[index].translation)") { select(target.id) }
+                            .accessibilityIdentifier("comic-translation-" + target.id)
+                    }
                 }
             }
     }
 
-    private func region(_ block: TextBlock, page: PageResult, size: CGSize, marked: Bool) -> some View {
-        let x = block.box[0] / Double(page.width) * size.width
-        let y = block.box[1] / Double(page.height) * size.height
-        let width = max(12, (block.box[2] - block.box[0]) / Double(page.width) * size.width)
-        let height = max(12, (block.box[3] - block.box[1]) / Double(page.height) * size.height)
+    private func region(_ marker: ReaderBlockMarker) -> some View {
+        let block = marker.block
         let active = showsSelection && reader.selectedBlock == block.id
+        let summary = block.needsOCRReview ? (block.ocr_review?.reason ?? "疑似非文字，请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? block.source : block.translation)
         return ZStack(alignment: .topLeading) {
             Color.clear
-            if marked {
+            if marker.badge != nil {
                 RoundedRectangle(cornerRadius: 3).fill(ReaderPalette.marker.opacity(active ? 0.12 : 0.035))
                 RoundedRectangle(cornerRadius: 3).strokeBorder(block.error.isEmpty ? ReaderPalette.marker : Color.orange,
                                                              lineWidth: active ? 2 : 1)
-                Text(block.id).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 4).padding(.vertical, 2)
-                    .background(ReaderPalette.marker, in: RoundedRectangle(cornerRadius: 3)).offset(y: -16)
             }
-        }.frame(width: width, height: height).contentShape(Rectangle())
+        }.frame(width: marker.frame.width, height: marker.frame.height).contentShape(Rectangle())
             .onTapGesture { select(block.id) }
-            .help(block.needsOCRReview ? (block.ocr_review?.reason ?? "疑似非文字，请核对原图") : (block.keepsOriginal || block.translation.isEmpty ? block.source : block.translation))
-            .accessibilityLabel("定位对白 " + block.id).accessibilityIdentifier("comic-block-" + block.id)
-            .offset(x: x, y: y)
+            .help([summary, "文字框编号 " + block.id].filter { !$0.isEmpty }.joined(separator: "\n"))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("定位对白 \(marker.number)").accessibilityIdentifier("comic-block-" + block.id)
+            .accessibilityAddTraits(.isButton).accessibilityAction { select(block.id) }
+            .offset(x: marker.frame.minX, y: marker.frame.minY)
     }
 }
 

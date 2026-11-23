@@ -16,8 +16,15 @@ private struct NativeLoadedPage: Decodable {
     static let enhancementTargets = [2560, 3840]
 
     @Published var files: [URL] = []
-    @Published var selected: URL?
-    @Published var page: PageResult? { didSet { presentationCache = nil } }
+    @Published var selected: URL? {
+        didSet { if selected != oldValue { blockSelection = .awaitingPage } }
+    }
+    @Published var page: PageResult? {
+        didSet {
+            presentationCache = nil
+            if let page { reconcileBlockSelection(on: page) }
+        }
+    }
     @Published var readingRegions: [ReadingRegion]? { didSet { presentationCache = nil } }
     @Published var readingPreserved: [String: String] = [:]
     private var presentationCache: [ReadingPresentation]?
@@ -39,7 +46,30 @@ private struct NativeLoadedPage: Decodable {
     @Published var message = "打开漫画文件夹，开始阅读"
     @Published var error: String?
     @Published var cropSession: ReaderCropSession?
-    @Published var selectedBlock: String?
+    private enum BlockSelection {
+        case awaitingPage, cleared, block(String)
+    }
+    @Published private var blockSelection: BlockSelection = .awaitingPage
+    var selectedBlock: String? {
+        get {
+            if case let .block(id) = blockSelection { return id }
+            return nil
+        }
+        set { blockSelection = newValue.map(BlockSelection.block) ?? .cleared }
+    }
+
+    func clearBlockSelection() {
+        guard cropSession == nil else { return }
+        selectedBlock = nil
+    }
+
+    private func reconcileBlockSelection(on page: PageResult) {
+        switch blockSelection {
+        case .cleared: return
+        case .block(let id) where page.blocks.contains(where: { $0.id == id }): return
+        default: blockSelection = page.blocks.first.map { .block($0.id) } ?? .awaitingPage
+        }
+    }
     @Published var displayMode = 1
     @Published var zoom = 1.0
     @Published var model = "qwen3:4b"
@@ -458,7 +488,7 @@ private struct NativeLoadedPage: Decodable {
     func select(_ url: URL) {
         cancelCrop()
         effectiveImage = nil; layoutImage = nil
-        selected = url; selectedBlock = nil; error = nil
+        selected = url; error = nil
         originalPixelSize = ChapterTypography.originalSize(at: url)
         let folder = url.deletingLastPathComponent()
         let bundledSample = isBundledSampleDirectory(folder)

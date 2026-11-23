@@ -93,6 +93,15 @@ enum ReaderCanvasGeometry {
         let inset: CGPoint
     }
 
+    static func blockFrame(_ block: TextBlock, page: PageResult, size: CGSize) -> CGRect? {
+        guard page.width > 0, page.height > 0, block.box.count == 4,
+              block.box.allSatisfy(\.isFinite) else { return nil }
+        let scaleX = size.width / Double(page.width), scaleY = size.height / Double(page.height)
+        return CGRect(x: block.box[0] * scaleX, y: block.box[1] * scaleY,
+                      width: max(12, (block.box[2] - block.box[0]) * scaleX),
+                      height: max(12, (block.box[3] - block.box[1]) * scaleY))
+    }
+
     static func layout(image: CGSize, viewport: CGSize, zoom: Double) -> Layout {
         let width = max(1, image.width), height = max(1, image.height)
         let fit = min(max(1, viewport.width - 32) / width, max(1, viewport.height - 32) / height)
