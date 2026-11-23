@@ -46,6 +46,11 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         .sheet(isPresented: $reader.showConnectionSettings) { TranslationSettingsView(reader: reader).tint(ReaderPalette.accent) }
         .sheet(isPresented: $workspace.showsExportOptions) { ReaderExportOptionsView(reader: reader) }
         .sheet(isPresented: $showsChapterTypography) { ReaderChapterTypographyEditor(reader: reader) }
+        .sheet(isPresented: Binding(get: {
+            reader.cropSession.map { $0.phase != .selecting } ?? false
+        }, set: { if !$0, reader.cropSession?.phase == .reviewing { reader.cancelCrop() } })) {
+            ReaderCropReviewView(reader: reader, workspace: workspace)
+        }
         .task { if startsServices { reader.startup() } }
         .onReceive(reader.$page) { page in
             guard let page else { return }
@@ -73,13 +78,20 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         return HStack(spacing: 0) {
             VStack(spacing: 0) {
                 if let image = reader.image {
-                    ReaderCanvasView(reader: reader, controller: imagePan, image: image,
+                    ReaderCanvasView(reader: reader, controller: imagePan, image: reader.cropSession?.original ?? image,
                                      showsSelection: workspace.showsInspector, select: selectBlock)
                 } else {
                     welcome.frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(ReaderPalette.canvas)
                 }
                 Divider().overlay(ReaderPalette.separator)
+                if reader.cropSession?.phase == .selecting {
+                    HStack {
+                        Text("在原图上拖动，框住一列或一行漏掉的日文")
+                        Spacer()
+                        Button("取消圈选", action: reader.cancelCrop).keyboardShortcut(.cancelAction)
+                    }.font(.callout).padding(.horizontal, 12).padding(.vertical, 5)
+                }
                 readingControls
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
             if workspace.showsInspector {
@@ -139,6 +151,7 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
         translationToolbarItem
         ToolbarItem(placement: .primaryAction) {
             Menu {
+                Button("圈选补识别") { workspace.showsInspector = true; reader.beginCrop() }.disabled(!reader.canBeginCrop)
                 Button("只识别本页日文") { reader.run(operation: "ocr") }
                 Button("翻译整个文件夹") { reader.run(batch: true) }.disabled(!reader.engineReady)
                 Button("章节排版默认…") { showsChapterTypography = true }
@@ -250,18 +263,35 @@ private struct ReaderCanvasView: View {
     let image: NSImage
     let showsSelection: Bool
     let select: (String?) -> Void
+    @ViewState private var framePreview: FramePreview?
+
+    private struct FramePreview {
+        let identity: String
+        let blockID: String
+        let frame: CGRect
+        let presentation: ReadingPresentation?
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let layout = ReaderCanvasGeometry.layout(image: image.size, viewport: geometry.size, zoom: reader.zoom)
-            PannableImageScrollView(controller: controller, documentSize: layout.document, pageID: reader.selected) {
+            PannableImageScrollView(controller: controller, documentSize: layout.document, pageID: reader.selected,
+                                    isPanEnabled: reader.cropSession == nil) {
                 ZStack(alignment: .topLeading) {
                     imageWithOverlays(size: layout.image)
+                        .overlay {
+                            if let session = reader.cropSession, session.phase == .selecting {
+                                ReaderCropSelectionView(session: session, select: reader.previewCrop)
+                            }
+                        }
                         .offset(x: layout.inset.x, y: layout.inset.y)
                 }.frame(width: layout.document.width, height: layout.document.height, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .help("放大后按住鼠标左键拖动图片；单击文字框定位对白。")
-            }.onChange(of: reader.zoom) { _, _ in controller.endDrag() }
+            }.onChange(of: reader.zoom) { _, _ in controller.endDrag(); framePreview = nil }
+                .onChange(of: reader.frameEditIdentity) { _, _ in framePreview = nil }
+                .onChange(of: reader.displayMode) { _, _ in framePreview = nil }
+                .onChange(of: reader.cropSession?.id) { _, _ in framePreview = nil }
         }.background(ReaderPalette.canvas).accessibilityElement(children: .contain)
             .accessibilityIdentifier("reader-canvas")
     }
@@ -269,16 +299,11 @@ private struct ReaderCanvasView: View {
     private func imageWithOverlays(size: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
             Image(nsImage: image).resizable().frame(width: size.width, height: size.height)
-            if reader.displayMode != 0, let page = reader.page, page.width > 0, page.height > 0 {
+            if reader.cropSession == nil, reader.displayMode != 0, let page = reader.page, page.width > 0, page.height > 0 {
                 if reader.displayMode == 2 {
-                    ForEach(reader.readingPresentations) { item in
-                        ReadingOverlayView(presentation: item, scale: size.width / Double(page.width),
-                                           verticalScale: size.height / Double(page.height),
-                                           selected: showsSelection && item.region.block_ids.contains(reader.selectedBlock ?? ""),
-                                           selectionColor: ReaderPalette.marker) {
-                            select(item.region.block_ids.first)
-                        }
-                    }
+                    ReadingPageOverlays(items: displayedPresentations, scale: size.width / Double(page.width),
+                                        verticalScale: size.height / Double(page.height),
+                                        selectRegion: { select($0.region.block_ids.first) })
                 }
                 ForEach(page.blocks) { block in
                     let marked = !block.keepsOriginal && (reader.displayMode == 1 || !block.error.isEmpty)
@@ -287,8 +312,64 @@ private struct ReaderCanvasView: View {
                         region(block, page: page, size: size, marked: marked)
                     }
                 }
+                if reader.displayMode == 2, let identity = reader.frameEditIdentity, let regions = reader.readingRegions {
+                    textEditor(page: page, regions: regions, identity: identity, size: size)
+                }
             }
         }.frame(width: size.width, height: size.height)
+    }
+
+    private var displayedPresentations: [ReadingPresentation] {
+        var items = reader.readingPresentations
+        guard let preview = framePreview, preview.identity == reader.frameEditIdentity, let item = preview.presentation else { return items }
+        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = item }
+        else { items.append(item) }
+        return items
+    }
+
+    private func textEditor(page: PageResult, regions: [ReadingRegion], identity: String, size: CGSize) -> some View {
+        let pageSize = CGSize(width: page.width, height: page.height)
+        let bounds = CGRect(origin: .zero, size: pageSize)
+        let targets = page.blocks.compactMap { block -> ReaderTextFrameEditor.Target? in
+            guard block.needsReadingOverlay, let region = regions.first(where: { $0.block_ids.contains(block.id) }),
+                  let rect = reader.editingFrame(for: block, in: region, page: page) else { return nil }
+            let frame = rect.intersection(bounds)
+            return frame.isEmpty ? nil : ReaderTextFrameEditor.Target(id: block.id, frame: frame)
+        }
+        return ReaderTextFrameEditor(targets: targets, pageSize: pageSize,
+            identity: identity + "/\(size.width)x\(size.height)", selectedID: reader.selectedBlock,
+            editable: showsSelection && !reader.busy && !reader.loadingPage && !reader.openingFolder,
+            invalidPreview: framePreview != nil && framePreview?.presentation == nil,
+            select: { select($0) }, update: { id, frame, commit in
+                guard reader.frameEditIdentity == identity, !reader.busy, reader.cropSession == nil,
+                      let block = page.blocks.first(where: { $0.id == id }),
+                      let region = regions.first(where: { $0.block_ids.contains(id) }) else { framePreview = nil; return }
+                let preview: FramePreview
+                if let existing = framePreview, existing.blockID == id, existing.frame == frame, existing.identity == identity {
+                    preview = existing
+                } else {
+                    preview = FramePreview(identity: identity, blockID: id, frame: frame,
+                                           presentation: reader.previewFrame(frame, for: block, in: region))
+                }
+                if commit {
+                    framePreview = nil
+                    if preview.presentation != nil { reader.setTextFrame(frame, for: block) }
+                    else if region.block_ids.count > 1, !reader.readingPresentations.contains(where: { $0.id == region.id }),
+                            reader.canStageFrame(frame, for: block, sharing: region) {
+                        if reader.setTextFrame(frame, for: block) {
+                            reader.message = "已保存这条对白的位置。调整同框其余对白后可一起回填。"
+                        }
+                    } else { reader.message = "排字框未保存。请拉宽框、缩小字号或检查同框对白。" }
+                } else { framePreview = preview }
+            }, cancel: { framePreview = nil })
+            .frame(width: size.width, height: size.height)
+            .accessibilityRepresentation {
+                ForEach(targets, id: \.id) { target in
+                    let block = page.blocks.first { $0.id == target.id }
+                    Button("对白 " + target.id + "，" + (block?.translation ?? "")) { select(target.id) }
+                        .accessibilityIdentifier("comic-translation-" + target.id)
+                }
+            }
     }
 
     private func region(_ block: TextBlock, page: PageResult, size: CGSize, marked: Bool) -> some View {
@@ -328,8 +409,10 @@ private struct ReaderStatusView: View {
         if reader.unreadableOverlayCount > 0 { notes.append("\(reader.unreadableOverlayCount) 处译文暂未覆盖到图片，可在对白栏阅读。") }
         let review = Set((reader.page?.blocks ?? []).filter(\.needsOCRReview).map(\.id))
         if !review.isEmpty { notes.append("\(review.count) 处疑似非文字已暂停处理，可在「本页诊断」核对。") }
-        let markers = reader.readingPreserved.keys.filter { !review.contains($0) }.count
-        if markers > 0 { notes.append("\(markers) 处疑似页码已保留原图，请核对原文。") }
+        let pending = Set((reader.page?.blocks ?? []).filter { !$0.keepsOriginal && $0.source_translation_pending == true }.map(\.id))
+        if !pending.isEmpty { notes.append("\(pending.count) 处已补充日文，等待核对或重新翻译。") }
+        let markers = reader.readingPreserved.keys.filter { !review.contains($0) && !pending.contains($0) }.count
+        if markers > 0 { notes.append("\(markers) 处已保留原图，可在对白栏查看原因。") }
         return notes.isEmpty ? nil : notes.joined(separator: " ")
     }
 

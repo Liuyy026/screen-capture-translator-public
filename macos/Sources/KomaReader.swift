@@ -9,6 +9,7 @@ private struct NativeLoadedPage: Decodable {
     var effective_image: String?
     var layout_image: String?
     var enhancement_warning: String?
+    var block_id: String?
 }
 
 @MainActor final class Reader: ObservableObject {
@@ -22,7 +23,7 @@ private struct NativeLoadedPage: Decodable {
     private var presentationCache: [ReadingPresentation]?
     @Published private var typography = ChapterTypography() { didSet { presentationCache = nil } }
     private var typographyURL: URL?
-    private var originalPixelWidth: Double?
+    private var originalPixelSize: CGSize?
     @Published var readingLayoutError: String?
     @Published private(set) var loadingPage = false
     @Published private(set) var pageLoadError: String?
@@ -37,6 +38,7 @@ private struct NativeLoadedPage: Decodable {
     @Published var preparingImage = false
     @Published var message = "打开漫画文件夹，开始阅读"
     @Published var error: String?
+    @Published var cropSession: ReaderCropSession?
     @Published var selectedBlock: String?
     @Published var displayMode = 1
     @Published var zoom = 1.0
@@ -106,6 +108,7 @@ private struct NativeLoadedPage: Decodable {
     private var modelTimer: Timer?
     private var cacheURL: URL?
     var editCacheIdentity: String? { cacheURL?.path }
+    var frameEditIdentity: String? { editCacheIdentity.map { $0 + "|" + (pageRevision ?? "") } }
     private var started = false
     @Published private var folderRequest: UUID?
     var openingFolder: Bool { folderRequest != nil }
@@ -453,9 +456,10 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func select(_ url: URL) {
+        cancelCrop()
         effectiveImage = nil; layoutImage = nil
         selected = url; selectedBlock = nil; error = nil
-        originalPixelWidth = ChapterTypography.originalWidth(at: url)
+        originalPixelSize = ChapterTypography.originalSize(at: url)
         let folder = url.deletingLastPathComponent()
         let bundledSample = isBundledSampleDirectory(folder)
         let styleFile = bundledSample
@@ -483,6 +487,7 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func reloadPage(updateMessage: Bool = false, useOriginalImage: Bool = false, retryChangedRevision: Bool = true) {
+        cancelCrop()
         pageTask?.cancel()
         pageRequest = UUID()
         resetReadingRegions()
@@ -534,8 +539,9 @@ private struct NativeLoadedPage: Decodable {
         if let presentationCache { return presentationCache }
         guard let page, let readingRegions else { return [] }
         let styles = typographyPageKey.map { typography.styles(for: page, key: $0) } ?? [:]
+        let scale = typesettingScale(page)
         let items = ReadingLayout.presentations(page: page, regions: readingRegions, styles: styles,
-            sourcePixelScale: ChapterTypography.pixelScale(for: page, originalWidth: originalPixelWidth))
+                                                sourcePixelScale: scale.width, sourceYScale: scale.height)
         presentationCache = items
         return items
     }
@@ -561,6 +567,69 @@ private struct NativeLoadedPage: Decodable {
         readingPresentations.first { $0.region.block_ids.contains(block.id) }?.layout(for: block.id)
     }
 
+    private func typesettingScale(_ page: PageResult) -> CGSize {
+        guard let size = originalPixelSize else { return CGSize(width: 1, height: 1) }
+        return CGSize(width: Double(page.width) / size.width, height: Double(page.height) / size.height)
+    }
+
+    func editingFrame(for block: TextBlock, in region: ReadingRegion, page: PageResult) -> CGRect? {
+        let scale = typesettingScale(page)
+        if let value = typographyOverride(for: block).textFrame {
+            return value.applying(CGAffineTransform(scaleX: scale.width, y: scale.height))
+        }
+        if let slot = ReadingLayout.memberSlot(for: block.id, region: region) { return slot }
+        if let run = readingPresentations.first(where: { $0.id == region.id })?.runs.first(where: { $0.blockIDs.contains(block.id) }) {
+            let layout: ReadingTypeset?
+            if run.blockIDs.count == 1 { layout = run.layout }
+            else {
+                let members = run.blockIDs.compactMap { id in page.blocks.first { $0.id == id } }
+                layout = ReadingRun.paragraphs(of: run.layout, members: members)?.first { $0.blockIDs == [block.id] }?.layout
+            }
+            if let layout {
+                let visible = layout.bounds.insetBy(dx: -layout.fontSize * 0.4, dy: -layout.fontSize * 0.4)
+                return region.block_ids.count == 1 ? (region.rectangle ?? visible).union(visible) : visible
+            }
+        }
+        if region.block_ids.count == 1 { return region.rectangle }
+        guard block.box.count == 4, block.box.allSatisfy(\.isFinite) else { return nil }
+        return CGRect(x: block.box[0], y: block.box[1], width: block.box[2] - block.box[0], height: block.box[3] - block.box[1])
+    }
+
+    private func originalFrame(_ frame: CGRect, page: PageResult) -> CGRect {
+        let scale = typesettingScale(page)
+        return frame.applying(CGAffineTransform(scaleX: 1 / scale.width, y: 1 / scale.height))
+    }
+
+    func previewFrame(_ frame: CGRect, for block: TextBlock, in region: ReadingRegion) -> ReadingPresentation? {
+        guard let page, let key = typographyPageKey else { return nil }
+        var styles = typography.styles(for: page, key: key)
+        styles[block.id, default: ReadingTextStyle()].textFrame = originalFrame(frame, page: page)
+        let scale = typesettingScale(page)
+        return ReadingLayout.presentations(page: page, regions: [region], styles: styles,
+                                          sourcePixelScale: scale.width, sourceYScale: scale.height).first
+    }
+
+    // Several individually overflowing translations can share a single repair. Allow
+    // fixing them one by one, but never show that repair until all members actually fit.
+    func canStageFrame(_ frame: CGRect, for block: TextBlock, sharing region: ReadingRegion) -> Bool {
+        var member = region
+        member.block_ids = [block.id]
+        member.member_slots = nil
+        return previewFrame(frame, for: block, in: member) != nil
+    }
+
+    @discardableResult func setTextFrame(_ frame: CGRect?, for block: TextBlock) -> Bool {
+        guard let page, let key = typographyPageKey,
+              page.blocks.contains(where: { $0.id == block.id && $0.box == block.box }) else { return false }
+        let value = frame.map { originalFrame($0, page: page) }
+        guard typographyOverride(for: block).textFrame != value else { return true }
+        return saveTypography {
+            var override = $0.override(for: block, on: page, key: key)
+            override.textFrame = value
+            $0.set(override, for: block, on: page, key: key)
+        }
+    }
+
     func setTypographyOverride(_ style: ReadingTextStyle, for block: TextBlock) {
         guard let page, let key = typographyPageKey, typographyOverride(for: block) != style,
               page.blocks.contains(where: { $0.id == block.id && $0.box == block.box }) else { return }
@@ -568,7 +637,7 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func resetTypographyOverride(for block: TextBlock) {
-        setTypographyOverride(ReadingTextStyle(), for: block)
+        setTypographyOverride(ReadingTextStyle(textFrame: typographyOverride(for: block).textFrame), for: block)
     }
 
     @discardableResult func setChapterTypography(_ style: ReadingTextStyle) -> Bool {
@@ -710,6 +779,126 @@ private struct NativeLoadedPage: Decodable {
         }
     }
 
+    var canBeginCrop: Bool {
+        !shuttingDown && !busy && !openingFolder && !preparingImage && !loadingPage
+            && cacheURL != nil && selected != nil && cropSession == nil
+    }
+
+    func beginCrop() {
+        guard canBeginCrop, let selected, let cacheURL, let original = NSImage(contentsOf: selected),
+              let canvas = page.map({ CGSize(width: $0.width, height: $0.height) }) ?? ChapterTypography.originalSize(at: selected) else { return }
+        let target = page?.blocks.first { $0.id == selectedBlock && !$0.keepsOriginal }?.id
+        cropSession = ReaderCropSession(image: selected, cache: cacheURL, revision: pageRevision,
+                                        original: original, canvas: canvas, placement: target == nil ? .new : .prepend,
+                                        target: target)
+        error = nil
+    }
+
+    func cancelCrop() {
+        guard let session = cropSession, session.phase != .applying else { return }
+        cropSession = nil
+        if session.phase == .recognizing { task?.cancel() }
+    }
+
+    func dismissCropReview() {
+        let reload = cropSession?.outdated == true
+        cancelCrop()
+        if reload { reloadPage(updateMessage: true) }
+    }
+
+    func reselectCrop() {
+        guard cropSession?.phase == .reviewing else { return }
+        cropSession?.box = []
+        cropSession?.source = ""
+        cropSession?.issue = nil
+        cropSession?.phase = .selecting
+    }
+
+    private func cropRequest(_ session: ReaderCropSession) -> [String: Any] {
+        var request: [String: Any] = ["image": session.image.path, "cache": session.cache.path, "box": session.box]
+        if let revision = session.revision { request["revision"] = revision }
+        return request
+    }
+
+    func previewCrop(_ box: [Int]) {
+        guard !busy, var session = cropSession, session.phase == .selecting, box.count == 4 else { return }
+        session.box = box
+        session.phase = .recognizing
+        cropSession = session
+        busy = true
+        task = Task {
+            defer { busy = false; task = nil }
+            do {
+                struct Preview: Decodable { let source: String; let box: [Int]; let revision: String? }
+                let data = try await nativeCore.request("ocr_crop_preview", values: cropRequest(session))
+                let result = try JSONDecoder().decode(Preview.self, from: data)
+                guard !Task.isCancelled, cropSession?.id == session.id, result.revision == session.revision,
+                      result.box == box else {
+                    if cropSession?.id == session.id { cancelCrop() }
+                    return
+                }
+                cropSession?.source = result.source
+                cropSession?.phase = .reviewing
+            } catch {
+                guard !Task.isCancelled, cropSession?.id == session.id else { return }
+                if (error as? NativeCoreService.Failure)?.code == "page_revision_changed" {
+                    cropSession?.outdated = true
+                    cropSession?.issue = "本页内容已更新，请重新载入后圈选。"
+                } else {
+                    cropSession?.issue = "识别失败，可重选范围或手动输入日文。\(error.localizedDescription)"
+                }
+                cropSession?.phase = .reviewing
+            }
+        }
+    }
+
+    func applyCrop(translation: String) {
+        guard !busy, let session = cropSession, session.phase == .reviewing, !session.outdated, session.image == selected,
+              session.cache == cacheURL, session.revision == pageRevision else { return }
+        let source = session.source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else { return }
+        var values = cropRequest(session)
+        values["placement"] = session.placement.rawValue
+        values["source"] = source
+        if session.placement != .new {
+            guard let id = session.target, page?.blocks.contains(where: { $0.id == id && !$0.keepsOriginal }) == true else { return }
+            values["block_id"] = id
+        }
+        let confirmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !confirmed.isEmpty { values["translation"] = confirmed }
+        cropSession?.issue = nil
+        cropSession?.phase = .applying
+        busy = true
+        task = Task {
+            defer { busy = false; task = nil }
+            do {
+                let data = try await nativeCore.request("ocr_crop_apply", values: values)
+                let result = try JSONDecoder().decode(NativeLoadedPage.self, from: data)
+                cropSession = nil
+                guard self.selected == session.image, cacheURL == session.cache else { return }
+                if let id = result.block_id { selectedBlock = id }
+                pageTask?.cancel()
+                pageRequest = UUID()
+                loadingPage = false
+                resetReadingRegions()
+                pageRevision = result.revision
+                page = result.page
+                displayMode = confirmed.isEmpty ? 1 : 2
+                prepareReadingRegions(cache: session.cache)
+                message = confirmed.isEmpty ? "已保存圈选日文，可核对译文或重新翻译。" : "已保存圈选日文与译文"
+            } catch {
+                if let failure = error as? NativeCoreService.Failure, failure.code == "page_revision_changed" {
+                    cropSession?.outdated = true
+                    cropSession?.issue = "本页已有其他修改。可先复制这里的日文或译文，再关闭并重新载入。"
+                    cropSession?.phase = .reviewing
+                } else {
+                    cropSession?.issue = "保存失败：\(error.localizedDescription)"
+                    cropSession?.phase = .reviewing
+                }
+            }
+        }
+    }
+
     func retryBlock(_ id: String) {
         guard !busy, page?.blocks.contains(where: { $0.id == id && !$0.keepsOriginal && !$0.needsOCRReview }) == true else { return }
         run(operation: "translate", blockID: id)
@@ -757,6 +946,7 @@ private struct NativeLoadedPage: Decodable {
 
     func exportChapter(_ options: ChapterExport.Options) {
         guard canEnhanceChapter else { return }
+        cancelCrop()
         guard let first = options.pages.first, let last = options.pages.last, first >= 1, last <= files.count else {
             error = "请选择第 1 页到第 \(files.count) 页之间要导出的页码。"
             return
@@ -813,9 +1003,11 @@ private struct NativeLoadedPage: Decodable {
                     let cache = try page.cache.map { URL(fileURLWithPath: $0) } ?? cacheFor(input, mode: mode)
                     let key = ChapterTypography.pageKey(image: input, cache: cache)
                     let styles = exportTypography.styles(for: page.page, key: key)
-                    let scale = ChapterTypography.pixelScale(for: page.page, originalWidth: ChapterTypography.originalWidth(at: input))
+                    let size = ChapterTypography.originalSize(at: input)
+                    let scale = ChapterTypography.pixelScale(for: page.page, originalWidth: size.map { Double($0.width) })
                     omitted += try await ChapterExport.write(page, to: staging.appendingPathComponent(name),
-                                                             styles: styles, sourcePixelScale: scale)
+                                                             styles: styles, sourcePixelScale: scale,
+                                                             sourceYScale: size.map { Double(page.page.height) / $0.height })
                     try Task.checkCancellation()
                     queueDone = index + 1
                 }
@@ -836,6 +1028,7 @@ private struct NativeLoadedPage: Decodable {
     }
 
     private func runQueue(_ urls: [URL], operation: String, options: [String: Any] = [:]) {
+        cancelCrop()
         let enhancing = operation == "enhance"
         if !enhancing {
             for url in urls { pageProcessingErrors.removeValue(forKey: url) }
@@ -938,6 +1131,7 @@ private struct NativeLoadedPage: Decodable {
     }
 
     func cancel() {
+        if cropSession != nil { cancelCrop(); return }
         if exportingChapter {
             message = "正在停止导出…"
             task?.cancel()

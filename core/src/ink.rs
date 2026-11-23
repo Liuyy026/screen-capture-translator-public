@@ -10,10 +10,18 @@ use opencv::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "manual_ink.rs"]
+mod manual;
+pub use manual::prepare_manual_ink;
+
 pub type Box4 = [i32; 4];
 
 pub fn clipped_box(block: &Value, width: i32, height: i32) -> Option<Box4> {
-    let values = block["box"].as_array()?;
+    clipped_rect(&block["box"], width, height)
+}
+
+fn clipped_rect(rect: &Value, width: i32, height: i32) -> Option<Box4> {
+    let values = rect.as_array()?;
     if values.len() != 4 {
         return None;
     }
@@ -32,8 +40,16 @@ pub fn clipped_box(block: &Value, width: i32, height: i32) -> Option<Box4> {
     ((b[2] as i64 - b[0] as i64) >= 4 && (b[3] as i64 - b[1] as i64) >= 4).then_some(b)
 }
 
+pub fn source_boxes(block: &Value, width: i32, height: i32) -> Vec<Box4> {
+    block["source_boxes"].as_array().filter(|boxes| !boxes.is_empty())
+        .and_then(|boxes| boxes.iter().map(|b| clipped_rect(b, width, height)).collect())
+        .unwrap_or_else(|| clipped_box(block, width, height).into_iter().collect())
+}
+
 pub fn ready(block: &Value) -> bool {
     !keeps_original(block)
+        && !truth(&block["source_translation_pending"])
+        && !truth(&block["manual_ink_uncertain"])
         && !crate::ocr_review::suppressed(block)
         && block["translation"].as_str().is_some_and(|s| !s.trim().is_empty())
         && !truth(&block["error"])
@@ -47,6 +63,14 @@ pub fn preserved_markers(page: &Value) -> Value {
     let mut preserved = json!({});
     for block in array(&page["blocks"]) {
         if keeps_original(block) { continue; }
+        if truth(&block["manual_ink_uncertain"]) {
+            preserved[text(&block["id"])] = json!("选区文字与画面无法安全分离，已保留原图。");
+            continue;
+        }
+        if truth(&block["source_translation_pending"]) {
+            preserved[text(&block["id"])] = json!("已补充原文，请核对旧译文或重新翻译。");
+            continue;
+        }
         if crate::ocr_review::suppressed(block) {
             preserved[text(&block["id"])] = json!(crate::ocr_review::reason(block));
             continue;

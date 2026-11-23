@@ -70,17 +70,24 @@ class Models:
                                                    input_size=1024, device='cpu', act='leaky')
         return self.loaded['detector']
 
-    def ocr(self, request):
-        if 'ocr' not in self.loaded:
+    def recognizer(self):
+        if 'recognizer' not in self.loaded:
             if not (self.weights/'manga-ocr/pytorch_model.bin').is_file():
                 raise FileNotFoundError('Installed Manga OCR model is missing')
-            from mokuro.manga_page_ocr import MangaPageOcr
             from manga_ocr import MangaOcr
+            import torch
+            torch.set_num_threads(4)
+            self.loaded['recognizer'] = MangaOcr(str(self.weights/'manga-ocr'))
+        return self.loaded['recognizer']
+
+    def ocr(self, request):
+        if 'ocr' not in self.loaded:
+            from mokuro.manga_page_ocr import MangaPageOcr
             # Same model preprocessing and defaults as the frozen Mokuro pipeline.
             engine = MangaPageOcr(disable_ocr=True)
             engine.disable_ocr = False
             engine.text_detector = self.detector()
-            engine.mocr = MangaOcr(str(self.weights/'manga-ocr'))
+            engine.mocr = self.recognizer()
             self.loaded['ocr'] = engine
         raw = self.loaded['ocr'](str(self.path(request['image_path'])))
         # Detector coordinates contain NumPy scalar types; normalize the wire
@@ -134,8 +141,9 @@ class Models:
                 sys.modules['torch'].mps.empty_cache()
             return {'loaded': []}
         if operation == 'release_ocr':
-            if 'ocr' in self.loaded:
-                del self.loaded['ocr']
+            if 'ocr' in self.loaded or 'recognizer' in self.loaded:
+                self.loaded.pop('ocr', None)
+                self.loaded.pop('recognizer', None)
                 gc.collect()
                 if 'torch' in sys.modules and sys.modules['torch'].backends.mps.is_available():
                     sys.modules['torch'].mps.empty_cache()
@@ -147,6 +155,12 @@ class Models:
                     'refined': self.write_array(request['refined_output'], refined)}
         if operation == 'ocr':
             return self.ocr(request)
+        if operation == 'ocr_crop':
+            from PIL import Image
+            crop = self.read_array(request['image'])
+            # Rust sends the selected source pixels in OpenCV BGR order.
+            image = Image.fromarray(crop[:, :, ::-1])
+            return {'source': self.recognizer()(image)}
         if operation == 'restore':
             return self.restore(request)
         raise ValueError('Unknown model operation')

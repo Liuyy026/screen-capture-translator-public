@@ -11,13 +11,13 @@ struct ChapterTypography: Codable {
 
     // Legacy OCR can use an enlarged canvas. User-entered sizes always refer
     // to the original comic, independently of that canvas or the output PNG.
-    static func originalWidth(at image: URL) -> Double? {
+    static func originalSize(at image: URL) -> CGSize? {
         guard let source = CGImageSourceCreateWithURL(image as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
         let rotated = (5...8).contains(properties[kCGImagePropertyOrientation] as? Int ?? 1)
-        guard let pixels = properties[rotated ? kCGImagePropertyPixelHeight : kCGImagePropertyPixelWidth] as? Int,
-              pixels > 0 else { return nil }
-        return Double(pixels)
+        guard let width = properties[kCGImagePropertyPixelWidth] as? Int, width > 0,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int, height > 0 else { return nil }
+        return CGSize(width: rotated ? height : width, height: rotated ? width : height)
     }
 
     static func pixelScale(for page: PageResult, originalWidth: Double?) -> Double {
@@ -26,11 +26,12 @@ struct ChapterTypography: Codable {
     }
 
     private static func key(for block: TextBlock, on page: PageResult) -> String? {
-        guard page.width > 0, page.height > 0, block.box.count == 4,
-              block.box.allSatisfy(\.isFinite) else { return nil }
+        let anchor = block.typography_anchor ?? block.box
+        guard page.width > 0, page.height > 0, anchor.count == 4,
+              anchor.allSatisfy(\.isFinite) else { return nil }
         // OCR can reuse an ID for a different balloon. Match its geometry
         // as well, normalized so an equivalent OCR canvas has the same key.
-        let bounds = block.box.enumerated().map { index, coordinate in
+        let bounds = anchor.enumerated().map { index, coordinate in
             let dimension = index.isMultiple(of: 2) ? page.width : page.height
             return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"),
                           coordinate / Double(dimension))
@@ -52,7 +53,7 @@ struct ChapterTypography: Codable {
                                 fontSize: local.fontSize ?? defaults.fontSize,
                                 direction: local.direction ?? defaults.direction,
                                 lineSpacing: local.lineSpacing ?? defaults.lineSpacing,
-                                alignment: local.alignment ?? defaults.alignment)
+                                alignment: local.alignment ?? defaults.alignment, textFrame: local.textFrame)
     }
 
     func styles(for page: PageResult, key: String) -> [String: ReadingTextStyle] {

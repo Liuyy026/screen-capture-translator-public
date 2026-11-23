@@ -19,7 +19,7 @@ fn model_identity(digest:&mut Sha256,path:&Path)->Result<()>{
 impl Store{
     pub fn key(&self,image:&[u8],cache:&[u8])->Result<String>{
         let mut digest=Sha256::new();digest.update(b"koma-native-display-v1\0");digest.update(image);digest.update([0]);digest.update(cache);
-        for code in [include_bytes!("reading.rs").as_slice(),include_bytes!("ink.rs").as_slice(),include_bytes!("geometry.rs").as_slice(),
+        for code in [include_bytes!("reading.rs").as_slice(),include_bytes!("ink.rs").as_slice(),include_bytes!("manual_ink.rs").as_slice(),include_bytes!("geometry.rs").as_slice(),
             include_bytes!("background.rs").as_slice(),include_bytes!("texture.rs").as_slice(),include_bytes!("raster.rs").as_slice(),
             include_bytes!("preserved_bubbles.rs").as_slice(),
             include_bytes!("ocr_review.rs").as_slice(),include_bytes!("translation.rs").as_slice(),
@@ -82,6 +82,8 @@ pub async fn generate(image_bytes:&[u8],page:&Value,source:Option<Mat>,mut model
             source=Some(mask);
         }
     }
+    ink::prepare_manual_ink(&mut reviewed, &gray, source.as_mut())?;
+    let page = &reviewed;
     let regions=reading::regions(page,&gray,if has_color{Some(&color)}else{None},source.as_ref(),models).await?;
     Ok(json!({"version":3,"regions":regions,"preserved":ink::preserved_markers(page)}))
 }

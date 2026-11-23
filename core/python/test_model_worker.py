@@ -9,6 +9,22 @@ from model_worker import Models
 
 
 class ModelWorkerTests(unittest.TestCase):
+    def test_crop_calls_recognizer_directly_and_releases_it(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as directory:
+            models = Models(directory, directory)
+            seen = []
+            def recognize(image):
+                seen.append((image.size, image.getpixel((0, 0))))
+                return 'ケーキも'
+            models.loaded['recognizer'] = recognize
+            crop = np.full((10, 4, 3), [22, 66, 77], dtype=np.uint8)
+            encoded = models.write_array('job/crop.bin', crop)
+            self.assertEqual(models.handle({'op': 'ocr_crop', 'image': encoded}), {'source': 'ケーキも'})
+            self.assertEqual(seen, [((4, 10), (77, 66, 22))])
+            self.assertEqual(set(models.loaded), {'recognizer'})
+            self.assertEqual(models.handle({'op': 'release_ocr'}), {'loaded': []})
+
     def test_protocol_recovers_from_bad_request_and_shuts_down(self):
         with tempfile.TemporaryDirectory() as directory:
             requests = '\n'.join([

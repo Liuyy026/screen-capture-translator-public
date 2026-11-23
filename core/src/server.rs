@@ -115,6 +115,10 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let _activity=runtime.cache_policy.activity().await?;
             runtime.edit(Path::new(required(r,"cache")?),required(r,"block_id")?,&r["values"],r["revision"].as_str(),r["image"].as_str().map(Path::new)).await
         },
+        "ocr_crop_preview" | "ocr_crop_apply" => {
+            let _activity = runtime.cache_policy.activity().await?;
+            runtime.ocr_crop(r).await
+        },
         "process"=>{
             let images=r["images"].as_array().context("missing images")?;
             ensure!(!images.is_empty()&&images.len()<=4096,"invalid page queue size");
@@ -218,7 +222,7 @@ async fn run(runtime:Arc<Runtime>,mut job:Job,output:mpsc::Sender<Value>,registr
     };
     // Release owned OCR allocations before another translation job; a cancelled
     // model call also discards its poisoned channel and private array workspace.
-    if job.request["op"] == "process" && job.request["operation"] != "enhance" {
+    if job.request["op"] == "ocr_crop_preview" || (job.request["op"] == "process" && job.request["operation"] != "enhance") {
         cleanup_ocr(&runtime).await;
     }
     runtime.maintain_cache().await;
@@ -287,7 +291,7 @@ pub async fn serve(runtime:Runtime)->Result<()>{
             });
         }
         let job=Job{id:id.clone(),request,cancel:receiver};
-        if matches!(job.request["op"].as_str(), Some("process" | "unload_model")){
+        if matches!(job.request["op"].as_str(), Some("process" | "unload_model" | "ocr_crop_preview" | "ocr_crop_apply")){
             if queue.try_send(job).is_err(){registry.lock().await.remove(&id);
                 let _=output.send(json!({"id":id,"event":"error","error":"处理队列已满，请稍后重试"})).await;
             }

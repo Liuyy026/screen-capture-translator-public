@@ -491,7 +491,7 @@ pub fn ensure(page: &mut Value, image: Option<&Path>) -> Result<()> {
 fn valid_block(b: &Value) -> bool {
     let translation = string_or_empty(&b["translation"]);
     let translation = trim(&translation);
-    !translation.is_empty()
+    !truth(&b["source_translation_pending"]) && !translation.is_empty()
         && (truth(&b["edited"])
             || (!truth(&b["error"]) && (translation != trim(&string_or_empty(&b["source"]))
                 || crate::translation::accepted_vision_echo(b))))
@@ -539,7 +539,7 @@ pub fn sync(page: &mut Value) -> Result<()> {
             && mapping_ids == member_ids
             && all
                 .iter()
-                .all(|&i| !truth(&blocks[i]["edited"]) && blocks[i]["overlay"] != "skip")
+                .all(|&i| !truth(&blocks[i]["edited"]) && !truth(&blocks[i]["source_translation_pending"]) && blocks[i]["overlay"] != "skip")
             && members.iter().all(|&i| {
                 !truth(&blocks[i]["error"])
                     && mapping.and_then(|m| m.get(&text(&blocks[i]["id"])))

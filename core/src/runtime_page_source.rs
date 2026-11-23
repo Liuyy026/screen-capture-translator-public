@@ -195,13 +195,20 @@ pub(super) fn rebase_ocr(page: &mut Value, original: &Path) -> Result<()> {
         .as_array_mut()
         .context("missing OCR blocks")?
     {
-        for (coord, scale) in block["box"]
-            .as_array_mut()
-            .context("missing OCR box")?
-            .iter_mut()
-            .zip([sx, sy, sx, sy])
-        {
-            *coord = json!(coord.as_f64().context("invalid OCR coordinate")? * scale);
+        let scale_box = |bounds: &mut Value| -> Result<()> {
+            let coords = bounds.as_array_mut().context("missing OCR box")?;
+            ensure!(coords.len() == 4, "invalid OCR box");
+            for (coord, scale) in coords.iter_mut().zip([sx,sy,sx,sy]) {
+                *coord = json!(coord.as_f64().context("invalid OCR coordinate")? * scale);
+            }
+            Ok(())
+        };
+        scale_box(&mut block["box"])?;
+        if let Some(anchor) = block.get_mut("typography_anchor") { scale_box(anchor)?; }
+        for key in ["source_boxes", "manual_ocr_boxes"] {
+            if let Some(boxes) = block.get_mut(key) {
+                for bounds in boxes.as_array_mut().context("invalid source rectangles")? { scale_box(bounds)?; }
+            }
         }
     }
     page["width"] = json!(original.cols());

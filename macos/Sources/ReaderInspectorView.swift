@@ -18,6 +18,10 @@ struct ReaderInspectorView: View {
             HStack {
                 Text("对白对照").font(.system(size: 13, weight: .semibold))
                 Spacer()
+                Button { reader.beginCrop() } label: {
+                    Label("圈选补识别", systemImage: "viewfinder")
+                }.buttonStyle(.borderless).font(.caption).disabled(!reader.canBeginCrop)
+                    .accessibilityIdentifier("start-crop-ocr")
                 Text(candidateSummary).font(.caption)
                     .foregroundStyle(ReaderPalette.secondary)
             }.padding(12)
@@ -141,14 +145,14 @@ private struct ReaderSelectedBlockEditor: View {
     @Binding var showsTypographyDetails: Bool
 
     private var draft: ReaderEditDraft { workspace.draft(for: key, block: block) }
-    private var disabled: Bool { reader.busy || reader.openingFolder || reader.preparingImage || draft.phase != .editing }
+    private var disabled: Bool { reader.cropSession != nil || reader.busy || reader.openingFolder || reader.preparingImage || draft.phase != .editing }
     private var index: Int { reader.page?.blocks.firstIndex(where: { $0.id == block.id }) ?? 0 }
     private var warnings: [String] {
         var values: [String] = []
         if !block.keepsOriginal {
             if let issue = block.translationIssue { values.append(issue) }
             values += (block.quality_warnings ?? []).filter { $0.hasPrefix("原文与译文相同") }
-            if let note = reader.readingPreserved[block.id] { values.append(note) }
+            if let note = reader.readingPreserved[block.id], block.source_translation_pending != true { values.append(note) }
             else if block.needsOCRReview, let reason = block.ocr_review?.reason { values.append(reason) }
             else if block.needsReadingOverlay, let page = reader.page, let regions = reader.readingRegions,
                     !reader.readingPresentations.contains(where: { $0.region.block_ids.contains(block.id) }) {
@@ -198,6 +202,11 @@ private struct ReaderSelectedBlockEditor: View {
             Divider().overlay(ReaderPalette.separator)
             ReaderBlockTypographyView(reader: reader, block: block, key: key, isDisabled: disabled,
                                       isExpanded: $showsTypography, showsDetails: $showsTypographyDetails)
+            if block.source_translation_pending == true, !block.translation.isEmpty {
+                Button("已核对，采用现有译文") {
+                    reader.saveEdit(id: block.id, source: block.source, translation: block.translation)
+                }.buttonStyle(.link).font(.caption).disabled(disabled || draft.changed)
+            }
             if block.needsOCRReview {
                 Button("确认为文字，恢复处理") { reader.confirmOCR(block.id) }
                     .buttonStyle(.link).font(.caption).disabled(disabled || draft.changed)

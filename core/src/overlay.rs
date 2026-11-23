@@ -470,7 +470,7 @@ pub fn ensure_gray(page: &mut Value, gray: Option<&Mat>) -> Result<bool> {
             if assigned.contains(&i) {
                 continue;
             }
-            if translation::low_impact(&block["source"], false) {
+            if block["manual_ocr_boxes"].is_null() && translation::low_impact(&block["source"], false) {
                 mark(
                     block,
                     "skip",

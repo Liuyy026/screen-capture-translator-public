@@ -186,6 +186,16 @@ impl ImageModels {
         }).await
     }
 
+    pub async fn ocr_crop(&mut self, image: &Mat) -> Result<String> {
+        self.with_job_files(async |models| {
+            let input = models.write_array("job/crop.bin", image)?;
+            models.ocr_requested = true;
+            let response = models.call(json!({"op":"ocr_crop","image":input})).await
+                .context("无法识别选区，请检查本地 Manga OCR 模型")?;
+            Ok(response["source"].as_str().context("选区识别结果格式无效")?.trim().to_owned())
+        }).await
+    }
+
     pub async fn release_ocr(&mut self)->Result<()>{
         self.prepare_request().await?;
         if self.ocr_requested && self.worker.is_some() {

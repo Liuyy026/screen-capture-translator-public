@@ -115,16 +115,20 @@ enum ChapterExport {
     }
 
     @MainActor static func write(_ input: Page, to url: URL, styles: [String: ReadingTextStyle] = [:],
-                                 sourcePixelScale: Double = 1) async throws -> Int {
+                                 sourcePixelScale: Double = 1, sourceYScale: Double? = nil) async throws -> Int {
         let page = input.page
         guard input.reply.version == 3, page.width > 0, page.height > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
         let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions,
-                                                        styles: styles, sourcePixelScale: sourcePixelScale)
+                                                        styles: styles, sourcePixelScale: sourcePixelScale, sourceYScale: sourceYScale)
         let shown = Set(presentations.flatMap(\.region.block_ids))
         let omitted = page.blocks.filter { block in
-            !block.keepsOriginal && !block.needsOCRReview && block.overlay != "skip" && block.text_kind != "noise"
+            if !block.keepsOriginal && !shown.contains(block.id)
+                && (block.source_translation_pending == true || (block.ocr_confirmed == true && input.reply.preserved?[block.id] != nil)) {
+                return true
+            }
+            return !block.keepsOriginal && !block.needsOCRReview && block.overlay != "skip" && block.text_kind != "noise"
                 && !shown.contains(block.id) && input.reply.preserved?[block.id] == nil
                 && (block.needsReadingOverlay || !block.error.isEmpty
                     || block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -168,12 +172,8 @@ enum ChapterExport {
                                                  presentations: [ReadingPresentation]) throws -> CGImage {
         let scale = size.width / Double(page.width)
         let verticalScale = size.height / Double(page.height)
-        let content = ZStack(alignment: .topLeading) {
-            ForEach(presentations) { item in
-                ReadingOverlayView(presentation: item, scale: scale, verticalScale: verticalScale,
-                                   selected: false, select: {})
-            }
-        }.frame(width: size.width, height: size.height, alignment: .topLeading).clipped()
+        let content = ReadingPageOverlays(items: presentations, scale: scale, verticalScale: verticalScale)
+            .frame(width: size.width, height: size.height, alignment: .topLeading).clipped()
         let renderer = ImageRenderer(content: content)
         renderer.scale = 1
         guard let result = renderer.cgImage, result.width == Int(size.width), result.height == Int(size.height) else {

@@ -32,8 +32,8 @@ private typealias TypographyState<Value> = SwiftUI.State<Value>
                         if reader.editCacheIdentity == key.cache { reader.resetTypographyOverride(for: block) }
                     }
                         .font(.caption).buttonStyle(.borderless)
-                        .disabled(disabled || style.wrappedValue == ReadingTextStyle())
-                        .help("取消这条对白的排版修改，采用当前章节默认")
+                        .disabled(disabled || style.wrappedValue == ReadingTextStyle(textFrame: style.wrappedValue.textFrame))
+                        .help("恢复章节默认的字体、字号、文字方向、间距与对齐")
                         .accessibilityIdentifier("dialogue-typography-reset")
                 }
             }.frame(minHeight: 24)
@@ -41,6 +41,19 @@ private typealias TypographyState<Value> = SwiftUI.State<Value>
                 TypographyFields(style: style, resolved: resolved, actual: actual, prefix: "dialogue")
                     .id(key)
                     .disabled(disabled)
+                if block.needsReadingOverlay {
+                    HStack {
+                        Text("在中文画面拖动排字框，两侧可调宽。")
+                            .font(.caption).foregroundStyle(ReaderPalette.secondary)
+                        Spacer(minLength: 4)
+                        if style.wrappedValue.textFrame != nil {
+                            Button("恢复位置") {
+                                if reader.editCacheIdentity == key.cache { reader.setTextFrame(nil, for: block) }
+                            }.font(.caption).buttonStyle(.borderless).disabled(disabled)
+                                .help("恢复这条对白的自动位置和宽度").accessibilityIdentifier("reset-dialogue-frame")
+                        }
+                    }
+                }
                 TypographyDisclosure(
                     title: "间距与对齐", summary: spacingSummary(actual, resolved: resolved),
                     identifier: "dialogue-typography-spacing", isExpanded: $showsDetails

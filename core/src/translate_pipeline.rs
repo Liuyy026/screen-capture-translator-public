@@ -71,7 +71,8 @@ pub(super) fn allowed(block: &Value, block_id: Option<&str>) -> bool {
 // An absent override inherits the page configuration. An explicit null means
 // the producer of legacy text is unknown and the result must be refreshed.
 fn config_matches(block: &Value, config: &Value, page_changed: bool) -> bool {
-    block.get("translation_config_override").map_or(!page_changed, |prior| prior == config)
+    !truth(&block["source_translation_pending"])
+        && block.get("translation_config_override").map_or(!page_changed, |prior| prior == config)
 }
 
 pub(super) fn needs_translation(block: &Value, config: &Value, page_changed: bool) -> bool {
@@ -81,7 +82,7 @@ pub(super) fn needs_translation(block: &Value, config: &Value, page_changed: boo
 pub(super) fn accept_block(block: &mut Value, value: &Value, config: &Value, page_changed: bool) {
     block["translation"] = value.clone();
     block["error"] = json!("");
-    remove(block, &["retranslation_error", "vision_source"]);
+    remove(block, &["retranslation_error", "vision_source", "source_translation_pending"]);
     block["quality_warnings"] = json!(translation::quality_warnings(&block["source"], value));
     if page_changed {
         block["translation_config_override"] = config.clone();

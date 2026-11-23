@@ -43,6 +43,7 @@ struct PannableImageScrollView<Content: View>: NSViewRepresentable {
     let controller: ImagePanController
     let documentSize: CGSize
     let pageID: URL?
+    var isPanEnabled = true
     @ViewBuilder var content: () -> Content
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -65,6 +66,8 @@ struct PannableImageScrollView<Content: View>: NSViewRepresentable {
         pan.buttonMask = 1
         pan.delaysPrimaryMouseButtonEvents = false
         pan.delegate = context.coordinator
+        context.coordinator.pan = pan
+        pan.isEnabled = isPanEnabled
         scroll.addGestureRecognizer(pan)
         controller.attach(to: scroll)
         return scroll
@@ -73,6 +76,7 @@ struct PannableImageScrollView<Content: View>: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.controller = controller
+        coordinator.pan?.isEnabled = isPanEnabled
         controller.attach(to: scroll)
         guard let host = coordinator.host else { return }
         let size = CGSize(width: max(scroll.contentSize.width, documentSize.width),
@@ -98,6 +102,7 @@ struct PannableImageScrollView<Content: View>: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSGestureRecognizerDelegate {
         var host: NSHostingView<AnyView>?
         weak var controller: ImagePanController?
+        weak var pan: NSPanGestureRecognizer?
         var pageID: URL?
 
         @objc func panned(_ recognizer: NSPanGestureRecognizer) {
@@ -116,6 +121,13 @@ struct PannableImageScrollView<Content: View>: NSViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool { true }
+
+        func gestureRecognizer(_ recognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+            guard let scroll = recognizer.view, let parent = scroll.superview,
+                  let surface = scroll.hitTest(parent.convert(event.locationInWindow, from: nil)) as? ReaderTextFrameEditor.Surface
+            else { return true }
+            return !surface.reservesMouseDrag
+        }
     }
 
     private final class ImageScrollView: NSScrollView {

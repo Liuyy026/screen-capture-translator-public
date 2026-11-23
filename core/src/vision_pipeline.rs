@@ -37,7 +37,7 @@ pub fn from_text(mut page: Value) -> Value {
             if !truth(&b["edited"]) {
                 b["translation"] = json!("");
                 b["error"] = json!("");
-                remove(b, &["translation_config_override", "quality_warnings", "vision_source", "retranslation_error"]);
+                remove(b, &["translation_config_override", "quality_warnings", "vision_source", "retranslation_error", "source_translation_pending"]);
             }
         }
     }

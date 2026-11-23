@@ -15,7 +15,8 @@ struct ReaderDiagnosticsView: View {
         return blocks.filter { !$0.keepsOriginal }.compactMap { block in
             if block.needsOCRReview { return (block, block.ocr_review?.reason ?? "疑似非文字，已暂停处理") }
             if let issue = block.translationIssue { return (block, issue) }
-            if block.overlay == "skip" || block.text_kind == "noise" || reader.readingPreserved[block.id] != nil { return nil }
+            if let reason = reader.readingPreserved[block.id] { return (block, reason) }
+            if block.overlay == "skip" || block.text_kind == "noise" { return nil }
             if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return (block, block.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "日文识别为空" : "缺少中文译文")
             }
@@ -83,7 +84,7 @@ struct ReaderDiagnosticsView: View {
         }
         let review = blocks.filter(\.needsOCRReview).count
         if review > 0 { return "已识别 \(blocks.count - review) 处文字 · \(review) 处疑似非文字，待核对" }
-        return blocks.isEmpty ? "识别完成，未找到文字。可在「文字框」视图核对是否漏检。" : "已识别 \(blocks.count) 处文字"
+        return blocks.isEmpty ? "识别完成，未找到文字。可用「圈选补识别」在原图上补充对白。" : "已识别 \(blocks.count) 处文字"
     }
 
     private var translationStatus: String {

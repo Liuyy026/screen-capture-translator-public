@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 
 #[path = "runtime_page_source.rs"]
 mod page_source;
+#[path = "manual_ocr.rs"]
+mod manual_ocr;
 
 pub struct Runtime{
     pub cache_root:PathBuf,
@@ -276,7 +278,16 @@ impl Runtime{
         } else { Some(input) };
         let mut page = if let Some(mut page) = existing {
             upgrade_original_selections(&mut page, input, cache)?;
-            if options.mode == "text" {
+            let complete_partial = page["manual_ocr_partial_page"] == true && target.is_none()
+                && matches!(options.operation, "ocr" | "both");
+            if complete_partial {
+                observer.progress("正在识别本页其余文字，已确认的选区将保留…")?;
+                let raw = self.models.lock().await.ocr(&effective).await?;
+                let mut detected = ocr::assemble(&raw)?;
+                if input != effective { page_source::rebase_ocr(&mut detected, input)?; }
+                manual_ocr::finish_partial_page(&mut page, &detected)?;
+            }
+            if options.mode == "text" || complete_partial {
                 if layout_image.is_some() { overlay::ensure(&mut page, layout_image)?; }
                 structure::ensure(&mut page, layout_image)?;
             }
@@ -409,6 +420,9 @@ impl Runtime{
             if fields.contains_key("source") || fields.contains_key("translation") {
                 block["ocr_confirmed"] = json!(true);
                 block.as_object_mut().unwrap().remove("retranslation_error");
+            }
+            if fields.contains_key("translation") {
+                block.as_object_mut().unwrap().remove("source_translation_pending");
             }
         }
         let config = page["translation_config"].clone();

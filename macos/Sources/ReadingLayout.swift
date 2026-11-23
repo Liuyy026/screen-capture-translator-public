@@ -17,6 +17,8 @@ struct TextBlock: Codable, Identifiable {
     var translation: String
     var error: String
     var retranslation_error: String?
+    var source_translation_pending: Bool?
+    var typography_anchor: [Double]?
     var vertical: Bool
     var edited: Bool
     var vision_source: String?
@@ -30,6 +32,7 @@ struct TextBlock: Codable, Identifiable {
     var translationIssue: String? {
         if !error.isEmpty { return error }
         if let reason = retranslation_error, !reason.isEmpty { return "重译未完成，已保留旧译文。\(reason)" }
+        if source_translation_pending == true { return "日文已补充，请核对已有译文或重新翻译后回填。" }
         return nil
     }
 
@@ -37,7 +40,7 @@ struct TextBlock: Codable, Identifiable {
     var needsOCRReview: Bool { !keepsOriginal && ocr_review?.status == "suspect" && ocr_confirmed != true && !edited }
 
     var needsReadingOverlay: Bool {
-        guard !keepsOriginal, !needsOCRReview else { return false }
+        guard !keepsOriginal, !needsOCRReview, source_translation_pending != true else { return false }
         let original = source.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         let translated = translation.precomposedStringWithCompatibilityMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         return !translated.isEmpty && error.isEmpty && original != translated
@@ -66,6 +69,7 @@ struct ReadingRegion: Codable, Identifiable {
     var background_png: String?
     var background_box: [Double]?
     var dark_background: Bool?
+    var member_slots: [String: [Double]]?
 
     var decodedBackground: CGImage? {
         guard let encoded = background_png, let box = background_box,
@@ -114,6 +118,8 @@ struct ReadingTextStyle: Codable, Equatable {
     var direction: ReadingTextDirection? = nil
     var lineSpacing: Double? = nil
     var alignment: ReadingTextAlignment? = nil
+    // Only the per-dialogue override uses this rectangle, in the original image's pixels.
+    var textFrame: CGRect? = nil
 
     static let fontSizeRange = 6.0...160.0
     static let lineSpacingRange = 1.0...3.0
@@ -121,6 +127,7 @@ struct ReadingTextStyle: Codable, Equatable {
     fileprivate var isValid: Bool {
         (fontSize.map(Self.fontSizeRange.contains) ?? true)
             && (lineSpacing.map(Self.lineSpacingRange.contains) ?? true)
+            && (textFrame.map { !$0.isEmpty && !$0.isInfinite && [$0.minX, $0.minY, $0.maxX, $0.maxY].allSatisfy(\.isFinite) } ?? true)
     }
 
     fileprivate func face(size: Double) -> NSFont {
@@ -153,6 +160,26 @@ struct ReadingTypeset {
 struct ReadingRun {
     var blockIDs: [String]
     var layout: ReadingTypeset
+    var manualFrame: CGRect? = nil
+
+    static func paragraphs(of combined: ReadingTypeset, members: [TextBlock]) -> [ReadingRun]? {
+        let lengths = members.map { block in
+            block.translation.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces).count }.reduce(0, +)
+        }
+        guard lengths.reduce(0, +) == combined.glyphs.count else { return nil }
+        var start = 0
+        return zip(members, lengths).map { block, count in
+            var layout = combined
+            layout.glyphs = Array(combined.glyphs[start..<(start + count)])
+            start += count
+            layout.bounds = layout.glyphs.reduce(CGRect.null) { bounds, glyph in
+                let cell = CGRect(x: glyph.center.x - combined.fontSize / 2, y: glyph.center.y - combined.fontSize * 0.7,
+                                  width: combined.fontSize, height: combined.fontSize * 1.4)
+                return bounds.union(cell)
+            }
+            return ReadingRun(blockIDs: [block.id], layout: layout)
+        }
+    }
 }
 
 struct ReadingPresentation: Identifiable {
@@ -171,7 +198,8 @@ struct ReadingPresentation: Identifiable {
 enum ReadingLayout {
     // All layout measurements stay in the page coordinate system, including for enhanced output.
     static func presentations(page: PageResult, regions: [ReadingRegion],
-                              styles: [String: ReadingTextStyle] = [:], sourcePixelScale: Double = 1) -> [ReadingPresentation] {
+                              styles: [String: ReadingTextStyle] = [:], sourcePixelScale: Double = 1,
+                              sourceYScale: Double? = nil) -> [ReadingPresentation] {
         guard sourcePixelScale.isFinite, sourcePixelScale > 0 else { return [] }
         let preferred = max(18, min(36, Double(page.width) * 0.023))
         var used = Set<String>()
@@ -182,7 +210,7 @@ enum ReadingLayout {
                   region.points.allSatisfy({ $0.count == 2 && $0.allSatisfy(\.isFinite) }) else { return nil }
             let members = region.block_ids.compactMap { id in page.blocks.first { $0.id == id } }
             guard members.count == region.block_ids.count, members.allSatisfy({
-                !$0.keepsOriginal && !$0.needsOCRReview && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.error.isEmpty
+                !$0.keepsOriginal && !$0.needsOCRReview && $0.source_translation_pending != true && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.error.isEmpty
             }) else { return nil }
             let background = region.decodedBackground
             guard region.background_png == nil ? region.hasUsableErasePolygons : background != nil else { return nil }
@@ -192,13 +220,27 @@ enum ReadingLayout {
             let styles = sourceStyles.map { sourceStyle in
                 var style = sourceStyle
                 style.fontSize = sourceStyle.fontSize.map { $0 * sourcePixelScale }
+                style.textFrame = sourceStyle.textFrame?.applying(CGAffineTransform(scaleX: sourcePixelScale, y: sourceYScale ?? sourcePixelScale))
                 // An explicit return to the system face or automatic direction can share the default flow.
                 if style.fontName == "" { style.fontName = nil }
                 if style.direction == .automatic { style.direction = nil }
                 return style
             }
             var runs: [ReadingRun]
-            if styles.dropFirst().allSatisfy({ $0 == styles[0] }) {
+            if styles.contains(where: { $0.textFrame != nil }) {
+                guard let separate = manualRuns(members, styles: styles, region: region, preferred: preferred,
+                                                pageBounds: CGRect(x: 0, y: 0, width: page.width, height: page.height)) else { return nil }
+                runs = separate
+            } else if let slots = region.member_slots {
+                guard Set(slots.keys) == Set(region.block_ids) else { return nil }
+                runs = []
+                for (member, style) in zip(members, styles) {
+                    guard let slot = memberSlot(for: member.id, region: region),
+                          let layout = arrange(member.translation, region: region, preferred: preferred,
+                                               style: style, slot: slot) else { return nil }
+                    runs.append(ReadingRun(blockIDs: [member.id], layout: layout))
+                }
+            } else if styles.dropFirst().allSatisfy({ $0 == styles[0] }) {
                 guard let layout = arrange(text, region: region, preferred: preferred, style: styles[0]) else { return nil }
                 runs = [ReadingRun(blockIDs: region.block_ids, layout: layout)]
             } else {
@@ -209,6 +251,57 @@ enum ReadingLayout {
             used.formUnion(region.block_ids)
             return ReadingPresentation(region: region, text: text, runs: runs, background: background)
         }
+    }
+
+    static func memberSlot(for blockID: String, region: ReadingRegion) -> CGRect? {
+        guard let values = region.member_slots?[blockID], values.count == 4,
+              values.allSatisfy(\.isFinite), values[2] > values[0], values[3] > values[1] else { return nil }
+        return CGRect(x: values[0], y: values[1], width: values[2] - values[0], height: values[3] - values[1])
+    }
+
+    // A moved frame is a new text container. The source region and its erasure geometry stay intact.
+    private static func manualRuns(_ members: [TextBlock], styles: [ReadingTextStyle], region: ReadingRegion,
+                                   preferred: Double, pageBounds: CGRect) -> [ReadingRun]? {
+        let legacy = region.member_slots == nil && members.count > 1 && styles.contains { $0.textFrame == nil }
+            ? legacyMemberRuns(members, styles: styles, region: region, preferred: preferred) : []
+        var runs: [ReadingRun] = []
+        for (block, style) in zip(members, styles) {
+            let layout: ReadingTypeset?
+            if let frame = style.textFrame {
+                let rect = frame.intersection(pageBounds)
+                guard !rect.isEmpty else { return nil }
+                var container = region
+                container.text_box = [rect.minX, rect.minY, rect.maxX, rect.maxY]
+                container.points = [[rect.minX, rect.minY], [rect.maxX, rect.minY],
+                                    [rect.maxX, rect.maxY], [rect.minX, rect.maxY]]
+                layout = arrange(block.translation, region: container, preferred: preferred, style: style, slot: rect)
+            } else if region.member_slots != nil {
+                guard let slot = memberSlot(for: block.id, region: region) else { return nil }
+                layout = arrange(block.translation, region: region, preferred: preferred, style: style, slot: slot)
+            } else {
+                layout = legacy.first { $0.blockIDs.contains(block.id) }?.layout
+            }
+            guard let layout else { return nil }
+            runs.append(ReadingRun(blockIDs: [block.id], layout: layout, manualFrame: style.textFrame?.intersection(pageBounds)))
+        }
+        return runs
+    }
+
+    // Older regions flowed several dialogues as successive paragraphs. Keep each untouched
+    // sibling's exact glyph positions when another paragraph is moved out of that shared flow.
+    private static func legacyMemberRuns(_ members: [TextBlock], styles: [ReadingTextStyle], region: ReadingRegion,
+                                         preferred: Double) -> [ReadingRun] {
+        let fonts = styles.map { style in
+            var value = style
+            value.textFrame = nil
+            return value
+        }
+        if fonts.dropFirst().allSatisfy({ $0 == fonts[0] }),
+           let combined = arrange(members.map(\.translation).joined(separator: "\n"), region: region, preferred: preferred, style: fonts[0]),
+           let runs = ReadingRun.paragraphs(of: combined, members: members) {
+            return runs
+        }
+        return separateRuns(members, styles: fonts, region: region, preferred: preferred) ?? []
     }
 
     private static func arrange(_ text: String, region: ReadingRegion, preferred: Double, style: ReadingTextStyle,

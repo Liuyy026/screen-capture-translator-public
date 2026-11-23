@@ -159,17 +159,20 @@ fn fallback(page: &mut Value, reason: &str) -> bool {
     changed
 }
 
-pub fn ensure(page: &mut Value, image: Option<&Path>) -> Result<bool> {
-    anyhow::ensure!(page.is_object(), "expected page object");
+fn input_signature(page: &Value) -> String {
     let mut inputs = array(&page["blocks"])
         .iter()
         .map(|b| json!([text(&b["id"]), b["box"]]))
         .collect::<Vec<_>>();
     inputs.sort_by(|a, b| a[0].as_str().cmp(&b[0].as_str()));
-    let source = digest(&json!(inputs), true);
+    digest(&json!(inputs), true)
+}
+
+pub fn ensure(page: &mut Value, image: Option<&Path>) -> Result<bool> {
+    anyhow::ensure!(page.is_object(), "expected page object");
     let old = array(&page["panel_signature"]);
     let Some(path) = image else {
-        if old.len() == 3 && old[0] == VERSION && old[1] == source && page.get("panels").is_some() {
+        if old.len() == 3 && old[0] == VERSION && old[1] == input_signature(page) && page.get("panels").is_some() {
             return Ok(false);
         }
         return Ok(fallback(
@@ -181,15 +184,19 @@ pub fn ensure(page: &mut Value, image: Option<&Path>) -> Result<bool> {
         Ok(gray) => gray,
         Err(_) => return Ok(fallback(page, "无法读取图像，回退到文字框顺序")),
     };
+    ensure_gray(page, &gray)
+}
+
+pub fn ensure_gray(page: &mut Value, gray: &Mat) -> Result<bool> {
     let signature = json!([
         VERSION,
-        source,
+        input_signature(page),
         format!("{:x}", Sha256::digest(gray.data_bytes()?))
     ]);
     if page["panel_signature"] == signature && page.get("panels").is_some() {
         return Ok(false);
     }
-    let (panels, cuts) = detect(&gray, array(&page["blocks"]))?;
+    let (panels, cuts) = detect(gray, array(&page["blocks"]))?;
     page.as_object_mut().unwrap().remove("panel_error");
     page["panels"] = panels;
     page["panel_cuts"] = cuts;
