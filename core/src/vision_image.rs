@@ -9,15 +9,68 @@ use opencv::{
     imgcodecs,
     prelude::*,
 };
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 pub const IMAGE_EDGE: usize = 1775;
 const PRECISION: i64 = 1 << 22;
+type ImageDigest = sha2::digest::Output<Sha256>;
 
 pub struct EncodedImage {
     pub url: String,
     pub width: usize,
     pub height: usize,
+}
+
+pub struct SourceImage {
+    bytes: Vec<u8>,
+    digest: ImageDigest,
+}
+
+impl SourceImage {
+    pub fn read(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let digest = Sha256::digest(&bytes);
+        Ok(Self { bytes, digest })
+    }
+
+    pub fn hex_digest(&self) -> String {
+        format!("{:x}", self.digest)
+    }
+}
+
+/// Keep the adjacent pair of model inputs for one processing queue. Check
+/// actual bytes so replacing a file at the same path cannot reuse stale pixels.
+#[derive(Default)]
+pub struct EncodingCache {
+    recent: Mutex<VecDeque<(ImageDigest, Arc<EncodedImage>)>>,
+}
+
+impl EncodingCache {
+    pub fn encode(&self, source: &SourceImage) -> Result<(Arc<EncodedImage>, bool)> {
+        {
+            let mut recent = self.recent.lock().expect("image encoding cache lock");
+            if let Some(index) = recent.iter().position(|(digest, _)| *digest == source.digest) {
+                let entry = recent.remove(index).expect("previously found cache entry");
+                let encoded = Arc::clone(&entry.1);
+                recent.push_back(entry);
+                return Ok((encoded, true));
+            }
+        }
+
+        let encoded = Arc::new(encode_bytes(&source.bytes)?);
+        let mut recent = self.recent.lock().expect("image encoding cache lock");
+        recent.retain(|(digest, _)| *digest != source.digest);
+        recent.push_back((source.digest, Arc::clone(&encoded)));
+        if recent.len() > 2 {
+            recent.pop_front();
+        }
+        Ok((encoded, false))
+    }
 }
 
 fn dimensions(w: usize, h: usize, edge: usize) -> (usize, usize) {
@@ -222,4 +275,40 @@ pub fn encode_bytes(source: &[u8]) -> Result<EncodedImage> {
         width: image.cols() as usize,
         height: image.rows() as usize,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoding_cache_reuses_adjacent_pages_by_bytes_and_bounds_its_entries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cache = EncodingCache::default();
+        let page = directory.path().join("current.pgm");
+        let next = directory.path().join("next.pgm");
+        let third = directory.path().join("third.pgm");
+        std::fs::write(&page, b"P5\n1 1\n255\n\x20")?;
+        let source = SourceImage::read(&page)?;
+        let original = encode(&page)?;
+        let (first, hit) = cache.encode(&source)?;
+        assert!(!hit);
+        assert_eq!(first.url, original.url);
+
+        std::fs::write(&next, b"P5\n1 1\n255\n\x20")?;
+        let (reused, hit) = cache.encode(&SourceImage::read(&next)?)?;
+        assert!(hit && Arc::ptr_eq(&first, &reused));
+
+        std::fs::write(&page, b"P5\n1 1\n255\n\x80")?;
+        let changed = SourceImage::read(&page)?;
+        let (different, hit) = cache.encode(&changed)?;
+        assert!(!hit && different.url != first.url);
+        assert_ne!(changed.hex_digest(), source.hex_digest());
+
+        std::fs::write(&third, b"P5\n1 1\n255\n\xff")?;
+        assert!(!cache.encode(&SourceImage::read(&third)?)?.1);
+        assert!(cache.encode(&changed)?.1);
+        assert!(!cache.encode(&source)?.1);
+        Ok(())
+    }
 }

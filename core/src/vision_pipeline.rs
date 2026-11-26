@@ -12,7 +12,6 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     path::Path,
@@ -82,6 +81,21 @@ pub async fn translate(
     block_id: Option<&str>,
     observer: &mut impl Observer,
 ) -> Result<()> {
+    translate_with_images(current_page, image, layout_image, previous_image, model, service,
+        block_id, observer, &vision_image::EncodingCache::default()).await
+}
+
+pub async fn translate_with_images(
+    current_page: &mut Value,
+    image: &Path,
+    layout_image: Option<&Path>,
+    previous_image: Option<&Path>,
+    model: &str,
+    service: &TranslationService,
+    block_id: Option<&str>,
+    observer: &mut impl Observer,
+    image_cache: &vision_image::EncodingCache,
+) -> Result<()> {
     ensure!(
         service.provider == "omlx",
         "视觉辅助翻译需要 oMLX 和支持图片的模型，请在接口设置中选择。"
@@ -105,13 +119,14 @@ pub async fn translate(
         "provider":service.provider,"base_url":service.base_url});
     // Hash and encode the same snapshot even if the reference file is replaced
     // during translation. A matching cache only needs the hash, never a decode.
-    let previous_bytes = previous_image.map(|path| -> Result<Vec<u8>> {
+    let previous_source = previous_image.map(|path| {
         ensure!(path.is_absolute(), "上一页参照需要原图的完整路径。");
-        std::fs::read(path).context("无法读取上一页参照，请检查上一页原图后重试。")
+        vision_image::SourceImage::read(path).context("无法读取上一页参照，请检查上一页原图后重试。")
     }).transpose()?;
-    if let Some(bytes) = &previous_bytes {
+    if let Some(source) = &previous_source {
+        // Layout-only reordering for prefilling leaves existing translations reusable.
         config["prompt_revision"] = json!(4);
-        config["previous_image_sha256"] = json!(format!("{:x}", Sha256::digest(bytes)));
+        config["previous_image_sha256"] = json!(source.hex_digest());
     }
     let page_changed = page["translation_config"] != config;
     let mut pending: Vec<_> = (0..array(&page["blocks"]).len())
@@ -134,18 +149,16 @@ pub async fn translate(
         *current_page = prepared;
         return Ok(());
     }
-    let previous = previous_bytes.map(|bytes| {
-        vision_image::encode_bytes(&bytes).context("无法解码上一页参照，请检查上一页原图后重试。")
+    let previous = previous_source.map(|source| {
+        image_cache.encode(&source).context("无法解码上一页参照，请检查上一页原图后重试。")
     }).transpose()?;
     ensure!(
-        service
-            .list_models()
-            .await?
-            .iter()
-            .any(|name| name == model),
+        service.has_model_for_job(model).await?,
         "所选视觉模型不在 oMLX 模型列表中，请刷新模型列表。"
     );
-    let encoded = vision_image::encode(image)?;
+    let (encoded, current_cache_hit) = image_cache.encode(&vision_image::SourceImage::read(image)?)?;
+    let mut request = translation::VisionRequest::new(model, &encoded.url,
+        previous.as_ref().map(|(encoded, _)| encoded.url.as_str()));
     *current_page = prepared;
     let page = current_page;
     let count = pending.len().div_ceil(8);
@@ -156,10 +169,14 @@ pub async fn translate(
         let ids: Vec<_> = members.iter().map(|b| text(&b["id"])).collect();
         let mut event = json!({"mode":"vision","model":model,"image":observer.source_image().unwrap_or(image),"batch_ids":ids,
             "provider":service.provider,"base_url":service.base_url});
+        if index == 0 {
+            event["image_encoding"] = json!({"current_cache_hit": current_cache_hit});
+            if let Some((_, hit)) = &previous {
+                event["image_encoding"]["previous_cache_hit"] = json!(hit);
+            }
+        }
         let outcome: Result<()> = async {
-            let payload = translation::vision_payload(model, page, &members, &encoded.url,
-                previous.as_ref().map(|image| image.url.as_str()));
-            let response = service.chat(&payload).await?;
+            let response = service.chat(request.for_batch(page, &ids)).await?;
             let content = service.translation_content(&response)?;
             let sources: Map<_, _> = members
                 .iter()
@@ -284,6 +301,7 @@ pub async fn probe(request: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn vision_request_enforces_schema_for_current_batch_with_thinking_off() {
@@ -325,15 +343,47 @@ mod tests {
         let page = json!({"image":"/private/chapter/page.png","blocks":[block]});
         let payload = translation::vision_payload("test", &page, &[block], "data:current", Some("data:previous"));
         let parts = payload["messages"][1]["content"].as_array().unwrap();
-        let targets: Value = serde_json::from_str(parts[0]["text"].as_str().unwrap()).unwrap();
+        let targets: Value = serde_json::from_str(parts[4]["text"].as_str().unwrap()).unwrap();
         assert_eq!(targets["target_ids"], json!(["a"]));
         assert_eq!(targets["page"][0]["ja"], "ありがとう");
         assert_eq!(parts.len(), 5);
-        assert!(parts[1]["text"].as_str().unwrap().contains("上一页"));
-        assert_eq!(parts[2]["image_url"]["url"], "data:previous");
-        assert!(parts[3]["text"].as_str().unwrap().contains("当前页"));
-        assert_eq!(parts[4]["image_url"]["url"], "data:current");
+        assert!(parts[0]["text"].as_str().unwrap().contains("上一页"));
+        assert_eq!(parts[1]["image_url"]["url"], "data:previous");
+        assert!(parts[2]["text"].as_str().unwrap().contains("当前页"));
+        assert_eq!(parts[3]["image_url"]["url"], "data:current");
         assert!(!payload.to_string().contains("private"));
+    }
+
+    #[test]
+    fn different_batches_share_the_images_and_ocr_prefix_but_keep_their_own_schema() -> Result<()> {
+        let page = json!({"width":120,"height":180,"blocks":[
+            {"id":"a","reading_order":2,"source":"ありがとう","box":[60,10,90,40]},
+            {"id":"b","reading_order":1,"source":"えっ","box":[10,10,40,40]}]});
+        let mut request = translation::VisionRequest::new("test", "data:current", Some("data:previous"));
+        let first = request.for_batch(&page, &["b".to_owned()]).clone();
+        let second = request.for_batch(&page, &["a".to_owned()]);
+        let first_parts = first["messages"][1]["content"].as_array().unwrap();
+        let second_parts = second["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(first["messages"][0], second["messages"][0]);
+        assert_eq!(first_parts[..4], second_parts[..4]);
+        let first_text = first_parts[4]["text"].as_str().unwrap();
+        let second_text = second_parts[4]["text"].as_str().unwrap();
+        assert_eq!(first_text.rsplit_once("\"target_ids\"").unwrap().0,
+            second_text.rsplit_once("\"target_ids\"").unwrap().0);
+        for (request, text, target) in [(&first, first_text, "b"), (second, second_text, "a")] {
+            let context: Value = serde_json::from_str(text)?;
+            assert_eq!(context["image_width"], 120);
+            assert_eq!(context["image_height"], 180);
+            assert_eq!(context["page"][0]["id"], "b");
+            assert_eq!(context["page"][1]["ja"], "ありがとう");
+            assert_eq!(context["target_ids"], json!([target]));
+            for field in ["translations", "source_suggestions"] {
+                let schema = &request["structured_outputs"]["json"]["properties"][field];
+                assert_eq!(schema["required"], json!([target]));
+                assert_eq!(schema["additionalProperties"], false);
+            }
+        }
+        Ok(())
     }
 
     #[tokio::test]

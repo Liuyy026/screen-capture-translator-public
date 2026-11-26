@@ -129,6 +129,8 @@ Upstream components include [Mokuro](https://github.com/kha-white/mokuro), [Mang
 
 ## Manga translation benchmark
 
+In a 95-page FH benchmark, the image worker peaked at 2.60 GiB during export, down from 14.14 GiB. With translations held fixed, all 95 output images matched pixel for pixel. [Chapter processing and export measurements (Chinese)](docs/fh-benchmark-2026-11-26.md)
+
 Japanese-to-Chinese translation on a Mac Studio (M5 Max, 64 GB) with Koma v0.22, macOS 27.0.1 and oMLX 0.7.3, tested on November 21, 2026. The two 4-bit models were `Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-MLX-4bit` (9B) and `Qwen3.8-27B-Uncensored-MLX-4bit` (27B).
 
 | Model | Images sent | Total for 10 pages | Median per page | Generation (tokens/s) | Delivered after recheck / 81 | Rated faithful / 79 |

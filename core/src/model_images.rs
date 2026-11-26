@@ -212,6 +212,15 @@ impl ImageModels {
         self.stop().await
     }
 
+    pub async fn stop_after_export(&mut self) -> Result<()> {
+        // During inter-page translation the mutex is free, but OCR weights
+        // may still be reserved. Interrupted jobs own their normal cleanup.
+        if !self.ocr_requested && !self.worker.as_ref().is_some_and(ModelWorker::interrupted) {
+            self.stop().await?;
+        }
+        Ok(())
+    }
+
     pub async fn stop(&mut self)->Result<()>{
         self.ocr_requested = false;
         if let Some(worker) = self.worker.take() {

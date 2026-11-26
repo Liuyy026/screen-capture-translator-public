@@ -10,7 +10,7 @@ pub(super) fn has_next_in_batch(index: usize, total: usize) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn normal_memory_pressure() -> bool {
+pub(crate) fn normal_memory_pressure() -> bool {
     // Darwin reports the DISPATCH_MEMORYPRESSURE_* level. An unavailable or
     // unrecognized reading uses the release-before-translation path.
     let mut level: libc::c_int = 0;
@@ -28,7 +28,7 @@ pub(super) fn normal_memory_pressure() -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn normal_memory_pressure() -> bool { false }
+pub(crate) fn normal_memory_pressure() -> bool { false }
 
 pub(super) async fn wait_for_release() {
     // A local language/vision model can start allocating only after it receives

@@ -130,6 +130,7 @@ private struct NativeLoadedPage: Decodable {
     @Published var queueDone = 0
     @Published private(set) var exportingChapter = false
     @Published private(set) var lastChapterExport: URL?
+    @Published private(set) var lastChapterExportOmissions: [Int: [ChapterExport.Omission]] = [:]
     private var task: Task<Void, Never>?
     private var pageTask: Task<Void, Never>?
     private var pageRequest = UUID()
@@ -939,6 +940,7 @@ private struct NativeLoadedPage: Decodable {
         let jobConnection = connection
         var options: [String: Any] = ["mode": processingMode, "model": model, "provider": jobConnection.provider,
             "base_url": jobConnection.baseURL, "key": jobConnection.apiKey]
+        if batch { options["chapter"] = true }
         if let blockID {
             guard !batch, let cacheURL, let pageRevision else {
                 error = "请重新载入本页，再选择要重译的对白。"
@@ -1026,6 +1028,7 @@ private struct NativeLoadedPage: Decodable {
         let fingerprints = reviewed?.fingerprints ?? [:]
 
         busy = true; exportingChapter = true; error = nil; lastChapterExport = nil
+        lastChapterExportOmissions = [:]
         queueTotal = pages.count; queueDone = 0
         message = "正在准备导出 \(pages.count) 页漫画…"
         task = Task {
@@ -1040,7 +1043,7 @@ private struct NativeLoadedPage: Decodable {
                     // A cancelled export must still release its last enhanced image.
                     Task { try? await nativeCore.request("release_export", values: ["export_id": exportID]) }
                 }
-                var omissions: [Int: Int] = [:]
+                var omissions: [Int: [ChapterExport.Omission]] = [:]
                 for (index, entry) in pages.enumerated() {
                     try Task.checkCancellation()
                     let input = entry.file
@@ -1065,24 +1068,26 @@ private struct NativeLoadedPage: Decodable {
                     let styles = exportTypography.styles(for: page.page, key: key)
                     let size = verifyOriginal ? nil : ChapterTypography.originalSize(at: input)
                     let scale = ChapterTypography.pixelScale(for: page.page, originalWidth: size.map { Double($0.width) })
-                    let omitted = try await ChapterExport.write(page, to: staging.appendingPathComponent(name),
-                                                                styles: styles, sourcePixelScale: scale,
-                                                                sourceYScale: size.map { Double(page.page.height) / $0.height },
-                                                                expectedOriginalDigest: originalDigest)
+                    let omitted = try await ChapterExport.writeWithReport(
+                        page, to: staging.appendingPathComponent(name), styles: styles, sourcePixelScale: scale,
+                        sourceYScale: size.map { Double(page.page.height) / $0.height }, expectedOriginalDigest: originalDigest
+                    )
                     try Task.checkCancellation()
-                    if omitted > 0 { omissions[pageNumber] = omitted }
+                    if !omitted.isEmpty { omissions[pageNumber] = omitted }
                     queueDone = index + 1
                 }
                 try Task.checkCancellation()
                 currentPage = nil
                 let output = try ChapterExport.finish(staging, in: directory, folderName: exportFolderName)
                 lastChapterExport = output
+                lastChapterExportOmissions = omissions
                 if isCustomDirectory { ChapterExport.rememberDirectory(directory, defaults: defaults) }
-                message = "已导出 \(pages.count) 页超分漫画"
+                message = "已导出 \(pages.count) 张 PNG"
+                let omissionCounts = omissions.mapValues(\.count)
                 if !omissions.isEmpty {
-                    message += " · \(omissions.count) 页共 \(omissions.values.reduce(0, +)) 处未回填，已保留原图"
+                    message += " · \(omissions.count) 页共 \(omissionCounts.values.reduce(0, +)) 个文字框未回填"
                 }
-                completion?(.completed(directory: output, omissions: omissions))
+                completion?(.completed(directory: output, omissions: omissionCounts))
             } catch is CancellationError {
                 message = "已取消导出"
                 completion?(.cancelled)
@@ -1129,6 +1134,7 @@ private struct NativeLoadedPage: Decodable {
         let request = UUID(); operationRequest = request
         task = Task { [self] in
             var startedImages = Set<String>()
+            var phaseCaption: String?
             defer {
                 // No newer processing task can start while this one owns busy.
                 busy = false; task = nil
@@ -1149,7 +1155,20 @@ private struct NativeLoadedPage: Decodable {
                     }
                     guard let self, request == operationRequest else { return }
                     switch event["event"] as? String {
-                    case "progress": if let text = event["message"] as? String { message = text }
+                    case "chapter_phase":
+                        if let start = event["index"] as? Int, let count = event["count"] as? Int {
+                            let action = event["phase"] as? String == "ocr" ? "识别" : "翻译"
+                            phaseCaption = "正在\(action)第 \(start + 1)–\(start + count) 页"
+                            message = phaseCaption ?? ""
+                        }
+                    case "page_retrying":
+                        if let path = event["image"] as? String {
+                            message = "正在自动重试「\(URL(fileURLWithPath: path).lastPathComponent)」…"
+                        }
+                    case "progress":
+                        if let text = event["message"] as? String {
+                            message = phaseCaption.map { "\($0) · \(text)" } ?? text
+                        }
                     case "page_started":
                         if let path = event["image"] as? String {
                             let action = enhancing ? "超分" : "处理"
@@ -1191,6 +1210,8 @@ private struct NativeLoadedPage: Decodable {
                         total + ((page["ok"] as? Bool == true) ? ((page["result"] as? [String: Any])?["issues"] as? Int ?? 0) : 1)
                     }
                     message = failures > 0 ? "处理结束，有 \(failures) 处问题；请查看提示后重试" : "处理完成 · \(queueDone) 页 · 结果已保存到本机"
+                    let retried = pages.filter { $0["retried"] as? Bool == true }.count
+                    if retried > 0 { message += " · \(retried) 页经过自动重试" }
                 }
             } catch is CancellationError { if request == operationRequest { message = "已停止；已完成的结果已保存" } }
             catch {

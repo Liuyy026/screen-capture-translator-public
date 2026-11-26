@@ -70,6 +70,23 @@ async fn mock(
     ))
 }
 
+#[tokio::test]
+async fn job_reuses_only_successful_model_checks_and_discovery_remains_live() -> Result<()> {
+    let route = "GET /proxy/v1/models";
+    let (service, server) = mock("omlx", vec![
+        (route, 503, json!({})),
+        (route, 200, json!({"data":[]})),
+        (route, 200, json!({"data":[{"id":"reader"}]})),
+        (route, 200, json!({"data":[]})),
+    ]).await?;
+    assert!(service.has_model_for_job("reader").await.is_err());
+    assert!(!service.has_model_for_job("reader").await?);
+    assert!(service.has_model_for_job("reader").await?);
+    assert!(service.clone().has_model_for_job("reader").await?);
+    assert!(service.list_models().await?.is_empty());
+    tokio::time::timeout(Duration::from_secs(1), server).await??
+}
+
 const STATUS: &str = "GET /proxy/v1/models/status";
 const OMLX_POST: &str = "POST /proxy/v1/models/real%20%231%25%3F/unload";
 const PHYSICAL: &str = "real #1%?";

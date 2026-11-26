@@ -9,6 +9,34 @@ from model_worker import Models
 
 
 class ModelWorkerTests(unittest.TestCase):
+    def test_lama_rgb_bands_bound_workspace_and_preserve_full_width_convolution(self):
+        import torch
+        from lama_inference import BoundedRGBConvolution
+        from torch.utils._python_dispatch import TorchDispatchMode
+
+        shapes = []
+
+        class ObserveConvolution(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                if func in (torch.ops.aten.convolution.default, torch.ops.aten._convolution.default):
+                    shapes.append(tuple(args[0].shape[-2:]))
+                return func(*args, **(kwargs or {}))
+
+        generator = torch.Generator().manual_seed(6)
+        image = torch.randn((1, 64, 78, 94), generator=generator)
+        kernel = torch.randn((3, 64, 7, 7), generator=generator)
+        bias = torch.randn((3,), generator=generator)
+        args = (image, kernel, bias, [1, 1], [0, 0], [1, 1], False, [0, 0], 1)
+        for convolution, flags in [(torch.ops.aten.convolution.default, ()),
+                                   (torch.ops.aten._convolution.default, (False, False, True, True))]:
+            with self.subTest(operator=str(convolution)), torch.inference_mode():
+                shapes.clear()
+                expected = convolution(*args, *flags)
+                with ObserveConvolution(), BoundedRGBConvolution():
+                    actual = convolution(*args, *flags)
+                self.assertEqual(shapes, [(38, 94), (38, 94), (14, 94)])
+                self.assertTrue(torch.equal(actual.view(torch.int32), expected.view(torch.int32)))
+
     def test_crop_calls_recognizer_directly_and_releases_it(self):
         import numpy as np
         with tempfile.TemporaryDirectory() as directory:

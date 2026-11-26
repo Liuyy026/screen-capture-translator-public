@@ -172,7 +172,7 @@ def package(version, native, destination):
             install_file(MACOS / f".build/koma-sr-{engine}", path)
             signed.append(path)
         for path in (
-            "core/python/model_worker.py", "macos/requirements.lock", "scripts/prepare_models.py",
+            "core/python/model_worker.py", "core/python/lama_inference.py", "macos/requirements.lock", "scripts/prepare_models.py",
             "macos/scripts/setup_reading_model.py", "macos/scripts/prepare_realcugan.sh",
             "macos/scripts/realcugan_manifest.py", "docs/licenses/RealCUGAN-model-MIT.txt",
             "samples/01.webp", "samples/02.webp",

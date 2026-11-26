@@ -22,7 +22,6 @@ private typealias ExportState<Value> = SwiftUI.State<Value>
     @ExportState private var exporting = false
     @ExportState private var exportError: String?
     @ExportState private var output: URL?
-    @ExportState private var omissions: [Int: Int] = [:]
 
     init(reader: Reader) {
         self.reader = reader
@@ -218,14 +217,10 @@ private typealias ExportState<Value> = SwiftUI.State<Value>
     @ViewBuilder private func completed(_ output: URL) -> some View {
         Text("导出完成").font(.headline)
         Text(reader.message)
-        if !omissions.isEmpty {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 5) {
-                    ForEach(omissions.keys.sorted(), id: \.self) { number in
-                        Text("第 \(number) 页 · \(omissions[number] ?? 0) 处未回填，已保留原图")
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxHeight: 190)
+        if !reader.lastChapterExportOmissions.isEmpty {
+            ExportOmissionsView(omissions: reader.lastChapterExportOmissions,
+                                jump: source.rawValue == reader.processingMode ? { jump(to: $0) } : nil)
+                .frame(maxHeight: 235)
         }
         Text(output.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         HStack {
@@ -267,8 +262,7 @@ private typealias ExportState<Value> = SwiftUI.State<Value>
             reader.exportChapter(options, reviewed: report, enhancement: enhancement) { outcome in
                 exporting = false
                 switch outcome {
-                case let .completed(directory, counts):
-                    omissions = counts
+                case let .completed(directory, _):
                     output = directory
                 case .cancelled:
                     close()
@@ -279,6 +273,36 @@ private typealias ExportState<Value> = SwiftUI.State<Value>
                 }
             }
         }
+    }
+}
+
+struct ExportOmissionsView: View {
+    let omissions: [Int: [ChapterExport.Omission]]
+    var jump: ((Int) -> Void)? = nil
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(omissions.keys.sorted(), id: \.self) { page in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text("第 \(page) 页").fontWeight(.semibold)
+                            Spacer()
+                            if let jump {
+                                Button("去本页核对") { jump(page) }.buttonStyle(.link)
+                            }
+                        }
+                        ForEach(omissions[page] ?? []) { omission in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("文字框 \(omission.boxNumber)").fixedSize()
+                                    .help("文字框编号 " + omission.blockID)
+                                Text(omission.reason).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                    }.accessibilityIdentifier("export-omissions-page-\(page)")
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.trailing, 8)
+        }.font(.callout).accessibilityIdentifier("export-omissions-list")
     }
 }
 

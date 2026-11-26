@@ -333,7 +333,7 @@ pub async fn translate(
     );
     if !jobs.is_empty() {
         ensure!(
-            service.list_models().await?.iter().any(|m| m == options.model),
+            service.has_model_for_job(options.model).await?,
             "所选模型不在服务的本地模型列表中，请刷新模型列表并选择已下载模型"
         );
     }
@@ -681,7 +681,7 @@ mod tests {
             let models = json!({"data":[{"id":"new"}]});
             let partial = chat(json!({"translations":{"a":"新一","b":"えっ"},"source_suggestions":{"a":"","b":"无效建议"}}));
             let corrected = chat(json!({"translations":{"b":"新二"},"source_suggestions":{"b":""}}));
-            let (service, server) = mock_service(vec![models.clone(), partial, models, corrected])?;
+            let (service, server) = mock_service(vec![models, partial, corrected])?;
             let options = Options { model:"new", unit:"blocks", block_id:None, batch_size:8, image:None };
             let mut page = json!({"width":100,"height":100,"model":"old","translation_config":{"model":"old"},
                 "blocks":[{"id":"a","box":[3,3,20,30],"source":"ありがとう","translation":"旧一"},
@@ -726,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn failed_dialogue_switch_preserves_complete_mapping_until_a_valid_response() -> Result<()> {
         let models = json!({"data":[{"id":"new"}]});
-        let (service, server) = mock_service(vec![models.clone(), json!({"error":"unavailable"}), models,
+        let (service, server) = mock_service(vec![models, json!({"error":"unavailable"}),
             chat(json!({"translations":{"d1":"新对白"}}))])?;
         let mut page = json!({"width":100,"height":100,"model":"old","translation_config":{"model":"old"},
             "blocks":[{"id":"a","box":[3,3,20,30],"source":"ただいま","translation":"旧对白","error":""}]});

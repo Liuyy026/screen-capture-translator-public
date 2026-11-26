@@ -13,6 +13,9 @@ struct RegisteredJob {
 type Registry=Arc<Mutex<HashMap<String, RegisteredJob>>>;
 struct Job {id:String,request:Value,cancel:watch::Receiver<bool>}
 
+#[path = "server_process.rs"]
+mod process;
+
 struct Events {id:String,image:String,cache:PathBuf,output:mpsc::Sender<Value>}
 impl Events{
     fn emit(&self,event:Value){let _=self.output.try_send(event);}
@@ -114,7 +117,14 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             Ok(reply)
         },
         "release_export"=>{
-            runtime.release_export(required(r, "export_id")?);
+            let session=required(r, "export_id")?;
+            // Order release after any in-flight page can register its pin.
+            // If rendering was busy, this release only drops session state.
+            let (_permit, render_idle) = match display_gate.try_acquire() {
+                Ok(permit) => (permit, true),
+                Err(_) => (display_gate.acquire().await?, false),
+            };
+            runtime.release_export(session, render_idle).await;
             Ok(json!({"released": true}))
         },
         "edit"=>{
@@ -125,77 +135,7 @@ async fn execute(runtime:&Runtime,job:&Job,output:&mpsc::Sender<Value>,display_g
             let _activity = runtime.cache_policy.activity().await?;
             runtime.ocr_crop(r).await
         },
-        "process"=>{
-            let images=r["images"].as_array().context("missing images")?;
-            ensure!(!images.is_empty()&&images.len()<=4096,"invalid page queue size");
-            let operation = r["operation"].as_str().unwrap_or("both");
-            let block_id = r["block_id"].as_str();
-            let retry = r["retry"].as_bool().unwrap_or(false);
-            ensure!(r["block_id"].is_null() || block_id.is_some_and(|id| !id.is_empty()), "无效的单句对白编号");
-            ensure!(r["retry"].is_null() || r["retry"].is_boolean(), "无效的单句重试选项");
-            if block_id.is_some() || retry {
-                ensure!(images.len() == 1 && matches!(operation, "translate" | "both"), "单句重试需要指定一页漫画并启用翻译");
-                ensure!(block_id.is_some(), "单句重试缺少对白编号");
-            }
-            let processing = if operation == "enhance" {
-                None
-            } else {
-                let service = runtime.translation_models.track(service(r)?);
-                let options = ProcessOptions {
-                    operation, mode: r["mode"].as_str().unwrap_or("text"),
-                    model: required(r, "model")?, block_id,
-                    expected_page: r["cache"].as_str().zip(r["revision"].as_str())
-                        .map(|(cache, revision)| PageVersion { cache: Path::new(cache), revision }),
-                    unit: r["unit"].as_str().unwrap_or("blocks"),
-                    batch_size: r["batch_size"].as_u64().unwrap_or(8) as usize,
-                    retry,
-                    reuse_ocr: false, previous_image: None,
-                };
-                Some((options, service))
-            };
-            let mut results=vec![];
-            for (index,image) in images.iter().enumerate(){
-                let image=image.as_str().context("invalid image path")?;
-                let _=output.send(json!({"id":job.id,"event":"page_started","image":image,"index":index,"total":images.len()})).await;
-                let page_result=async{
-                    let _activity=runtime.cache_policy.activity().await?;
-                    let settings:crate::super_resolution::Settings=serde_json::from_value(r.get("super_resolution").cloned().unwrap_or(json!({})))?;
-                    ensure!(processing.is_some() || settings.engine != "off", "请选择超分引擎");
-                    let source = Path::new(image);
-                    if let Some((options, service)) = &processing {
-                        let cache = runtime.cache_for(source, options.mode)?;
-                        let mut events = Events { id: job.id.clone(), image: image.into(), cache: cache.clone(), output: output.clone() };
-                        let mut options = options.for_queue_page(index, images.len(), &settings.engine);
-                        if options.mode == "vision" && matches!(options.operation, "both" | "translate") {
-                            options.previous_image = previous_for_page(r, image, images.len())?;
-                        }
-                        runtime.process_page(source, &settings, &cache, &options, service, &mut events).await
-                    } else {
-                        Ok(json!({"skipped":runtime.sr.prepare(source, &settings).await? == source}))
-                    }
-                }.await;
-                if page_result.is_err() && operation == "both" {
-                    cleanup_ocr(runtime).await;
-                }
-                let result=match page_result{
-                    Ok(value)=>json!({"image":image,"ok":true,"result":value}),
-                    Err(error) => {
-                        let changed = error.is::<crate::runtime::PageRevisionChanged>();
-                        let message = match &processing {
-                            Some((_, service)) => service.safe_error(error),
-                            None => error.to_string(),
-                        };
-                        let mut page = json!({"image":image,"ok":false,"error":message});
-                        if changed { page["code"] = json!("page_revision_changed"); }
-                        page
-                    }
-                };
-                let _=output.send(json!({"id":job.id,"event":"page_finished","done":index+1,"total":images.len(),"page":result})).await;
-                results.push(result);
-                runtime.maintain_cache().await;
-            }
-            Ok(json!({"pages":results}))
-        },
+        "process" => process::execute(runtime, job, output).await,
         _=>bail!("unknown operation"),
     }
 }

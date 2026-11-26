@@ -81,6 +81,9 @@ pub struct TranslationService {
     pub base_url: String,
     api_key: String,
     client: Client,
+    // One service belongs to one process job and its fixed connection/credentials.
+    // Explicit model discovery still queries the endpoint on every request.
+    confirmed_model: std::sync::Arc<std::sync::OnceLock<String>>,
     pub(crate) session: Option<std::sync::Weak<crate::model_session::ModelSession>>,
 }
 
@@ -119,6 +122,7 @@ impl TranslationService {
             base_url,
             api_key,
             client,
+            confirmed_model: Default::default(),
             session: None,
         })
     }
@@ -175,6 +179,17 @@ impl TranslationService {
             "/models"
         };
         self.models_from_response(&self.request(route, None, Duration::from_secs(5)).await?)
+    }
+
+    pub async fn has_model_for_job(&self, model: &str) -> Result<bool> {
+        if self.confirmed_model.get().is_some_and(|name| name == model) {
+            return Ok(true);
+        }
+        let found = self.list_models().await?.iter().any(|name| name == model);
+        if found {
+            let _ = self.confirmed_model.set(model.to_owned());
+        }
+        Ok(found)
     }
 
     pub fn models_from_response(&self, response: &Value) -> Result<Vec<String>> {
@@ -250,11 +265,42 @@ impl TranslationService {
     }
 }
 
+const NETWORK_ERROR: &str = "无法连接翻译服务或服务未返回有效 JSON，请检查地址和服务状态";
+
+#[derive(Debug)]
+pub(crate) struct TransientServiceError(String);
+impl std::fmt::Display for TransientServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+impl std::error::Error for TransientServiceError {}
+
 fn network_error() -> anyhow::Error {
-    anyhow!("无法连接翻译服务或服务未返回有效 JSON，请检查地址和服务状态")
+    TransientServiceError(NETWORK_ERROR.to_owned()).into()
+}
+
+fn transient_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+pub(crate) fn retryable_block_error(reason: &str) -> bool {
+    // Cache records retain a human-readable error even across older builds.
+    let reason = reason.strip_prefix("视觉翻译失败：").or_else(|| reason.strip_prefix("翻译失败：")).unwrap_or(reason);
+    if let Some(code) = reason.strip_prefix("翻译服务请求失败（HTTP ").and_then(|s| s.strip_suffix('）')) {
+        return code.parse::<u16>().is_ok_and(transient_status);
+    }
+    matches!(reason, NETWORK_ERROR | "模型未返回有效 JSON" | "模型返回了空译文"
+        | "模型返回了占位文字，没有提供实际译文"
+        | "模型遗漏了这句，原文已保留" | "模型重复返回了这句的编号，无法确定应使用哪条译文"
+        | "模型返回了重复的 JSON 字段" | "模型未返回有效的译文列表" | "模型未返回有效的译文对象"
+        | "视觉回复必须包含 translations 和 source_suggestions 两个字段。"
+        | "视觉回复中的 translations 与本批文字框编号或类型不符。"
+        | "视觉回复中的 source_suggestions 与本批文字框编号或类型不符。")
 }
 
 fn check_status(status: u16) -> Result<()> {
+    if transient_status(status) {
+        return Err(TransientServiceError(format!("翻译服务请求失败（HTTP {status}）")).into());
+    }
     if status == 401 || status == 403 {
         bail!("翻译服务拒绝访问，请检查 API 密钥及访问权限");
     }
@@ -267,7 +313,7 @@ async fn read_object(mut response: reqwest::Response) -> Result<Value> {
     let mut bytes = vec![];
     while let Some(chunk) = response.chunk().await.map_err(|_| network_error())? {
         if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
-            return Err(network_error());
+            bail!("翻译服务响应超过大小上限");
         }
         bytes.extend_from_slice(&chunk);
     }

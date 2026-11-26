@@ -416,6 +416,7 @@ private struct ReaderStatusView: View {
     @ObservedObject var reader: Reader
     let showDialogue: (String) -> Void
     @ViewState private var showsDiagnostics = false
+    @ViewState private var showsExportOmissions = false
 
     private var layoutNotice: String? {
         guard reader.displayMode == 2, reader.page != nil else { return nil }
@@ -451,6 +452,19 @@ private struct ReaderStatusView: View {
                 Text(reader.message).lineLimit(2).help(reader.message)
                 if reader.busy && reader.queueTotal > 1 { Text("\(reader.queueDone) / \(reader.queueTotal)").monospacedDigit() }
                 if let export = reader.lastChapterExport {
+                    if !reader.lastChapterExportOmissions.isEmpty {
+                        Button("导出未回填详情") { showsExportOmissions.toggle() }
+                            .buttonStyle(.link)
+                            .accessibilityIdentifier("export-omissions-details")
+                            .popover(isPresented: $showsExportOmissions, arrowEdge: .bottom) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("导出未回填详情").font(.headline)
+                                    Text(export.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                                    ExportOmissionsView(omissions: reader.lastChapterExportOmissions)
+                                }.padding(16).frame(width: 410, height: 285)
+                                .background(ReaderPalette.bar).foregroundStyle(ReaderPalette.text)
+                            }
+                    }
                     Button("在访达显示") { NSWorkspace.shared.activateFileViewerSelecting([export]) }
                         .buttonStyle(.link).help(export.path)
                 }
@@ -469,5 +483,6 @@ private struct ReaderStatusView: View {
             }.font(.system(size: 11)).foregroundStyle(ReaderPalette.secondary)
                 .padding(.horizontal, 12).padding(.vertical, 7)
         }.background(ReaderPalette.bar)
+            .onChange(of: reader.lastChapterExport) { _, _ in showsExportOmissions = false }
     }
 }

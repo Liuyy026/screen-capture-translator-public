@@ -196,27 +196,47 @@ struct ReadingPresentation: Identifiable {
 }
 
 enum ReadingLayout {
+    enum Failure {
+        case noRegion, sharedRegion, unfinishedMembers, invalidBackground, invalidStyle, overflow
+
+        var exportExplanation: String {
+            switch self {
+            case .noRegion: return "未找到可安全回填的区域。"
+            case .sharedRegion: return "这处文字与已回填的对白共用区域，无法单独回填。"
+            case .unfinishedMembers: return "同框文字尚未全部就绪，请完成或核对同框对白。"
+            case .invalidBackground: return "背景修补数据无效。"
+            case .invalidStyle: return "同框对白的排版设置无效，请核对字号、间距或位置。"
+            case .overflow: return "译文在当前区域内排不下。可缩小字号、调整间距或缩短译文。"
+            }
+        }
+    }
+
     // All layout measurements stay in the page coordinate system, including for enhanced output.
     static func presentations(page: PageResult, regions: [ReadingRegion],
                               styles: [String: ReadingTextStyle] = [:], sourcePixelScale: Double = 1,
-                              sourceYScale: Double? = nil) -> [ReadingPresentation] {
+                              sourceYScale: Double? = nil,
+                              onFailure: ((ReadingRegion, Failure) -> Void)? = nil) -> [ReadingPresentation] {
         guard sourcePixelScale.isFinite, sourcePixelScale > 0 else { return [] }
         let preferred = max(18, min(36, Double(page.width) * 0.023))
         var used = Set<String>()
         return regions.compactMap { region in
-            guard !region.block_ids.isEmpty, used.isDisjoint(with: region.block_ids),
-                  Set(region.block_ids).count == region.block_ids.count, region.rectangle != nil,
+            func fail(_ reason: Failure) -> ReadingPresentation? {
+                onFailure?(region, reason)
+                return nil
+            }
+            guard !region.block_ids.isEmpty, Set(region.block_ids).count == region.block_ids.count, region.rectangle != nil,
                   region.points.count >= 3,
-                  region.points.allSatisfy({ $0.count == 2 && $0.allSatisfy(\.isFinite) }) else { return nil }
+                  region.points.allSatisfy({ $0.count == 2 && $0.allSatisfy(\.isFinite) }) else { return fail(.noRegion) }
+            guard used.isDisjoint(with: region.block_ids) else { return fail(.sharedRegion) }
             let members = region.block_ids.compactMap { id in page.blocks.first { $0.id == id } }
             guard members.count == region.block_ids.count, members.allSatisfy({
                 !$0.keepsOriginal && !$0.needsOCRReview && $0.source_translation_pending != true && !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.error.isEmpty
-            }) else { return nil }
+            }) else { return fail(.unfinishedMembers) }
             let background = region.decodedBackground
-            guard region.background_png == nil ? region.hasUsableErasePolygons : background != nil else { return nil }
+            guard region.background_png == nil ? region.hasUsableErasePolygons : background != nil else { return fail(.invalidBackground) }
             let text = members.map(\.translation).joined(separator: "\n")
             let sourceStyles = members.map { styles[$0.id] ?? ReadingTextStyle() }
-            guard sourceStyles.allSatisfy(\.isValid) else { return nil }
+            guard sourceStyles.allSatisfy(\.isValid) else { return fail(.invalidStyle) }
             let styles = sourceStyles.map { sourceStyle in
                 var style = sourceStyle
                 style.fontSize = sourceStyle.fontSize.map { $0 * sourcePixelScale }
@@ -229,22 +249,22 @@ enum ReadingLayout {
             var runs: [ReadingRun]
             if styles.contains(where: { $0.textFrame != nil }) {
                 guard let separate = manualRuns(members, styles: styles, region: region, preferred: preferred,
-                                                pageBounds: CGRect(x: 0, y: 0, width: page.width, height: page.height)) else { return nil }
+                                                pageBounds: CGRect(x: 0, y: 0, width: page.width, height: page.height)) else { return fail(.overflow) }
                 runs = separate
             } else if let slots = region.member_slots {
-                guard Set(slots.keys) == Set(region.block_ids) else { return nil }
+                guard Set(slots.keys) == Set(region.block_ids) else { return fail(.noRegion) }
                 runs = []
                 for (member, style) in zip(members, styles) {
-                    guard let slot = memberSlot(for: member.id, region: region),
-                          let layout = arrange(member.translation, region: region, preferred: preferred,
-                                               style: style, slot: slot) else { return nil }
+                    guard let slot = memberSlot(for: member.id, region: region) else { return fail(.noRegion) }
+                    guard let layout = arrange(member.translation, region: region, preferred: preferred,
+                                               style: style, slot: slot) else { return fail(.overflow) }
                     runs.append(ReadingRun(blockIDs: [member.id], layout: layout))
                 }
             } else if styles.dropFirst().allSatisfy({ $0 == styles[0] }) {
-                guard let layout = arrange(text, region: region, preferred: preferred, style: styles[0]) else { return nil }
+                guard let layout = arrange(text, region: region, preferred: preferred, style: styles[0]) else { return fail(.overflow) }
                 runs = [ReadingRun(blockIDs: region.block_ids, layout: layout)]
             } else {
-                guard let separate = separateRuns(members, styles: styles, region: region, preferred: preferred) else { return nil }
+                guard let separate = separateRuns(members, styles: styles, region: region, preferred: preferred) else { return fail(.overflow) }
                 runs = separate
             }
             for index in runs.indices { runs[index].layout.sourcePixelScale = sourcePixelScale }

@@ -133,6 +133,8 @@ docs/                   架构、迁移和验收记录
 
 ## 漫画视觉翻译性能测试
 
+2026 年 11 月的 FH 两册测试覆盖 95 页。固定译文导出时，LaMa 图像进程的峰值从 14.14 GiB 降至 2.60 GiB，最终的 95 张 PNG 逐像素一致。[整册处理与导出实测](docs/fh-benchmark-2026-11-26.md)
+
 在同一台 Mac Studio（M5 Max，64 GB）上，用 Koma v0.22、macOS 27.0.1 和 oMLX 0.7.3 对两款 4-bit 模型做日译中测试。9B 为 `Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-MLX-4bit`，27B 为 `Qwen3.8-27B-Uncensored-MLX-4bit`。测试日期为 2026-11-21。
 
 | 模型 | 发送的图片 | 10 页总耗时 | 单页中位数 | 生成速度（token/秒） | 新版回查交付 / 81 框 | 盲评忠实 / 79 框 |

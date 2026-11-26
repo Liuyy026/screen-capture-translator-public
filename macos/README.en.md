@@ -47,6 +47,8 @@ The source build produces `macos/dist/Koma.app` and uses the bundle identifier `
 
 Open an image folder, configure the provider, endpoint, optional key and model, then process a page or folder. Use the bottom bar to switch between original or enhanced image, text boxes and Chinese rendering. The zoom menu can fit the whole page, and clicking the page number opens chapter thumbnails. The dialogue pane is collapsible. Drag the divider to resize the dialogue pane. Expand **Typesetting** (`排版`) for the selected dialogue to change its font, size and direction. **Reflow page** (`重排本页`) uses saved translations. Unsaved drafts survive dialogue and page switches during the current session. Save edits before retranslating an entry. Batch processing protects saved manual translations.
 
+With pre-enhancement off, chapter processing delivers the first translated page before switching to grouped OCR and translation. Temporary service failures get one automatic retry using the page checkpoint.
+
 Use **Processing settings** (`处理设置`) in the top toolbar to choose enhancement, translation mode, provider and model. **Enhance chapter** applies the current settings to the folder and uses MetalFX when pre-enhancement is off. Changing enhancement settings reuses OCR, translations and manual edits within the selected translation mode. See the [upscaling guide in Chinese](../docs/macos-super-resolution.md).
 
 Open **Page diagnostics** (`本页诊断`) at the bottom to see the image's pixel dimensions and the upscaling, OCR, translation and layout status. Click a flagged dialogue to jump to its editor. The panel can also reveal the local log in Finder.
@@ -71,6 +73,8 @@ Select a dialogue and choose **Keep original bubble** (`保留原框`) in the ed
 4. Set the destination and folder name, then start the export. If the source changes before confirmation, review the updated results. A new installation defaults to Documents and remembers the destination after a successful export.
 
 The app composites existing Chinese layouts onto the enhanced images and saves local PNGs with the original chapter numbers, such as `001.png`, `003.png` and `005.png`. It uses the current enhancement settings, with MetalFX when pre-enhancement is off. Preserved bubbles and areas without usable translations retain the original text. If the folder name is taken, the app adds a number. After export, reveal the folder in Finder from the status bar.
+
+For omitted text, open the export details in the completion window or status bar to see the page, numbered text box and reason.
 
 ## Connections and isolated data
 

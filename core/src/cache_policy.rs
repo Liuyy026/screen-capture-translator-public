@@ -33,7 +33,7 @@ pub struct Manager {
     translations: crate::translation_cache::Store,
     gate: Arc<RwLock<()>>,
     viewed: Mutex<(u64, Vec<File>)>,
-    export_images: Mutex<HashMap<String, File>>,
+    export_images: Mutex<HashMap<String, Option<File>>>,
     serial: AtomicU64,
     last: Mutex<Option<Report>>,
     last_translations: Mutex<Option<Report>>,
@@ -160,17 +160,15 @@ impl Manager {
 
     pub fn pin_export(&self, session: &str, image: &Path) -> Result<()> {
         let mut exports = self.export_images.lock().unwrap();
-        if let Some(pin) = self.pin_image(image)? {
-            ensure!(exports.contains_key(session) || exports.len() < 64, "同时导出的任务过多");
-            exports.insert(session.to_owned(), pin);
-        } else {
-            exports.remove(session);
-        }
+        ensure!(exports.contains_key(session) || exports.len() < 64, "同时导出的任务过多");
+        // An original image needs no cache pin, but its export is still active.
+        exports.insert(session.to_owned(), self.pin_image(image)?);
         Ok(())
     }
 
-    pub fn release_export(&self, session: &str) {
-        self.export_images.lock().unwrap().remove(session);
+    pub fn release_export(&self, session: &str) -> bool {
+        let mut exports = self.export_images.lock().unwrap();
+        exports.remove(session).is_some() && exports.is_empty()
     }
 
     pub fn status(&self) -> serde_json::Value {

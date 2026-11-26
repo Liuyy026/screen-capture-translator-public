@@ -32,6 +32,14 @@ enum ChapterExport {
         case failed(String)
     }
 
+    struct Omission: Encodable, Identifiable {
+        let blockID: String
+        let boxNumber: Int
+        let reason: String
+
+        var id: String { blockID }
+    }
+
     struct Page: Decodable {
         let page: PageResult
         let reply: ReadingOverlayService.Reply
@@ -138,6 +146,14 @@ enum ChapterExport {
     @MainActor static func write(_ input: Page, to url: URL, styles: [String: ReadingTextStyle] = [:],
                                  sourcePixelScale: Double = 1, sourceYScale: Double? = nil,
                                  expectedOriginalDigest: String? = nil) async throws -> Int {
+        let omissions = try await writeWithReport(input, to: url, styles: styles, sourcePixelScale: sourcePixelScale,
+                                                  sourceYScale: sourceYScale, expectedOriginalDigest: expectedOriginalDigest)
+        return omissions.count
+    }
+
+    @MainActor static func writeWithReport(_ input: Page, to url: URL, styles: [String: ReadingTextStyle] = [:],
+                                           sourcePixelScale: Double = 1, sourceYScale: Double? = nil,
+                                           expectedOriginalDigest: String? = nil) async throws -> [Omission] {
         let page = input.page
         guard input.reply.version == 3, page.width > 0, page.height > 0 else {
             throw CocoaError(.fileReadCorruptFile)
@@ -150,31 +166,61 @@ enum ChapterExport {
         // When exporting the original, typography also uses the verified, EXIF-oriented pixels.
         let scale = expectedOriginalDigest == nil ? sourcePixelScale : Double(page.width) / Double(base.width)
         let yScale = expectedOriginalDigest == nil ? sourceYScale : Double(page.height) / Double(base.height)
+        var layoutFailures: [String: ReadingLayout.Failure] = [:]
         let presentations = ReadingLayout.presentations(page: page, regions: input.reply.regions,
-                                                        styles: styles, sourcePixelScale: scale, sourceYScale: yScale)
+                                                       styles: styles, sourcePixelScale: scale, sourceYScale: yScale) { region, failure in
+            for id in region.block_ids where layoutFailures[id] == nil { layoutFailures[id] = failure }
+        }
         let shown = Set(presentations.flatMap(\.region.block_ids))
-        let omitted = page.blocks.filter { block in
-            if !block.keepsOriginal && !shown.contains(block.id)
-                && (block.source_translation_pending == true || (block.ocr_confirmed == true && input.reply.preserved?[block.id] != nil)) {
-                return true
-            }
-            return !block.keepsOriginal && !block.needsOCRReview && block.overlay != "skip" && block.text_kind != "noise"
-                && !shown.contains(block.id) && input.reply.preserved?[block.id] == nil
-                && (block.needsReadingOverlay || !block.error.isEmpty
-                    || block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }.count
-
+        let omissions = page.blocks.enumerated().compactMap { index, block -> Omission? in
+            guard !block.keepsOriginal, !shown.contains(block.id),
+                  let reason = omissionReason(block, preserved: input.reply.preserved?[block.id] != nil,
+                                              layoutFailure: layoutFailures[block.id]) else { return nil }
+            return Omission(blockID: block.id, boxNumber: index + 1, reason: reason)
+        }
         let size = CGSize(width: base.width, height: base.height)
         let layer = presentations.isEmpty ? nil : try renderOverlay(size: size, page: page, presentations: presentations)
+        let protected = omissions.compactMap { outputRectangle(page.blocks[$0.boxNumber - 1].box, page: page, size: size) }
         try await Task.detached(priority: .userInitiated) {
-            let output = try layer.map { try composite($0, over: base) } ?? base
+            let output = try layer.map { try composite($0, over: base, protecting: protected) } ?? base
             guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
                 throw CocoaError(.fileWriteUnknown)
             }
             CGImageDestinationAddImage(destination, output, nil)
             guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
         }.value
-        return omitted
+        return omissions
+    }
+
+    private static func omissionReason(_ block: TextBlock, preserved: Bool, layoutFailure: ReadingLayout.Failure?) -> String? {
+        if block.source_translation_pending == true {
+            return "日文已补充，请核对已有译文或重新翻译。"
+        }
+        if block.ocr_confirmed == true && preserved {
+            return "这处文字无法安全地从底图分离，请核对识别框。"
+        }
+        guard !block.needsOCRReview, block.overlay != "skip", block.text_kind != "noise", !preserved else { return nil }
+        if !block.error.isEmpty { return "这处翻译未成功，请重新翻译或手动填写译文。" }
+        if block.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "这处缺少译文，请补充后再导出。"
+        }
+        guard block.needsReadingOverlay else { return nil }
+        return (layoutFailure ?? .noRegion).exportExplanation
+    }
+
+    private static func outputRectangle(_ box: [Double], page: PageResult, size: CGSize) -> CGRect? {
+        guard box.count == 4, box.allSatisfy(\.isFinite), box[2] > box[0], box[3] > box[1] else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: page.width, height: page.height)
+        let source = CGRect(x: box[0], y: box[1], width: box[2] - box[0], height: box[3] - box[1]).intersection(canvas)
+        guard !source.isEmpty else { return nil }
+        let scaleX = size.width / canvas.width
+        let scaleY = size.height / canvas.height
+        // OCR coordinates start at the top left. The bitmap context starts at the bottom left.
+        let x = floor(source.minX * scaleX)
+        let right = ceil(source.maxX * scaleX)
+        let top = floor(source.minY * scaleY)
+        let bottom = ceil(source.maxY * scaleY)
+        return CGRect(x: x, y: size.height - bottom, width: right - x, height: bottom - top)
     }
 
     private static func decodeImage(at url: URL, expectedDigest: String?) throws -> CGImage {
@@ -227,7 +273,7 @@ enum ChapterExport {
         return result
     }
 
-    private static func composite(_ layer: CGImage, over image: CGImage) throws -> CGImage {
+    private static func composite(_ layer: CGImage, over image: CGImage, protecting boxes: [CGRect]) throws -> CGImage {
         // SwiftUI's working space can shift the colors of the source even outside the overlay.
         let sourceSpace = image.colorSpace
         let colorSpace = sourceSpace?.model == .rgb ? sourceSpace : CGColorSpace(name: CGColorSpace.sRGB)
@@ -243,6 +289,13 @@ enum ChapterExport {
         context.setBlendMode(.copy)
         context.draw(image, in: bounds)
         context.setBlendMode(.normal)
+        // Intersect the complements one at a time so overlapping OCR boxes stay protected.
+        for box in boxes {
+            context.beginPath()
+            context.addRect(bounds)
+            context.addRect(box)
+            context.clip(using: .evenOdd)
+        }
         context.draw(layer, in: bounds)
         guard let result = context.makeImage() else { throw CocoaError(.fileWriteUnknown) }
         return result

@@ -67,7 +67,7 @@ class Server:
 
 
 def comparable(value):
-    if isinstance(value,dict):return {k:comparable(v) for k,v in value.items() if k!='wall_seconds'}
+    if isinstance(value,dict):return {k:comparable(v) for k,v in value.items() if k not in {'wall_seconds','image_encoding'}}
     if isinstance(value,list):return [comparable(v) for v in value]
     if isinstance(value,str) and value.startswith('视觉翻译失败：Expecting value:'):
         return '视觉翻译失败：模型未返回有效 JSON'
@@ -138,6 +138,9 @@ def main():
             actual,prefix=native(request)
             result_page=copy.deepcopy(actual['page'])
             actual_calls=copy.deepcopy(endpoint.calls)
+            if actual['metrics']:
+                assert actual['metrics'][0]['image_encoding'] == {'current_cache_hit': False}
+                assert all('image_encoding' not in row for row in actual['metrics'][1:])
             actual,expected=comparable(actual),comparable(expected)
             prefix.with_suffix('.expected.json').write_text(json.dumps(expected,ensure_ascii=False,indent=2))
             prefix.with_suffix('.actual.json').write_text(json.dumps(actual,ensure_ascii=False,indent=2))

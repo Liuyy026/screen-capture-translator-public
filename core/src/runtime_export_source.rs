@@ -384,7 +384,7 @@ mod tests {
         assert!(runtime.verify_export(&duplicate, "text", &settings, "chapter", confirmed).unwrap_err().is::<PageRevisionChanged>());
         persistence::atomic_json(&cache, &first["page"])?;
         runtime.verify_export(&duplicate, "text", &settings, "chapter", confirmed)?;
-        runtime.release_export("chapter");
+        runtime.release_export("chapter", true).await;
         assert!(runtime.verify_export(&duplicate, "text", &settings, "chapter", confirmed).unwrap_err().is::<PageRevisionChanged>());
         Ok(())
     }

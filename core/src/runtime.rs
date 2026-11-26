@@ -28,7 +28,7 @@ pub struct Runtime{
 }
 
 #[path = "ocr_residency.rs"]
-mod ocr_residency;
+pub(crate) mod ocr_residency;
 
 #[derive(Clone, Copy)]
 pub struct ProcessOptions<'a>{
@@ -218,8 +218,16 @@ impl Runtime{
         Ok(json!({"cache":cache,"page":page,"revision":revision,"layout_image":image}))
     }
 
+    #[cfg(test)]
     pub async fn process_page(&self, source: &Path, settings: &crate::super_resolution::Settings, cache: &Path,
         options: &ProcessOptions<'_>, service: &TranslationService, observer: &mut impl Observer) -> Result<Value> {
+        self.process_page_with_images(source, settings, cache, options, service, observer,
+            &crate::vision_image::EncodingCache::default()).await
+    }
+
+    pub async fn process_page_with_images(&self, source: &Path, settings: &crate::super_resolution::Settings, cache: &Path,
+        options: &ProcessOptions<'_>, service: &TranslationService, observer: &mut impl Observer,
+        image_cache: &crate::vision_image::EncodingCache) -> Result<Value> {
         ensure!(["ocr","translate","both"].contains(&options.operation),"未知处理操作");
         let _guard = self.cache_policy.lock_page(cache).await?;
         let target = if options.block_id.is_some() || options.retry {
@@ -302,8 +310,8 @@ impl Runtime{
             self.translate_with_ocr_policy(options.reuse_ocr && fresh_ocr, async {
                 if array(&page["blocks"]).iter().any(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)) {
                     if options.mode == "vision" {
-                        vision_pipeline::translate(&mut page,&effective,layout_image,options.previous_image,
-                            options.model,service,options.block_id,&mut checkpoints).await?;
+                        vision_pipeline::translate_with_images(&mut page,&effective,layout_image,options.previous_image,
+                            options.model,service,options.block_id,&mut checkpoints,image_cache).await?;
                     } else {
                         translate_pipeline::translate(&mut page,service,&translate_pipeline::Options{
                             model:options.model,unit:options.unit,batch_size:options.batch_size,block_id:options.block_id,image:layout_image},&mut checkpoints).await?;
@@ -328,7 +336,14 @@ impl Runtime{
         let blocks = array(&page["blocks"]);
         let issues = blocks.iter().filter(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)
             && crate::compat::has_translation_issue(b)).count();
-        let mut result = json!({"cache":cache,"blocks":blocks.len(),"issues":issues});
+        let retryable_issues = blocks.iter().filter(|b| translate_pipeline::allowed(b, None)
+            && ["error", "retranslation_error"].iter().filter_map(|key| b[*key].as_str())
+                .any(crate::service::retryable_block_error)).count();
+        let translated_blocks = blocks.iter().filter(|b| !keeps_original(b) && !crate::ocr_review::suppressed(b)
+            && b["overlay"] != "skip" && b["text_kind"] != "noise" && !truth(&b["error"])
+            && (truth(&b["translation"]) || truth(&b["dialogue_translation_complete"]))).count();
+        let mut result = json!({"cache":cache,"blocks":blocks.len(),"issues":issues,
+            "retryable_issues":retryable_issues,"translated_blocks":translated_blocks});
         if let Some(warning) = warning { result["enhancement_warning"] = json!(warning); }
         Ok(result)
     }
@@ -423,9 +438,15 @@ impl Runtime{
         if crate::translation::audit_cache(&mut page, None) { structure::sync(&mut page)?; }
         Ok(json!({"cache":cache,"page":page,"revision":format!("{:x}",Sha256::digest(std::fs::read(&cache)?))}))
     }
-    pub fn release_export(&self, session: &str) {
+    pub async fn release_export(&self, session: &str, render_idle: bool) {
         self.export_transitions.release(session);
-        self.cache_policy.release_export(session);
+        if self.cache_policy.release_export(session) && render_idle {
+            if let Ok(mut models) = self.models.try_lock() {
+                if let Err(error) = models.stop_after_export().await {
+                    eprintln!("导出已结束，回收空闲图像工作进程失败：{error}");
+                }
+            }
+        }
     }
 
     pub async fn maintain_cache(&self) {
@@ -461,6 +482,55 @@ mod tests {
         std::fs::write(&worker, "")?;
         Runtime::new(&root.join("pages"), &root.join("display"), None,
             Path::new("python3"), &worker, root, None)
+    }
+
+    #[tokio::test]
+    async fn last_registered_export_reaps_only_an_idle_image_worker() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let runtime = isolated_runtime(root)?;
+        let image = root.join("original.png");
+        std::fs::write(&image, b"fake model input")?;
+        std::fs::write(root.join("core/python/model_worker.py"), r#"
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[sys.argv.index('--weights') + 1])
+with (root/'starts').open('a') as out: print('start', file=out)
+for line in sys.stdin:
+    req = json.loads(line)
+    stop = req['op'] == 'shutdown'
+    if stop:
+        with (root/'stops').open('a') as out: print('stop', file=out)
+    print(json.dumps({'id': req['id'], 'ok': not (stop and (root/'fail-stop').exists()),
+                      'result': {'protocol': 1}, 'error': 'synthetic stop failure'}), flush=True)
+    if stop: break
+"#)?;
+        let register = |id| runtime.cache_policy.pin_export(id, &image);
+        runtime.models.lock().await.ocr(&image).await?;
+        register("ocr-reserved")?;
+        runtime.release_export("ocr-reserved", true).await;
+        runtime.release_ocr().await?;
+        for id in ["first", "second"] { register(id)?; }
+        for id in ["unknown", "first", "first"] { runtime.release_export(id, true).await; }
+        let busy = runtime.models.lock().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), runtime.release_export("second", true)).await?;
+        drop(busy);
+        runtime.release_export("second", true).await;
+        register("render-busy")?;
+        runtime.release_export("render-busy", false).await;
+        assert!(!root.join("stops").exists());
+        register("last")?;
+        runtime.release_export("last", true).await;
+        assert_eq!(std::fs::read_to_string(root.join("stops"))?.lines().count(), 1);
+        runtime.models.lock().await.ocr(&image).await?;
+        assert_eq!(std::fs::read_to_string(root.join("starts"))?.lines().count(), 2);
+        runtime.release_ocr().await?;
+        std::fs::write(root.join("fail-stop"), b"")?;
+        register("best-effort")?;
+        runtime.release_export("best-effort", true).await;
+        std::fs::remove_file(root.join("fail-stop"))?;
+        runtime.models.lock().await.ocr(&image).await?;
+        assert_eq!(std::fs::read_to_string(root.join("starts"))?.lines().count(), 3);
+        runtime.close().await
     }
 
     #[tokio::test]

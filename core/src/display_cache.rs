@@ -24,7 +24,8 @@ impl Store{
             include_bytes!("preserved_bubbles.rs").as_slice(),
             include_bytes!("ocr_review.rs").as_slice(),include_bytes!("translation.rs").as_slice(),
             include_bytes!("imaging.rs").as_slice(),include_bytes!("display_cache.rs").as_slice(),include_bytes!("compat.rs").as_slice(),
-            include_bytes!("model_images.rs").as_slice(),include_bytes!("../python/model_worker.py").as_slice()]{digest.update(code);}
+            include_bytes!("model_images.rs").as_slice(),include_bytes!("../python/model_worker.py").as_slice(),
+            include_bytes!("../python/lama_inference.py").as_slice()]{digest.update(code);}
         for name in ["comictextdetector.pt","anime-manga-big-lama.pt"]{model_identity(&mut digest,&self.weights.join(name))?;}
         Ok(format!("{:x}",digest.finalize()))
     }

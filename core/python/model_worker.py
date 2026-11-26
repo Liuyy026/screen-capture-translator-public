@@ -103,6 +103,7 @@ class Models:
         import cv2
         import numpy as np
         import torch
+        from lama_inference import BoundedRGBConvolution
         torch.set_num_threads(4)
         if 'lama' not in self.loaded:
             self.loaded['lama'] = torch.jit.load(str(self.weights/'anime-manga-big-lama.pt'), map_location='cpu').eval()
@@ -122,7 +123,7 @@ class Models:
         mask = cv2.copyMakeBorder(mask, 0, (-h) % 8, 0, (-w) % 8, cv2.BORDER_CONSTANT)
         values = torch.from_numpy(rgb.transpose(2, 0, 1).copy()).unsqueeze(0).float()/255
         selection = torch.from_numpy((mask > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0)
-        with torch.inference_mode():
+        with torch.inference_mode(), BoundedRGBConvolution():
             result = self.loaded['lama'](values, selection)[0].permute(1, 2, 0).cpu().numpy()
         result = np.clip(result[:h, :w]*255, 0, 255).astype(np.uint8)
         if factor < 1:
